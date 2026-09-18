@@ -48,6 +48,10 @@ type LinkCache interface {
 }
 
 // ClickRecord 是一次待记录的点击。
+//
+// 它同时是 Stream 的载荷类型：跳转路径用它入队，worker 从 Stream 里解析出同一个
+// 类型、补上 UA 解析结果再落库。刻意不再另立一个「StreamEvent」——两者字段完全
+// 一致，重复定义只会让字段悄悄漂移。
 type ClickRecord struct {
 	// Code 是短码。
 	Code string

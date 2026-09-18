@@ -161,6 +161,20 @@ type LinkCursor struct {
 	Valid bool
 }
 
+// ClickCountWriter 把 Redis 侧的计数增量累加进 PG 基线，实现在 internal/store/postgres。
+// 它是 LinkRepository 的一个窄切片：worker 只需要这一个方法，窄接口让 fake 不必
+// 实现整个仓储。
+type ClickCountWriter interface {
+	// AddClickCount 把增量累加进 PG 基线，返回累加后的值；短码不存在返回 *NotFoundError。
+	AddClickCount(ctx context.Context, code string, delta int64) (int64, error)
+}
+
+// ExpiredLinkSweeper 扫描并失效已到期的短链，实现在 internal/store/postgres。
+type ExpiredLinkSweeper interface {
+	// ExpireDue 把已过期但仍为 active 的链接置为 disabled，返回被处理的短码。
+	ExpireDue(ctx context.Context, now time.Time, limit int) ([]string, error)
+}
+
 // LinkRepository 是短链仓储接口，实现在 internal/store/postgres。
 type LinkRepository interface {
 	// Create 插入一条短链；短码唯一约束冲突时返回 *ConflictError。

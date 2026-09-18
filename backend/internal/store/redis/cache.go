@@ -14,6 +14,14 @@ var (
 	_ domain.ClickRecorder = (*Recorder)(nil)
 )
 
+// Client 一个类型同时满足 worker 需要的三个端口（计数回刷 / 事件流 / 增量读取），
+// 因此 cmd 层可以直接把同一个 *Client 传进 worker.Deps。
+var (
+	_ domain.ClickCounter     = (*Client)(nil)
+	_ domain.ClickStream      = (*Client)(nil)
+	_ domain.ClickDeltaReader = (*Client)(nil)
+)
+
 // Cache 是短码缓存的 Redis 实现。
 type Cache struct {
 	client *Client

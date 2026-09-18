@@ -21,8 +21,6 @@ import (
 
 	"ashen-courier/internal/domain"
 	"ashen-courier/internal/pkg/ua"
-	"ashen-courier/internal/store/postgres"
-	"ashen-courier/internal/store/redis"
 )
 
 // DefaultConfig 的取值，全部可在 cmd/worker 里覆盖。
@@ -58,6 +56,10 @@ type Config struct {
 	// ErrorBackoff 是循环出错后的退避时长，避免故障时打爆日志。
 	ErrorBackoff time.Duration
 }
+
+// dirtyBatchSize 是单轮计数回刷扫描的短码上限。
+// 取 1000 是因为 TakeDelta 是一次 pipeline，批量越大 tick 越容易被拖长。
+const dirtyBatchSize = 1000
 
 // withDefaults 补齐未设置的字段。
 func (c Config) withDefaults() Config {
@@ -107,12 +109,34 @@ type Stats struct {
 	Errors int64
 }
 
+// Deps 是 Worker 的全部依赖，全部是 domain 里的端口。
+//
+// 早先这里直接写死 *postgres.LinkStore / *postgres.ClickStore / *redis.Client，
+// 结果是「计数不丢」这条最关键的逻辑完全无法单测——要跑一次就得先起 PG + Redis。
+// 改成端口后，clicks_test.go 用手写 fake 就能覆盖取走/归还/dirty 的每条分支。
+type Deps struct {
+	// Counts 把计数增量累加进 PG 基线（*postgres.LinkStore 满足）。
+	Counts domain.ClickCountWriter
+	// Sweeper 扫描并失效过期短链（*postgres.LinkStore 满足）。
+	Sweeper domain.ExpiredLinkSweeper
+	// Clicks 批量落库点击明细（*postgres.ClickStore 满足）。
+	Clicks domain.ClickRepository
+	// Counter 是计数增量的原子操作（*redis.Client 满足）。
+	Counter domain.ClickCounter
+	// Stream 是点击事件流的消费端口（*redis.Client 满足）。
+	Stream domain.ClickStream
+	// Cache 用于过期清理后失效短码缓存。
+	Cache domain.LinkCache
+}
+
 // Worker 是点击事件的消费者。
 type Worker struct {
-	links  *postgres.LinkStore
-	clicks *postgres.ClickStore
-	rdb    *redis.Client
-	cache  *redis.Cache
+	counts  domain.ClickCountWriter
+	sweeper domain.ExpiredLinkSweeper
+	clicks  domain.ClickRepository
+	counter domain.ClickCounter
+	stream  domain.ClickStream
+	cache   domain.LinkCache
 
 	cfg Config
 	log *slog.Logger
@@ -128,20 +152,22 @@ type Worker struct {
 }
 
 // New 构造 Worker。
-func New(links *postgres.LinkStore, clicks *postgres.ClickStore, rdb *redis.Client, cfg Config, logger *slog.Logger) *Worker {
+func New(deps Deps, cfg Config, logger *slog.Logger) *Worker {
 	return &Worker{
-		links:  links,
-		clicks: clicks,
-		rdb:    rdb,
-		cache:  redis.NewCache(rdb),
-		cfg:    cfg.withDefaults(),
-		log:    logger,
+		counts:  deps.Counts,
+		sweeper: deps.Sweeper,
+		clicks:  deps.Clicks,
+		counter: deps.Counter,
+		stream:  deps.Stream,
+		cache:   deps.Cache,
+		cfg:     cfg.withDefaults(),
+		log:     logger,
 	}
 }
 
 // Start 启动四个后台循环。
 func (w *Worker) Start(ctx context.Context) {
-	if err := w.rdb.EnsureGroup(ctx); err != nil {
+	if err := w.stream.EnsureGroup(ctx); err != nil {
 		w.errors.Add(1)
 		w.log.Error("创建消费组失败，Stream 消费将无法启动", "err", err)
 	} else {
@@ -175,7 +201,7 @@ func (w *Worker) consumeLoop(ctx context.Context) {
 		"consumer", w.cfg.Consumer, "batch", w.cfg.BatchSize, "block", w.cfg.BlockTimeout)
 
 	for ctx.Err() == nil {
-		result, err := w.rdb.ReadClicks(ctx, w.cfg.Consumer, w.cfg.BatchSize, w.cfg.BlockTimeout)
+		result, err := w.stream.ReadClicks(ctx, w.cfg.Consumer, w.cfg.BatchSize, w.cfg.BlockTimeout)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -194,104 +220,115 @@ func (w *Worker) claimLoop(ctx context.Context) {
 	w.log.Info("已启动 pending 认领循环",
 		"every", w.cfg.ClaimEvery, "min_idle", w.cfg.ClaimMinIdle)
 
-	w.everyFixed(ctx, "claim-pending", w.cfg.ClaimEvery, func(ctx context.Context) error {
-		result, err := w.rdb.AutoClaim(ctx, w.cfg.Consumer, w.cfg.ClaimMinIdle, w.cfg.BatchSize)
-		if err != nil {
-			return err
-		}
-		if len(result.Messages) == 0 && len(result.MalformedIDs) == 0 {
-			return nil
-		}
-		w.claimed.Add(int64(len(result.Messages)))
-		w.log.Warn("认领到滞留的 pending 消息 —— 可能有消费者异常退出",
-			"count", len(result.Messages), "malformed", len(result.MalformedIDs))
-		w.handleBatch(ctx, result, "claim")
+	w.everyFixed(ctx, "claim-pending", w.cfg.ClaimEvery, w.claimPending)
+}
+
+// claimPending 认领一轮滞留的 pending 消息。
+// 从循环里抽成方法（而不是写在闭包里），单测才能直接驱动这一轮逻辑。
+func (w *Worker) claimPending(ctx context.Context) error {
+	result, err := w.stream.AutoClaim(ctx, w.cfg.Consumer, w.cfg.ClaimMinIdle, w.cfg.BatchSize)
+	if err != nil {
+		return err
+	}
+	if len(result.Messages) == 0 && len(result.MalformedIDs) == 0 {
 		return nil
-	})
+	}
+	w.claimed.Add(int64(len(result.Messages)))
+	w.log.Warn("认领到滞留的 pending 消息 —— 可能有消费者异常退出",
+		"count", len(result.Messages), "malformed", len(result.MalformedIDs))
+	w.handleBatch(ctx, result, "claim")
+	return nil
 }
 
 // countSyncLoop 是 B · 计数同步循环。
 func (w *Worker) countSyncLoop(ctx context.Context) {
 	w.log.Info("已启动计数同步循环", "every", w.cfg.CountSyncEvery)
 
-	w.everyFixed(ctx, "sync-count", w.cfg.CountSyncEvery, func(ctx context.Context) error {
-		codes, err := w.rdb.DirtyCodes(ctx, 1000)
-		if err != nil {
-			return err
-		}
-		if len(codes) == 0 {
-			return nil
-		}
+	w.everyFixed(ctx, "sync-count", w.cfg.CountSyncEvery, w.syncCounts)
+}
 
-		synced := 0
-		var retry []string
-		for _, code := range codes {
-			delta, err := w.rdb.TakeDelta(ctx, code)
-			if err != nil {
-				// 取不到增量：把标记放回去，下一轮重试
-				retry = append(retry, code)
-				continue
-			}
-			if delta == 0 {
-				continue
-			}
-			if _, err := w.links.AddClickCount(ctx, code, delta); err != nil {
-				if errors.Is(err, domain.ErrNotFound) {
-					// 短码已被删除，增量无处可去，直接丢弃并告警
-					w.log.Warn("短码已不存在，丢弃待同步的点击增量", "code", code, "delta", delta)
-					continue
-				}
-				// 写库失败：把取走的增量「按值」还回去，下一轮重试。
-				// 注意不能只调 MarkDirty —— TakeDelta 已用 GETDEL 删掉计数键，
-				// 只补标记的话下一轮会读到 0，这批点击就永久丢了。
-				if rerr := w.rdb.RestoreDelta(ctx, code, delta); rerr != nil {
-					// 归还失败：这一批增量确实丢了，必须留明确日志（不是「可能」）
-					w.log.Error("归还点击增量失败，该批增量已丢失",
-						"code", code, "delta", delta, "err", rerr)
-				}
-				continue
-			}
-			synced++
-		}
-
-		if len(retry) > 0 {
-			if err := w.rdb.MarkDirty(ctx, retry...); err != nil {
-				w.log.Error("重新标记 dirty 失败", "err", err)
-			}
-		}
-		if synced > 0 {
-			w.countSynced.Add(int64(synced))
-			w.log.Debug("计数同步完成", "links", synced, "scanned", len(codes))
-		}
+// syncCounts 回刷一轮计数增量。返回 error 只表示「这一轮整体失败」（取不到 dirty 列表），
+// 单个短码的失败都在内部消化：能归还的按值归还，短码已删除的丢弃并告警。
+func (w *Worker) syncCounts(ctx context.Context) error {
+	codes, err := w.counter.DirtyCodes(ctx, dirtyBatchSize)
+	if err != nil {
+		return err
+	}
+	if len(codes) == 0 {
 		return nil
-	})
+	}
+
+	synced := 0
+	var retry []string
+	for _, code := range codes {
+		delta, err := w.counter.TakeDelta(ctx, code)
+		if err != nil {
+			// 取不到增量：把标记放回去，下一轮重试
+			retry = append(retry, code)
+			continue
+		}
+		if delta == 0 {
+			continue
+		}
+		if _, err := w.counts.AddClickCount(ctx, code, delta); err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				// 短码已被删除，增量无处可去，直接丢弃并告警
+				w.log.Warn("短码已不存在，丢弃待同步的点击增量", "code", code, "delta", delta)
+				continue
+			}
+			// 写库失败：把取走的增量「按值」还回去，下一轮重试。
+			// 注意不能只调 MarkDirty —— TakeDelta 已用 GETDEL 删掉计数键，
+			// 只补标记的话下一轮会读到 0，这批点击就永久丢了。
+			if rerr := w.counter.RestoreDelta(ctx, code, delta); rerr != nil {
+				// 归还失败：这一批增量确实丢了，必须留明确日志（不是「可能」）
+				w.log.Error("归还点击增量失败，该批增量已丢失",
+					"code", code, "delta", delta, "err", rerr)
+			}
+			continue
+		}
+		synced++
+	}
+
+	if len(retry) > 0 {
+		if err := w.counter.MarkDirty(ctx, retry...); err != nil {
+			w.log.Error("重新标记 dirty 失败", "err", err)
+		}
+	}
+	if synced > 0 {
+		w.countSynced.Add(int64(synced))
+		w.log.Debug("计数同步完成", "links", synced, "scanned", len(codes))
+	}
+	return nil
 }
 
 // expireLoop 是 D · 过期清理循环。
 func (w *Worker) expireLoop(ctx context.Context) {
 	w.log.Info("已启动过期清理循环", "every", w.cfg.ExpireEvery, "batch", w.cfg.ExpireBatch)
 
-	w.everyFixed(ctx, "expire-links", w.cfg.ExpireEvery, func(ctx context.Context) error {
-		codes, err := w.links.ExpireDue(ctx, time.Now().UTC(), w.cfg.ExpireBatch)
-		if err != nil {
-			return err
-		}
-		if len(codes) == 0 {
-			return nil
-		}
-		if err := w.cache.Evict(ctx, codes...); err != nil {
-			// 缓存失效失败不算致命：缓存 TTL 最多 1 小时，且跳转时会二次校验状态
-			w.log.Warn("过期短链的缓存失效失败，将在 TTL 后自愈", "err", err)
-		}
-		w.expired.Add(int64(len(codes)))
-		w.log.Info("已把过期短链置为 disabled", "count", len(codes))
+	w.everyFixed(ctx, "expire-links", w.cfg.ExpireEvery, w.expireLinks)
+}
+
+// expireLinks 清理一轮过期短链：置为 disabled 后立刻失效缓存。
+func (w *Worker) expireLinks(ctx context.Context) error {
+	codes, err := w.sweeper.ExpireDue(ctx, time.Now().UTC(), w.cfg.ExpireBatch)
+	if err != nil {
+		return err
+	}
+	if len(codes) == 0 {
 		return nil
-	})
+	}
+	if err := w.cache.Evict(ctx, codes...); err != nil {
+		// 缓存失效失败不算致命：缓存 TTL 最多 1 小时，且跳转时会二次校验状态
+		w.log.Warn("过期短链的缓存失效失败，将在 TTL 后自愈", "err", err)
+	}
+	w.expired.Add(int64(len(codes)))
+	w.log.Info("已把过期短链置为 disabled", "count", len(codes))
+	return nil
 }
 
 // handleBatch 落库一批消息并 ACK。
 // source 只用于日志，区分「正常消费」与「认领补投」。
-func (w *Worker) handleBatch(ctx context.Context, result *redis.ReadResult, source string) {
+func (w *Worker) handleBatch(ctx context.Context, result *domain.ReadResult, source string) {
 	if len(result.Messages) == 0 && len(result.MalformedIDs) == 0 {
 		return
 	}
@@ -311,7 +348,7 @@ func (w *Worker) handleBatch(ctx context.Context, result *redis.ReadResult, sour
 				"count", len(events), "source", source, "err", err)
 			return
 		}
-		if err := w.rdb.Ack(ctx, ids...); err != nil {
+		if err := w.stream.Ack(ctx, ids...); err != nil {
 			w.errors.Add(1)
 			w.log.Error("XACK 失败，明细可能被重复投递", "count", len(ids), "err", err)
 			return
@@ -323,7 +360,7 @@ func (w *Worker) handleBatch(ctx context.Context, result *redis.ReadResult, sour
 	if len(result.MalformedIDs) > 0 {
 		w.malformed.Add(int64(len(result.MalformedIDs)))
 		w.log.Warn("丢弃无法解析的点击消息", "count", len(result.MalformedIDs), "ids", result.MalformedIDs)
-		if err := w.rdb.Ack(ctx, result.MalformedIDs...); err != nil {
+		if err := w.stream.Ack(ctx, result.MalformedIDs...); err != nil {
 			w.errors.Add(1)
 			w.log.Error("ACK 脏消息失败", "err", err)
 		}
@@ -356,7 +393,7 @@ func (w *Worker) everyFixed(ctx context.Context, name string, interval time.Dura
 }
 
 // toClickEvent 把 Stream 事件补上 UA 解析结果，转成待落库的明细。
-func toClickEvent(ev redis.StreamEvent) domain.ClickEvent {
+func toClickEvent(ev domain.ClickRecord) domain.ClickEvent {
 	info := ua.Parse(ev.UserAgent)
 	return domain.ClickEvent{
 		LinkID:     ev.LinkID,

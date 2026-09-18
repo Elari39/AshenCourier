@@ -29,36 +29,9 @@ const (
 // 一条脏消息会永远卡在 pending 里，每轮都被重新投递。
 var ErrMalformedEvent = errors.New("malformed click event")
 
-// StreamEvent 是一条待落库的点击事件。
-type StreamEvent struct {
-	// Code 是短码。
-	Code string
-	// LinkID 是短链 UUID，直接来自缓存，避免消费端回表。
-	LinkID uuid.UUID
-	// OccurredAt 是服务端记录的跳转时刻。
-	OccurredAt time.Time
-	// IP / UserAgent / Referer 是原始上下文，解析留给 worker。
-	IP        string
-	UserAgent string
-	Referer   string
-}
-
-// StreamMessage 是一条已解析的 Stream 消息（附带 Stream ID，用于 XACK）。
-type StreamMessage struct {
-	// ID 是 Stream 消息 ID，形如 "1712345678901-0"。
-	ID string
-	// Event 是解析后的事件。
-	Event StreamEvent
-}
-
-// ReadResult 是一次消费的结果。
-// MalformedIDs 里的消息解析失败，但必须一并 ACK，否则会毒化消费组。
-type ReadResult struct {
-	// Messages 是成功解析的消息。
-	Messages []StreamMessage
-	// MalformedIDs 是解析失败的消息 ID。
-	MalformedIDs []string
-}
+// 值类型（domain.ClickRecord / domain.StreamMessage / domain.ReadResult）定义在
+// domain 包：它们是「一次点击」的领域表示，而本包只负责线格式与解析。
+// 这样 worker 依赖的是端口而不是具体实现，也就能用手写 fake 单测。
 
 // xaddArgs 把一条点击记录编码成 XADD 参数。
 //
@@ -94,7 +67,7 @@ func (c *Client) EnsureGroup(ctx context.Context) error {
 
 // ReadClicks 以消费组身份阻塞读取新消息。
 // block 传 0 表示不阻塞（立即返回）。
-func (c *Client) ReadClicks(ctx context.Context, consumer string, count int64, block time.Duration) (*ReadResult, error) {
+func (c *Client) ReadClicks(ctx context.Context, consumer string, count int64, block time.Duration) (*domain.ReadResult, error) {
 	if count <= 0 {
 		count = 500
 	}
@@ -108,7 +81,7 @@ func (c *Client) ReadClicks(ctx context.Context, consumer string, count int64, b
 	}).Result()
 	if err != nil {
 		if isNil(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return &ReadResult{}, nil
+			return &domain.ReadResult{}, nil
 		}
 		return nil, fmt.Errorf("store.redis: xreadgroup: %w", err)
 	}
@@ -130,7 +103,7 @@ func (c *Client) Ack(ctx context.Context, ids ...string) error {
 }
 
 // AutoClaim 认领空闲超过 minIdle 的 pending 消息，防止消费者崩溃后事件永久滞留。
-func (c *Client) AutoClaim(ctx context.Context, consumer string, minIdle time.Duration, count int64) (*ReadResult, error) {
+func (c *Client) AutoClaim(ctx context.Context, consumer string, minIdle time.Duration, count int64) (*domain.ReadResult, error) {
 	if count <= 0 {
 		count = 200
 	}
@@ -144,7 +117,7 @@ func (c *Client) AutoClaim(ctx context.Context, consumer string, minIdle time.Du
 	}).Result()
 	if err != nil {
 		if isNil(err) {
-			return &ReadResult{}, nil
+			return &domain.ReadResult{}, nil
 		}
 		return nil, fmt.Errorf("store.redis: xautoclaim: %w", err)
 	}
@@ -178,9 +151,9 @@ func (c *Client) PendingCount(ctx context.Context) (int64, error) {
 	return info.Count, nil
 }
 
-// parseStreams 把 XReadGroup 的返回值摊平成 ReadResult。
-func parseStreams(streams []goredis.XStream) *ReadResult {
-	out := &ReadResult{}
+// parseStreams 把 XReadGroup 的返回值摊平成 domain.ReadResult。
+func parseStreams(streams []goredis.XStream) *domain.ReadResult {
+	out := &domain.ReadResult{}
 	for _, s := range streams {
 		merged := parseMessages(s.Messages)
 		out.Messages = append(out.Messages, merged.Messages...)
@@ -190,22 +163,22 @@ func parseStreams(streams []goredis.XStream) *ReadResult {
 }
 
 // parseMessages 逐条解析消息；解析失败的只记录 ID，不返回错误。
-func parseMessages(msgs []goredis.XMessage) *ReadResult {
-	out := &ReadResult{}
+func parseMessages(msgs []goredis.XMessage) *domain.ReadResult {
+	out := &domain.ReadResult{}
 	for _, m := range msgs {
 		ev, err := parseMessage(m)
 		if err != nil {
 			out.MalformedIDs = append(out.MalformedIDs, m.ID)
 			continue
 		}
-		out.Messages = append(out.Messages, StreamMessage{ID: m.ID, Event: ev})
+		out.Messages = append(out.Messages, domain.StreamMessage{ID: m.ID, Event: ev})
 	}
 	return out
 }
 
-// parseMessage 把一条 XMessage 转成 StreamEvent。
-func parseMessage(m goredis.XMessage) (StreamEvent, error) {
-	var ev StreamEvent
+// parseMessage 把一条 XMessage 转成 domain.ClickRecord。
+func parseMessage(m goredis.XMessage) (domain.ClickRecord, error) {
+	var ev domain.ClickRecord
 
 	code, ok := stringField(m.Values, fieldCode)
 	if !ok || code == "" {

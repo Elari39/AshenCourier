@@ -119,7 +119,8 @@ func run() error {
 
 	// ---- 领域仓储与 service ----
 	links := pg.Links()
-	shortener := service.NewShortener(links, redis.NewCache(rdb), redis.NewRecorder(rdb), service.ShortenerConfig{
+	cache := redis.NewCache(rdb)
+	shortener := service.NewShortener(links, cache, redis.NewRecorder(rdb), service.ShortenerConfig{
 		BaseURL:     cfg.PublicBaseURL,
 		CacheTTL:    cfg.CacheTTL,
 		NegativeTTL: cfg.NegativeTTL,
@@ -135,7 +136,14 @@ func run() error {
 	// ---- 内嵌 worker（本地开发形态）----
 	var embedded *worker.Worker
 	if cfg.WorkerEnabled {
-		embedded = worker.New(links, pg.Clicks(), rdb, worker.Config{
+		embedded = worker.New(worker.Deps{
+			Counts:  links,
+			Sweeper: links,
+			Clicks:  pg.Clicks(),
+			Counter: rdb,
+			Stream:  rdb,
+			Cache:   cache,
+		}, worker.Config{
 			Consumer: consumerName(),
 		}, logger.With("component", "worker"))
 		embedded.Start(ctx)

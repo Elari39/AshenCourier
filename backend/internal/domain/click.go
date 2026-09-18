@@ -76,6 +76,51 @@ type StatsQuery struct {
 	TopN int
 }
 
+// StreamMessage 是一条已解析的 Stream 消息（附带 Stream ID，用于 XACK）。
+type StreamMessage struct {
+	// ID 是 Stream 消息 ID，形如 "1712345678901-0"。
+	ID string
+	// Event 是解析后的点击。
+	Event ClickRecord
+}
+
+// ReadResult 是一次消费的结果。
+type ReadResult struct {
+	// Messages 是成功解析的消息。
+	Messages []StreamMessage
+	// MalformedIDs 是解析失败的消息 ID。它们必须一并 ACK，否则一条脏消息会永远
+	// 卡在 pending 里，每轮都被重新投递。
+	MalformedIDs []string
+}
+
+// ClickCounter 是计数回刷所需的原子操作，实现在 internal/store/redis。
+//
+// 这组操作是「计数不丢」的全部关键路径：TakeDelta 取走即删，写库失败时必须用
+// RestoreDelta **按值**归还（只补 dirty 标记的话下一轮会读到 0，那批点击就永久丢了）。
+// 抽成端口是为了让 worker 能用手写 fake 单测这些不变量。
+type ClickCounter interface {
+	// DirtyCodes 返回最多 limit 个待回刷的短码。
+	DirtyCodes(ctx context.Context, limit int) ([]string, error)
+	// TakeDelta 原子地取走某短码当前的计数增量（取走即删）；无增量返回 0。
+	TakeDelta(ctx context.Context, code string) (int64, error)
+	// RestoreDelta 把已取走但未能落库的增量按值归还，并重新登记 dirty。
+	RestoreDelta(ctx context.Context, code string, delta int64) error
+	// MarkDirty 把短码重新登记回 dirty 集合。
+	MarkDirty(ctx context.Context, codes ...string) error
+}
+
+// ClickStream 是点击事件流的消费端口，实现在 internal/store/redis。
+type ClickStream interface {
+	// EnsureGroup 幂等地创建消费组。
+	EnsureGroup(ctx context.Context) error
+	// ReadClicks 以消费组身份读取新消息；block 传 0 表示不阻塞。
+	ReadClicks(ctx context.Context, consumer string, count int64, block time.Duration) (*ReadResult, error)
+	// AutoClaim 认领空闲超过 minIdle 的 pending 消息，防止消费者崩溃后事件永久滞留。
+	AutoClaim(ctx context.Context, consumer string, minIdle time.Duration, count int64) (*ReadResult, error)
+	// Ack 确认消息已落库。
+	Ack(ctx context.Context, ids ...string) error
+}
+
 // ClickDeltaReader 读取尚未回刷进 PG 的计数增量，实现在 internal/store/redis。
 //
 // 界面上的「总点击」= links.click_count（PG 基线）+ 这个待同步增量，

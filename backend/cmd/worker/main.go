@@ -126,7 +126,14 @@ func run() error {
 	}()
 	logger.Info("Redis 能力探测完成", "native_increx", rdb.SupportsINCREX())
 
-	wk := worker.New(pg.Links(), pg.Clicks(), rdb, worker.Config{Consumer: consumer}, logger)
+	wk := worker.New(worker.Deps{
+		Counts:  pg.Links(),
+		Sweeper: pg.Links(),
+		Clicks:  pg.Clicks(),
+		Counter: rdb,
+		Stream:  rdb,
+		Cache:   redis.NewCache(rdb),
+	}, worker.Config{Consumer: consumer}, logger)
 	wk.Start(ctx)
 
 	// 定期打点，便于观测消费速率与是否有积压

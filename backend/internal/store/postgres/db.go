@@ -55,11 +55,14 @@ type DB struct {
 	timeout time.Duration
 }
 
-// 编译期断言：三个仓储接口都有对应实现。
+// 编译期断言：三个仓储接口都有对应实现；
+// worker 只依赖后两个窄切片，断言保证放开依赖后仍由同一实现满足。
 var (
-	_ domain.LinkRepository  = (*LinkStore)(nil)
-	_ domain.UserRepository  = (*UserStore)(nil)
-	_ domain.ClickRepository = (*ClickStore)(nil)
+	_ domain.LinkRepository     = (*LinkStore)(nil)
+	_ domain.UserRepository     = (*UserStore)(nil)
+	_ domain.ClickRepository    = (*ClickStore)(nil)
+	_ domain.ClickCountWriter   = (*LinkStore)(nil)
+	_ domain.ExpiredLinkSweeper = (*LinkStore)(nil)
 )
 
 // Open 创建连接池并做一次 Ping 验证；调用方负责在退出时 Close。
