@@ -71,11 +71,13 @@ type HealthReport struct {
 	// WorkerEnabled 表示本进程是否内嵌了 worker。
 	WorkerEnabled bool `json:"worker_enabled"`
 	// 以下为诊断计数，都是「有问题才非零」。
-	DroppedClicks     int64 `json:"dropped_clicks,omitzero"`
-	FailedClicks      int64 `json:"failed_clicks,omitzero"`
-	QueueLen          int   `json:"queue_len,omitzero"`
-	StreamLen         int64 `json:"stream_len,omitzero"`
-	StreamPending     int64 `json:"stream_pending,omitzero"`
+	DroppedClicks int64 `json:"dropped_clicks,omitzero"`
+	FailedClicks  int64 `json:"failed_clicks,omitzero"`
+	QueueLen      int   `json:"queue_len,omitzero"`
+	StreamLen     int64 `json:"stream_len,omitzero"`
+	StreamPending int64 `json:"stream_pending,omitzero"`
+	// PGFallbacks 是短码缓存未命中、真正回源 PG 的累计次数（缓存击穿的观测口径）。
+	PGFallbacks       int64 `json:"pg_fallbacks,omitzero"`
 	RateLimitDegraded int64 `json:"rate_limit_degraded,omitzero"`
 	UptimeSeconds     int64 `json:"uptime_seconds,omitzero"`
 	// RateLimitByNative 表示限流走的是 Redis 8.8+ 原生 INCREX 而非 Lua 回落实现。

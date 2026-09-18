@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"uuid"
@@ -17,7 +19,11 @@ import (
 
 // memCache 是 domain.LinkCache 的内存实现，语义对齐 store/redis.Cache：
 // 正向与负缓存分开存，Evict 同时清两者。
+//
+// 带锁是因为并发用例（singleflight 击穿防护）会同时读写它 ——
+// 生产实现是 Redis，本来就是并发安全的。
 type memCache struct {
+	mu       sync.Mutex
 	positive map[string]*domain.CachedLink
 	missing  map[string]struct{}
 	evicted  []string // 记录被 Evict 过的短码，供断言
@@ -28,6 +34,9 @@ func newMemCache() *memCache {
 }
 
 func (c *memCache) Get(_ context.Context, code string) (*domain.CachedLink, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if entry, ok := c.positive[code]; ok {
 		return entry, nil
 	}
@@ -38,17 +47,26 @@ func (c *memCache) Get(_ context.Context, code string) (*domain.CachedLink, erro
 }
 
 func (c *memCache) Put(_ context.Context, link *domain.CachedLink, _ time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.positive[link.ShortCode] = link
 	delete(c.missing, link.ShortCode)
 	return nil
 }
 
 func (c *memCache) PutMissing(_ context.Context, code string, _ time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.missing[code] = struct{}{}
 	return nil
 }
 
 func (c *memCache) Evict(_ context.Context, codes ...string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	for _, code := range codes {
 		delete(c.positive, code)
 		delete(c.missing, code)
@@ -59,8 +77,10 @@ func (c *memCache) Evict(_ context.Context, codes ...string) error {
 
 // linkRepoFake 按需返回错误，其余全部落进内存 map。
 type linkRepoFake struct {
-	links   map[string]*domain.Link
-	createF func(*domain.Link) error // 可注入失败
+	links map[string]*domain.Link
+	// getByCodeF 非空时接管 GetByCode（并发用例要在这里插入同步点与控制回源次数）。
+	getByCodeF func(ctx context.Context, code string) (*domain.Link, error)
+	createF    func(*domain.Link) error // 可注入失败
 }
 
 func newLinkRepoFake() *linkRepoFake {
@@ -79,7 +99,10 @@ func (r *linkRepoFake) Create(_ context.Context, link *domain.Link) error {
 	return nil
 }
 
-func (r *linkRepoFake) GetByCode(_ context.Context, code string) (*domain.Link, error) {
+func (r *linkRepoFake) GetByCode(ctx context.Context, code string) (*domain.Link, error) {
+	if r.getByCodeF != nil {
+		return r.getByCodeF(ctx, code)
+	}
 	if l, ok := r.links[code]; ok {
 		return l, nil
 	}
@@ -329,6 +352,124 @@ func TestCreateCollisionExhaustionIsRetryable(t *testing.T) {
 // TestNormalizeHostUntouched 补一条与 P1-IPv6 修复的服务层回归：
 // Normalize 之后 host 的 IPv6 方括号必须原样保留（validator 单测已覆盖，
 // 这里守住 service 层的实际调用路径）。
+// TestResolveSingleflightCollapsesConcurrentMisses 守住缓存击穿防护（M3-2）：
+// 同一个短码的 N 个并发 miss 只该回源一次。
+//
+// 负缓存只能挡住「已确认不存在」，挡不住「刚出现的热点」——
+// 热点短链刚发布时这 N 次回源就是 N 次 PG 查询，恰好是最容易被压垮的时刻。
+func TestResolveSingleflightCollapsesConcurrentMisses(t *testing.T) {
+	t.Parallel()
+
+	const (
+		code    = "hot1234"
+		workers = 50
+	)
+
+	var calls atomic.Int64
+	// 用「第一次回源卡住」制造确定的并发窗口：leader 进到回源里之后，
+	// 其余 goroutine 必然已经排在 singleflight 上（而不是在缓存里各查一次）。
+	entered := make(chan struct{})
+	release := make(chan struct{})
+
+	repo := newLinkRepoFake()
+	repo.getByCodeF = func(context.Context, string) (*domain.Link, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return &domain.Link{
+			ID:        uuid.NewV7(),
+			ShortCode: code,
+			TargetURL: "https://example.com/hot",
+			Status:    domain.LinkStatusActive,
+		}, nil
+	}
+	s := newShortenerForTest(repo, newMemCache())
+
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Go(func() {
+			_, errs[i] = s.Resolve(context.Background(), code)
+		})
+	}
+
+	<-entered
+	// 给等待者一点时间真正排到 singleflight 上（即便没排上，它们也会命中缓存写回，
+	// 所以下面「只回源一次」的断言不受影响，这个 sleep 只是让覆盖更确定）
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("第 %d 个并发请求失败：%v", i, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("并发 %d 个请求回源了 %d 次，期望 1 次（singleflight 没生效）", workers, got)
+	}
+	if got := s.PGFallbacks(); got != 1 {
+		t.Fatalf("pg_fallbacks = %d，期望 1（它是击穿的观测口径）", got)
+	}
+}
+
+// TestResolveSingleflightSharesFailure：失败结果也会被共享 —— 一份 404 不该变成
+// N 次回源，而且必须写进负缓存（否则下一波请求又会击穿）。
+func TestResolveSingleflightSharesFailure(t *testing.T) {
+	t.Parallel()
+
+	const (
+		code    = "miss123"
+		workers = 20
+	)
+
+	var calls atomic.Int64
+	entered := make(chan struct{})
+	release := make(chan struct{})
+
+	repo := newLinkRepoFake()
+	repo.getByCodeF = func(context.Context, string) (*domain.Link, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return nil, domain.NotFound("link", code)
+	}
+	cache := newMemCache()
+	s := newShortenerForTest(repo, cache)
+
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Go(func() {
+			_, errs[i] = s.Resolve(context.Background(), code)
+		})
+	}
+
+	<-entered
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("第 %d 个请求的错误 = %v，期望 ErrNotFound（失败结果应被共享）", i, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("并发 %d 个 miss 回源了 %d 次，期望 1 次", workers, got)
+	}
+
+	// 负缓存必须已经写好：再打一次不该回源
+	if _, err := s.Resolve(t.Context(), code); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("第二次请求错误 = %v，期望 ErrNotFound", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("负缓存没生效：回源次数变成了 %d", got)
+	}
+}
+
 func TestNormalizeHostUntouched(t *testing.T) {
 	t.Parallel()
 

@@ -12,6 +12,8 @@ import (
 	"time"
 	"uuid"
 
+	"golang.org/x/sync/singleflight"
+
 	"ashen-courier/internal/domain"
 	"ashen-courier/internal/pkg/shortcode"
 	"ashen-courier/internal/pkg/validator"
@@ -27,6 +29,10 @@ const (
 	writeTimeout = 2 * time.Second
 	// drainTimeout 是优雅关闭时冲刷队列的最长等待。
 	drainTimeout = 5 * time.Second
+	// resolveTimeout 是回源的兜底超时。
+	// store 层每个 PG 调用已经有 op 超时（PG_TIMEOUT，默认 3s），这里只是再兜一层：
+	// 回源用的是 WithoutCancel 派生的 ctx，没有它就没有任何上限。
+	resolveTimeout = 5 * time.Second
 )
 
 // ShortenerConfig 是 Shortener 的构造参数。
@@ -58,6 +64,11 @@ type Shortener struct {
 	droppedClicks atomic.Int64
 	// failedClicks 统计因 Redis 写入失败而丢弃的次数。
 	failedClicks atomic.Int64
+	// pgFallbacks 统计真实的回源次数（= 缓存击穿的观测口径）。
+	pgFallbacks atomic.Int64
+
+	// flight 合并同一短码的并发回源，防止热点短码刚发布时把 PG 打穿。
+	flight singleflight.Group
 
 	wg sync.WaitGroup
 }
@@ -102,6 +113,12 @@ func (s *Shortener) DroppedClicks() int64 { return s.droppedClicks.Load() }
 
 // FailedClicks 返回因写入失败丢弃的点击次数。
 func (s *Shortener) FailedClicks() int64 { return s.failedClicks.Load() }
+
+// PGFallbacks 返回真实的回源次数（缓存未命中且真正打到 PG 的次数）。
+//
+// 它是缓存击穿的观测口径：热点短码刚发布时，这个数字的增长速度直接反映
+// 有多少并发请求被打到了数据库上。
+func (s *Shortener) PGFallbacks() int64 { return s.pgFallbacks.Load() }
 
 // QueueLen 返回当前队列积压长度。
 func (s *Shortener) QueueLen() int { return len(s.queue) }
@@ -243,14 +260,10 @@ func (s *Shortener) Resolve(ctx context.Context, code string) (*domain.Link, err
 		return nil, err
 	}
 	if link == nil {
-		link, err = s.links.GetByCode(ctx, code)
+		link, err = s.resolveFromDB(ctx, code)
 		if err != nil {
-			if errors.Is(err, domain.ErrNotFound) {
-				s.putMissing(ctx, code)
-			}
 			return nil, err
 		}
-		s.putCache(ctx, link)
 	}
 
 	if err := link.Redirectable(time.Now()); err != nil {
@@ -261,6 +274,47 @@ func (s *Shortener) Resolve(ctx context.Context, code string) (*domain.Link, err
 		slog.Error("短链目标地址 scheme 非法，拒绝跳转",
 			"code", code, "target", link.TargetURL, "link_id", link.ID.String())
 		return nil, fmt.Errorf("service.shortener: resolve %q: 目标地址 scheme 非法: %w", code, domain.ErrInternal)
+	}
+	return link, nil
+}
+
+// resolveFromDB 回源数据库，并用 singleflight 合并同一短码的并发回源。
+//
+// 为什么需要它：缓存 miss 时每个请求都会回源一次。负缓存只能挡住「已确认不存在」，
+// 挡不住「刚出现的热点」—— 短链刚发布或被大规模转发时，同一个短码的 N 个并发请求
+// 会打 N 次 PG，而这正是最容易被压垮的时刻。
+//
+// 三个刻意的选择：
+//   - key 就是短码；**不调 Forget**：缓存写失败交给 TTL 自愈，少一条需要推理的路径
+//   - 回源用 WithoutCancel 派生的 ctx：等待者可能先取消，但回源本身不该被某一个请求的
+//     取消打断 —— 否则其余等待者会拿到「context canceled」而不是真实结果
+//   - 失败结果同样会被共享（singleflight 的语义），由负缓存兜住 404，不会形成击穿循环
+func (s *Shortener) resolveFromDB(ctx context.Context, code string) (*domain.Link, error) {
+	v, err, _ := s.flight.Do(code, func() (any, error) {
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolveTimeout)
+		defer cancel()
+
+		s.pgFallbacks.Add(1)
+
+		link, err := s.links.GetByCode(fetchCtx, code)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				s.putMissing(fetchCtx, code)
+			}
+			return nil, err
+		}
+		s.putCache(fetchCtx, link)
+		return link, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	link, ok := v.(*domain.Link)
+	if !ok {
+		// 只有回源函数返回了非 *domain.Link 才可能走到这里；当成内部错误而不是 panic ——
+		// 这里在跳转热路径上，panic 会被 Recover 兜住但会丢掉整次请求。
+		return nil, fmt.Errorf("service.shortener: resolve %q: 回源结果类型异常 %T: %w", code, v, domain.ErrInternal)
 	}
 	return link, nil
 }

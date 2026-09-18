@@ -269,6 +269,7 @@ func (p *healthProbe) Report(ctx context.Context) httpx.HealthReport {
 		DroppedClicks:     p.shortener.DroppedClicks(),
 		FailedClicks:      p.shortener.FailedClicks(),
 		QueueLen:          p.shortener.QueueLen(),
+		PGFallbacks:       p.shortener.PGFallbacks(),
 		RateLimitDegraded: p.limiter.DegradeCount(),
 		RateLimitByNative: p.rdb.SupportsINCREX(),
 		RateLimitDisabled: p.limiter.Disabled(),

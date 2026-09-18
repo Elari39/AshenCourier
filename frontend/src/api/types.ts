@@ -102,6 +102,8 @@ export interface HealthReport {
   queue_len?: number
   stream_len?: number
   stream_pending?: number
+  /** 短码缓存未命中、真正回源 PG 的累计次数（缓存击穿的观测口径）。 */
+  pg_fallbacks?: number
   rate_limit_degraded?: number
   uptime_seconds?: number
   rate_limit_native_increx?: boolean

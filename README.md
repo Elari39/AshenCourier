@@ -112,7 +112,9 @@ Browser ──┬─ /api/*         ─┐
 ### 三条关键设计
 
 1. **跳转不落库**：`GET /{code}` 只做 Redis `GET` + `INCR` + `XADD`，全程无 PostgreSQL 写入。
-   缓存 miss 才回源一次，并把结果回填。
+   缓存 miss 才回源一次，并把结果回填 —— 且同一短码的并发 miss 由 `singleflight`
+   合并成**一次**回源（负缓存只能挡住「已确认不存在」，挡不住「刚出现的热点」）。
+   回源次数在 `/healthz` 的 `pg_fallbacks` 里可见。
 2. **计数最终一致**：详情页与列表页的「总点击」都是 `links.click_count`（PG 基线）
    + `clicks:cnt:{code}`（Redis 待同步增量），**两个口径一致** —— 不会出现「详情有数、列表没数」。
    worker 每 2 秒把增量刷回 PG，正常情况下偏差 < 2 秒。
@@ -364,6 +366,7 @@ docker compose logs backend | grep '"level":"ERROR"'
 | `dropped_clicks` / `failed_clicks` | 统计因队满 / 写失败而丢弃的次数 |
 | `queue_len` | 统计写入队列积压长度 |
 | `stream_len` / `stream_pending` | Stream 长度 / 未 ACK 条数 |
+| `pg_fallbacks` | 短码缓存未命中、**真正回源 PG** 的累计次数（缓存击穿的观测口径：同一个冷短码被 N 个并发请求打过来时，它只该 +1） |
 | `rate_limit_degraded` | 限流器因 Redis 故障降级的累计次数 |
 | `rate_limit_native_increx` | 限流走的是 Redis 8.8+ 原生 `INCREX` 还是 Lua 回落实现 |
 | `rate_limit_disabled` | 限流应急开关是否被打开（`RATE_LIMIT_DISABLED=true`） |
@@ -508,6 +511,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | 迁移往返（M2-1） | `migrate down 1` + `up` 连续两轮无报错；`version` = 2；列与部分唯一索引恢复，之后的新跳转仍写入 `event_uid` | 本机 |
 | **容器级 ⑤**：列表口径 = 基线 + 待同步增量（M2-2） | 停掉 worker 后跳转 4 次：PG 基线仍 `0`、Redis 增量 `4`，而 `GET /api/links` 的 `click_count` = **4**，与详情 `total_clicks` 相等；恢复 worker 后基线刷成 `4`、增量键清空、列表仍为 `4`；把 Redis 停掉时列表仍 **200**（退回纯基线，不 5xx） | 本机 |
 | **容器级 ⑥**：补偿式计数（M3-1） | 停 worker 后跳转 10 次：`clicks:cnt:{code}` = `10`、`clicks:dirty` 含该码、PG 基线 `0`（增量没被「取走」）；启动 worker 后基线 `10`、明细 `10`，**计数键被删除**（不是留一个 0）且 dirty 清空；再压 100 次跳转 → 基线/明细都是 `100`；全库 `base_count <> event_count` 的链接数 = 0，`dropped_clicks` / `failed_clicks` 均为 0 | 本机 |
+| **容器级 ⑦**：缓存击穿防护（M3-2） | 用一个刚创建（缓存已被主动失效）的冷短码，`curl --parallel-immediate` 同时打 **20** 个请求 → 20 个 **302**；`/healthz` 的 `pg_fallbacks` 增量 = **1**（而不是 20）。单测侧：50 个 goroutine 并发 miss + 回源处设屏障，断言仓储只被调用 1 次 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
