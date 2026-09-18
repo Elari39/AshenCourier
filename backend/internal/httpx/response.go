@@ -80,6 +80,8 @@ type HealthReport struct {
 	UptimeSeconds     int64 `json:"uptime_seconds,omitzero"`
 	// RateLimitByNative 表示限流走的是 Redis 8.8+ 原生 INCREX 而非 Lua 回落实现。
 	RateLimitByNative bool `json:"rate_limit_native_increx,omitzero"`
+	// RateLimitDisabled 表示限流的应急开关被打开（RATE_LIMIT_DISABLED=true，全量放行）。
+	RateLimitDisabled bool `json:"rate_limit_disabled,omitzero"`
 	// ConsumedClicks / WorkerErrors 仅在内嵌 worker 时有值。
 	ConsumedClicks int64 `json:"consumed_clicks,omitzero"`
 	WorkerErrors   int64 `json:"worker_errors,omitzero"`

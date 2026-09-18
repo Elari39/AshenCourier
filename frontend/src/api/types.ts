@@ -105,6 +105,8 @@ export interface HealthReport {
   rate_limit_degraded?: number
   uptime_seconds?: number
   rate_limit_native_increx?: boolean
+  /** 限流应急开关是否被打开（RATE_LIMIT_DISABLED=true，全量放行）。 */
+  rate_limit_disabled?: boolean
   consumed_clicks?: number
   worker_errors?: number
   errors?: string[]

@@ -22,7 +22,8 @@ type RateDecision struct {
 type RateLimiter interface {
 	// Allow 判定 key 在 window 窗口内是否还有 limit 的配额。
 	Allow(ctx context.Context, key string, limit int, window time.Duration) (RateDecision, error)
-	// Disabled 返回是否处于全量放行（应急开关）。
+	// Disabled 返回是否处于全量放行。应急开关由环境变量 RATE_LIMIT_DISABLED
+	// 在启动时打开（cmd/api 调 Disable），并经 /healthz 暴露，便于确认它真的生效了。
 	Disabled() bool
 	// DegradeCount 返回因 Redis 故障降级的累计次数。
 	DegradeCount() int64

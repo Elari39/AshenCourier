@@ -128,6 +128,38 @@ func TestBoolEnvSpellings(t *testing.T) {
 	}
 }
 
+// TestLoadRateLimitDisabled 守住限流应急开关真的能从环境变量装载。
+// 这个开关在 store/redis 与 domain 里一直存在，但过去没有任何触发路径：
+// Disable/Enable/Disabled 三个方法全仓零调用，是「文档里有、实际做不到」的死能力。
+func TestLoadRateLimitDisabled(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"未设置时默认关闭", "", false},
+		{"true 打开", "true", true},
+		{"yes 也打开", "yes", true},
+		{"false 关闭", "false", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("JWT_SECRET", validSecret)
+			t.Setenv("RATE_LIMIT_DISABLED", tc.raw)
+
+			cfg, err := LoadFor(RoleAPI)
+			if err != nil {
+				t.Fatalf("装载配置失败：%v", err)
+			}
+			if cfg.RateLimitDisabled != tc.want {
+				t.Fatalf("RateLimitDisabled = %v, want %v", cfg.RateLimitDisabled, tc.want)
+			}
+		})
+	}
+}
+
 // TestBoolEnvFallbackAndReject 未设置时用默认值；真垃圾值必须报错而不是静默当成 false。
 func TestBoolEnvFallbackAndReject(t *testing.T) {
 	t.Run("未设置取默认值", func(t *testing.T) {

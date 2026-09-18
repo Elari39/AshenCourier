@@ -29,7 +29,8 @@ return n
 // 由 /healthz 暴露出来。宁可短暂失去限流，也不让整站 5xx。
 type Limiter struct {
 	client *Client
-	// disabled 为 true 时全量放行（人工应急开关）。
+	// disabled 为 true 时全量放行。由 RATE_LIMIT_DISABLED 在启动时打开，
+	// 并通过 /healthz 的 rate_limit_disabled 暴露出来。
 	disabled atomic.Bool
 	// degradeCount 统计因 Redis 故障而降级的次数。
 	degradeCount atomic.Int64
@@ -68,9 +69,6 @@ func (l *Limiter) Allow(ctx context.Context, key string, limit int, window time.
 // Disable 打开应急开关，全量放行。
 func (l *Limiter) Disable() { l.disabled.Store(true) }
 
-// Enable 关闭应急开关。
-func (l *Limiter) Enable() { l.disabled.Store(false) }
-
 // Disabled 返回当前是否处于全量放行。
 func (l *Limiter) Disabled() bool { return l.disabled.Load() }
 
@@ -91,7 +89,9 @@ func (l *Limiter) incr(ctx context.Context, key string, window time.Duration) (i
 	if l.client.increx {
 		// INCREX key BYINT 1 PX <window> ENX
 		//   ENX = 仅当键当前没有 TTL 时才设置过期 → 恰好是「固定窗口」语义
-		// 返回 [新值, 是否已带 TTL]
+		// 回复是 [新值, 本次实际生效的增量]，**不是**「是否已带 TTL」——
+		// 见 https://redis.io/docs/latest/commands/increx/ ；这里只取第一个元素，
+		// 增量恒为 1，第二个元素没有信息量。
 		vals, err := l.client.rdb.Do(opCtx, "INCREX", key, "BYINT", 1, "PX", millis, "ENX").Int64Slice()
 		if err == nil && len(vals) > 0 {
 			return vals[0], nil

@@ -116,9 +116,6 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
-// Raw 暴露底层客户端，仅供 worker 做少量高级操作（如 XAUTOCLAIM 的定制参数）。
-func (c *Client) Raw() *goredis.Client { return c.rdb }
-
 // SupportsINCREX 表示服务端是否原生支持 INCREX。
 func (c *Client) SupportsINCREX() bool { return c.increx }
 

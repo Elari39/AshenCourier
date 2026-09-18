@@ -128,6 +128,12 @@ func run() error {
 	authSvc := service.NewAuth(pg.Users(), cfg.JWTSecret, cfg.JWTExpiry)
 	statsSvc := service.NewStats(links, pg.Clicks(), rdb)
 	limiter := redis.NewLimiter(rdb)
+	// 限流应急开关：打开后全量放行。刻意做成启动期开关而不是运行期端点 ——
+	// 它只在限流组件本身出问题时用，重启一次完全可接受。
+	if cfg.RateLimitDisabled {
+		limiter.Disable()
+		logger.Warn("限流应急开关已打开（RATE_LIMIT_DISABLED=true），本次启动全量放行")
+	}
 
 	// 统计写入协程：独立于请求生命周期，关闭时会把队列冲完
 	shortener.Start(ctx)
@@ -252,6 +258,7 @@ func (p *healthProbe) Report(ctx context.Context) httpx.HealthReport {
 		QueueLen:          p.shortener.QueueLen(),
 		RateLimitDegraded: p.limiter.DegradeCount(),
 		RateLimitByNative: p.rdb.SupportsINCREX(),
+		RateLimitDisabled: p.limiter.Disabled(),
 		UptimeSeconds:     int64(time.Since(p.startedAt).Seconds()),
 	}
 

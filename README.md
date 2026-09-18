@@ -302,6 +302,7 @@ pnpm lint && pnpm build
 | `REDIS_DB` | `0` | 逻辑库编号 |
 | `WORKER_ENABLED` | `false` | `true` 时 api 进程内嵌同一套 worker 循环（本地开发用） |
 | `TRUST_PROXY` | `true` | 从 `X-Real-IP` 取客户端 IP；**不**信任 `X-Forwarded-For` |
+| `RATE_LIMIT_DISABLED` | `false` | `true` 时启动即全量放行（限流应急开关），状态见 `/healthz` 的 `rate_limit_disabled` |
 
 ### 前端（可选）
 
@@ -348,6 +349,7 @@ docker compose logs backend | grep '"level":"ERROR"'
 | `stream_len` / `stream_pending` | Stream 长度 / 未 ACK 条数 |
 | `rate_limit_degraded` | 限流器因 Redis 故障降级的累计次数 |
 | `rate_limit_native_increx` | 限流走的是 Redis 8.8+ 原生 `INCREX` 还是 Lua 回落实现 |
+| `rate_limit_disabled` | 限流应急开关是否被打开（`RATE_LIMIT_DISABLED=true`） |
 
 ## 五条踩过的坑
 

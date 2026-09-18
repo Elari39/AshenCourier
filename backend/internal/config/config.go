@@ -87,6 +87,9 @@ type Config struct {
 	RateLimitRedirectPerMin int
 	// RateLimitStatsPerMin 是统计接口的每 IP×短码 每分钟配额。
 	RateLimitStatsPerMin int
+	// RateLimitDisabled 为 true 时启动即打开限流的应急开关（全量放行）。
+	// 宁可短暂失去限流，也不让限流组件把整站挡在门外。
+	RateLimitDisabled bool
 }
 
 // Role 标识进程角色，决定哪些配置项是必需的。
@@ -144,6 +147,9 @@ func LoadFor(role Role) (*Config, error) {
 		errs = append(errs, err)
 	}
 	if cfg.TrustProxy, err = boolEnv("TRUST_PROXY", true); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.RateLimitDisabled, err = boolEnv("RATE_LIMIT_DISABLED", false); err != nil {
 		errs = append(errs, err)
 	}
 	cfg.LogLevel = levelEnv("LOG_LEVEL")
