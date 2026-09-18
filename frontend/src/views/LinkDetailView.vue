@@ -1,0 +1,372 @@
+<script setup lang="ts">
+/**
+ * 链接详情 + 统计。
+ *
+ * 鉴权：登录用户用自己的账号，匿名创建者用 localStorage 里的 manage_key。
+ * 后端对「无权限」和「不存在」都回 404，所以这里只需要处理一种失败态。
+ */
+import { computed, onMounted, ref, watch } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+
+import { ApiError, linksApi } from '@/api/client'
+import type { Link, Stats } from '@/api/types'
+import DistributionList from '@/components/DistributionList.vue'
+import StatCard from '@/components/StatCard.vue'
+import TrendChart from '@/components/TrendChart.vue'
+import Button from '@/components/ui/Button.vue'
+import Card from '@/components/ui/Card.vue'
+import EmptyState from '@/components/ui/EmptyState.vue'
+import Input from '@/components/ui/Input.vue'
+import Spinner from '@/components/ui/Spinner.vue'
+import { useAuth } from '@/composables/useAuth'
+import { useCopy } from '@/composables/useCopy'
+import { useToast } from '@/composables/useToast'
+import type { DistributionItem } from '@/types/ui'
+import {
+  describeDevice,
+  describeExpiry,
+  describeReferer,
+  describeStatus,
+  formatDateTime,
+  formatNumber,
+} from '@/utils/format'
+
+const route = useRoute()
+const router = useRouter()
+const toast = useToast()
+const { isAuthenticated, manageKeyFor, forgetManageKey } = useAuth()
+const { copied, copy } = useCopy()
+
+/** 路由参数可能是 string | string[]，这里收敛成 string。 */
+const code = computed(() => {
+  const raw = route.params.code
+  return Array.isArray(raw) ? (raw[0] ?? '') : (raw ?? '')
+})
+
+const link = ref<Link | null>(null)
+const stats = ref<Stats | null>(null)
+const loading = ref(true)
+const notFound = ref(false)
+const loadError = ref('')
+
+const statsDays = ref(30)
+const loadingStats = ref(false)
+
+// 编辑表单
+const editOpen = ref(false)
+const editTitle = ref('')
+const editTarget = ref('')
+const editStatus = ref<'active' | 'disabled'>('active')
+const saving = ref(false)
+const editError = ref('')
+
+const deleting = ref(false)
+const claiming = ref(false)
+
+/** 当前短码对应的匿名管理密钥（登录用户可能是空）。 */
+const manageKey = computed(() => manageKeyFor(code.value) ?? null)
+
+/** 统计卡片：窗口内的点击数由 daily 求和得到，口径与后端一致。 */
+const windowClicks = computed(() => stats.value?.window_clicks ?? 0)
+const dailyAverage = computed(() => {
+  const days = stats.value?.days ?? 0
+  return days > 0 ? Math.round(windowClicks.value / days) : 0
+})
+const peakDay = computed(() => {
+  const points = stats.value?.daily ?? []
+  return points.reduce(
+    (best, point) => (point.clicks > best.clicks ? point : best),
+    { date: '', clicks: 0 },
+  )
+})
+
+const refererItems = computed<DistributionItem[]>(() =>
+  (stats.value?.top_referers ?? []).map((item) => ({
+    label: describeReferer(item.referer),
+    value: item.clicks,
+  })),
+)
+const deviceItems = computed<DistributionItem[]>(() =>
+  (stats.value?.devices ?? []).map((item) => ({
+    label: describeDevice(item.device),
+    value: item.clicks,
+  })),
+)
+const browserItems = computed<DistributionItem[]>(() =>
+  (stats.value?.browsers ?? []).map((item) => ({ label: item.browser, value: item.clicks })),
+)
+
+/** 是否是「匿名创建且我有密钥」——只有这种状态才提示可认领。 */
+const canClaim = computed(
+  () => isAuthenticated.value && link.value?.anonymous === true && manageKey.value !== null,
+)
+
+async function loadLink(): Promise<void> {
+  loading.value = true
+  notFound.value = false
+  loadError.value = ''
+
+  try {
+    link.value = await linksApi.get(code.value, manageKey.value)
+    editTitle.value = link.value.title ?? ''
+    editTarget.value = link.value.target_url
+    editStatus.value = link.value.status === 'disabled' ? 'disabled' : 'active'
+  } catch (cause) {
+    if (cause instanceof ApiError && cause.status === 404) {
+      notFound.value = true
+    } else {
+      loadError.value = cause instanceof ApiError ? cause.friendly : '加载失败，请稍后重试'
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadStats(): Promise<void> {
+  if (!link.value) return
+  loadingStats.value = true
+  try {
+    stats.value = await linksApi.stats(code.value, statsDays.value, manageKey.value)
+  } catch (cause) {
+    toast.error(cause instanceof ApiError ? cause.friendly : '统计加载失败')
+  } finally {
+    loadingStats.value = false
+  }
+}
+
+async function saveEdit(): Promise<void> {
+  if (!link.value) return
+
+  saving.value = true
+  editError.value = ''
+  try {
+    const updated = await linksApi.update(
+      code.value,
+      {
+        title: editTitle.value.trim(),
+        target_url: editTarget.value.trim(),
+        status: editStatus.value,
+      },
+      manageKey.value,
+    )
+    link.value = updated
+    editOpen.value = false
+    toast.success('已保存')
+  } catch (cause) {
+    editError.value = cause instanceof ApiError ? cause.friendly : '保存失败，请稍后重试'
+  } finally {
+    saving.value = false
+  }
+}
+
+async function clearExpiry(): Promise<void> {
+  if (!link.value) return
+  try {
+    link.value = await linksApi.update(code.value, { clear_expires: true }, manageKey.value)
+    toast.success('已改为永久有效')
+  } catch (cause) {
+    toast.error(cause instanceof ApiError ? cause.friendly : '操作失败')
+  }
+}
+
+async function handleDelete(): Promise<void> {
+  if (!link.value) return
+  if (!window.confirm(`确定要删除 /${code.value} 吗？删除后短链立即失效。`)) return
+
+  deleting.value = true
+  try {
+    await linksApi.remove(code.value, manageKey.value)
+    toast.success('已删除')
+    await router.push({ name: 'dashboard' })
+  } catch (cause) {
+    toast.error(cause instanceof ApiError ? cause.friendly : '删除失败，请稍后重试')
+  } finally {
+    deleting.value = false
+  }
+}
+
+async function handleClaim(): Promise<void> {
+  const key = manageKey.value
+  if (!key) return
+
+  claiming.value = true
+  try {
+    link.value = await linksApi.claim(code.value, key)
+    // 认领成功后后端会清空 key_hash，本地密钥就没用了
+    forgetManageKey(code.value)
+    toast.success('已认领到你的账号下')
+  } catch (cause) {
+    toast.error(cause instanceof ApiError ? cause.friendly : '认领失败，请稍后重试')
+  } finally {
+    claiming.value = false
+  }
+}
+
+async function copyShortURL(): Promise<void> {
+  if (!link.value) return
+  const ok = await copy(link.value.short_url)
+  if (ok) {
+    toast.success('短链已复制')
+  } else {
+    toast.error('复制失败，请手动选中复制')
+  }
+}
+
+// 切换统计窗口时只重拉统计，不动详情
+watch(statsDays, () => void loadStats())
+
+onMounted(async () => {
+  await loadLink()
+  if (link.value) {
+    await loadStats()
+  }
+})
+</script>
+
+<template>
+  <div class="bg-canvas py-12 md:py-16">
+    <div class="container-page">
+      <!-- 加载中 -->
+      <Spinner v-if="loading" :size="18">正在加载…</Spinner>
+
+      <!-- 404：无权限与不存在在后端是同一个响应，这里也不做区分 -->
+      <Card v-else-if="notFound" class="p-8">
+        <EmptyState
+          title="找不到这条短链"
+          description="它可能已被删除；也可能是你换了浏览器或清了缓存，导致匿名管理密钥丢失。"
+        >
+          <Button :to="{ name: 'landing' }" variant="primary">回首页创建新短链</Button>
+        </EmptyState>
+      </Card>
+
+      <p v-else-if="loadError" class="text-[14px] text-error">{{ loadError }}</p>
+
+      <template v-else-if="link">
+        <!-- 页头 -->
+        <div class="flex flex-wrap items-start justify-between gap-6">
+          <div class="min-w-0">
+            <p class="eyebrow">Link detail</p>
+            <h1 class="display-lg mt-3 break-anywhere font-mono text-[32px] md:text-[40px]">
+              /{{ link.short_code }}
+            </h1>
+            <p v-if="link.title" class="mt-2 text-[16px] text-body">{{ link.title }}</p>
+            <p class="mt-3 break-anywhere font-mono text-[13px] text-muted">{{ link.target_url }}</p>
+            <div class="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px] text-muted">
+              <span>{{ describeStatus(link.status).label }}</span>
+              <span>{{ describeExpiry(link.expires_at) }}</span>
+              <span>创建于 {{ formatDateTime(link.created_at) }}</span>
+              <span v-if="link.anonymous">匿名创建</span>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" @click="copyShortURL">{{ copied ? '已复制' : '复制短链' }}</Button>
+            <Button variant="secondary" :href="link.short_url">打开</Button>
+            <Button variant="secondary" @click="editOpen = !editOpen">
+              {{ editOpen ? '取消编辑' : '编辑' }}
+            </Button>
+            <Button variant="danger" :loading="deleting" @click="handleDelete">删除</Button>
+          </div>
+        </div>
+
+        <!-- 认领提示（珊瑚 callout：全站少数几个允许珊瑚满铺的位置） -->
+        <div v-if="canClaim" class="card-coral mt-8 flex flex-col items-start justify-between gap-5 md:flex-row md:items-center">
+          <div>
+            <p class="title-md text-on-primary">这条短链还是匿名状态</p>
+            <p class="mt-2 max-w-2xl text-[14px] leading-[1.55] text-on-primary/85">
+              你的浏览器里存着它的管理密钥。认领之后它就归属你的账号，换设备登录也能管理。
+            </p>
+          </div>
+          <Button variant="secondary" :loading="claiming" class="shrink-0" @click="handleClaim">
+            认领到我的账号
+          </Button>
+        </div>
+
+        <!-- 编辑面板 -->
+        <Card v-if="editOpen" class="mt-6 p-6 md:p-8">
+          <p class="title-md">修改短链</p>
+          <div class="mt-5 grid gap-4 md:grid-cols-2">
+            <Input v-model="editTarget" label="目标地址" placeholder="https://example.com/new" />
+            <Input v-model="editTitle" label="标题" placeholder="给这条链接起个名字" :maxlength="200" />
+            <div>
+              <label class="field-label" for="detail-status">状态</label>
+              <select id="detail-status" v-model="editStatus" class="text-input">
+                <option value="active">正常</option>
+                <option value="disabled">停用（跳转返回 410）</option>
+              </select>
+            </div>
+            <div class="flex items-end">
+              <Button variant="secondary" @click="clearExpiry">改为永久有效</Button>
+            </div>
+          </div>
+          <p v-if="editError" class="mt-3 text-[13px] text-error">{{ editError }}</p>
+          <div class="mt-5 flex items-center gap-3">
+            <Button :loading="saving" @click="saveEdit">保存</Button>
+            <Button variant="text" @click="editOpen = false">取消</Button>
+          </div>
+          <p class="mt-3 text-[13px] text-muted">
+            保存后后端会主动失效该短码的缓存，改动立即可见。
+          </p>
+        </Card>
+
+        <!-- 统计指标卡 -->
+        <div class="mt-8 grid gap-4 sm:grid-cols-3">
+          <StatCard label="总点击" :value="stats?.total_clicks ?? link.click_count" hint="全部时间" />
+          <StatCard label="窗口内点击" :value="windowClicks" :hint="`最近 ${stats?.days ?? statsDays} 天`" />
+          <StatCard label="日均" :value="dailyAverage" :hint="`最近 ${stats?.days ?? statsDays} 天平均`" />
+        </div>
+
+        <!-- 趋势图 -->
+        <Card class="mt-6 p-6 md:p-8">
+          <div class="flex flex-wrap items-center justify-between gap-4">
+            <p class="eyebrow">Trend</p>
+            <div class="flex items-center gap-1">
+              <button
+                v-for="option in [7, 30, 90]"
+                :key="option"
+                type="button"
+                class="rounded-md px-3.5 py-2 text-[14px] font-medium"
+                :class="statsDays === option ? 'bg-surface-card text-ink' : 'text-muted'"
+                @click="statsDays = option"
+              >
+                {{ option }} 天
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-2">
+            <Spinner v-if="loadingStats" :size="16">正在更新…</Spinner>
+            <template v-else-if="stats">
+              <TrendChart :points="stats.daily" />
+              <p v-if="peakDay.clicks > 0" class="mt-3 text-[13px] text-muted">
+                峰值出现在 {{ peakDay.date }}，共 {{ formatNumber(peakDay.clicks) }} 次点击。
+              </p>
+            </template>
+          </div>
+        </Card>
+
+        <!-- 三个分布（同一奶油卡片内并排，维度少不需要拆卡） -->
+        <Card class="mt-6 p-6 md:p-8">
+          <p class="eyebrow">Distribution</p>
+          <div class="mt-6 grid gap-10 md:grid-cols-3">
+            <DistributionList
+              title="来源"
+              :items="refererItems"
+              empty-description="Referer 为空的访问会归入「直接访问」。"
+            />
+            <DistributionList title="设备" :items="deviceItems" />
+            <DistributionList title="浏览器" :items="browserItems" />
+          </div>
+        </Card>
+
+        <p class="mt-6 text-[13px] text-muted">
+          数字口径：总点击 = 数据库基线 + 待同步增量（worker 每 2 秒回刷）；分布与趋势基于点击明细表。
+        </p>
+
+        <p class="mt-8">
+          <RouterLink :to="{ name: 'dashboard' }" class="text-link">← 返回我的链接</RouterLink>
+        </p>
+      </template>
+    </div>
+  </div>
+</template>

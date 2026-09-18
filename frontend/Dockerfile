@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+# ============================================================
+# AshenCourier 前端镜像：Vite 构建 → nginx 托管静态产物
+#
+# ⚠️ 构建上下文是「仓库根目录」，不是 frontend/ 本身。
+#    因为镜像既要 frontend/ 的源码，也要 deploy/nginx/nginx.conf。
+#    单独构建请用：
+#      docker build -f frontend/Dockerfile -t ashen-courier-frontend .
+#    （compose 里已经这么配好了，直接 docker compose up 即可）
+# ============================================================
+
+# ---------- 阶段 1：构建 ----------
+FROM node:22-alpine AS build
+WORKDIR /app
+
+# corepack 会按 package.json 的 packageManager 字段锁定 pnpm 版本；
+# 关掉下载确认提示，否则 CI 里会因为等待交互而卡住
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable
+
+# 先只拷依赖清单与 .npmrc：源码改动不会让依赖层失效，
+# 同时让容器内的 pnpm 用与本地同一个 registry（镜像源在 .npmrc 里实测选过）
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/.npmrc ./
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile
+
+# 再拷源码并构建
+COPY frontend/ ./
+RUN pnpm build
+
+# ---------- 阶段 2：运行时 ----------
+FROM nginx:alpine AS runtime
+
+# 用仓库里的 nginx.conf 整体覆盖默认配置：
+# 反代 /api、短码正则 → backend，/assets 优先于短码正则，其余走 SPA fallback
+COPY deploy/nginx/nginx.conf /etc/nginx/nginx.conf
+
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

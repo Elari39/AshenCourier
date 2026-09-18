@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- 品牌标记：4 辐放射星（DESIGN.md 的 spike-mark 形态），珊瑚色 -->
+  <rect width="32" height="32" rx="7" fill="#faf9f5" />
+  <g fill="#cc785c">
+    <path d="M16 5.5l1.65 8.85L26.5 16l-8.85 1.65L16 26.5l-1.65-8.85L5.5 16l8.85-1.65z" />
+  </g>
+  <circle cx="16" cy="16" r="2.6" fill="#181715" />
+</svg>

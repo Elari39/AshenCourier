@@ -1,0 +1,513 @@
+@import 'tailwindcss';
+
+/* ============================================================================
+ * AshenCourier 设计系统 —— 全部 token 直接映射自仓库根目录的 DESIGN.md
+ * （Claude 暖奶油画布 + 珊瑚主色 + 深色产品面板 + 衬线大标题）
+ *
+ * 五条不可破的规则（改本文件前请先读一遍）：
+ *  1. 画布永远是暖奶油 #faf9f5，不用纯白、不用冷灰
+ *  2. 大标题一律衬线 font-display、字重 400、负字距；正文 Inter 400
+ *  3. 珊瑚色只用于主 CTA 与整块珊瑚 callout，不做局部装饰色；不引入第四个色系
+ *  4. 相邻区块不复用同一 surface 模式：奶油 → 奶油卡片 → 深色 mockup → 珊瑚 callout → 深色 footer
+ *  5. 圆角层级：按钮/输入 md(8px) · 内容卡片 lg(12px) · hero 容器 xl(16px) · 徽章 pill
+ *     交互态只有 default / active 两态，不做花哨 hover 动画
+ * ==========================================================================*/
+
+@theme {
+  /* ---- 品牌与强调色 ---- */
+  --color-primary: #cc785c;
+  --color-primary-active: #a9583e;
+  --color-primary-disabled: #e6dfd8;
+  --color-accent-teal: #5db8a6;
+  --color-accent-amber: #e8a55a;
+
+  /* ---- 表面 ---- */
+  --color-canvas: #faf9f5;
+  --color-surface-soft: #f5f0e8;
+  --color-surface-card: #efe9de;
+  --color-surface-cream-strong: #e8e0d2;
+  --color-surface-dark: #181715;
+  --color-surface-dark-elevated: #252320;
+  --color-surface-dark-soft: #1f1e1b;
+
+  /* ---- 描边 ---- */
+  --color-hairline: #e6dfd8;
+  --color-hairline-soft: #ebe6df;
+
+  /* ---- 文字 ---- */
+  --color-ink: #141413;
+  --color-body: #3d3d3a;
+  --color-body-strong: #252523;
+  --color-muted: #6c6a64;
+  --color-muted-soft: #8e8b82;
+  --color-on-primary: #ffffff;
+  --color-on-dark: #faf9f5;
+  --color-on-dark-soft: #a09d96;
+
+  /* ---- 语义色 ---- */
+  --color-success: #5db872;
+  --color-warning: #d4a017;
+  --color-error: #c64545;
+
+  /* ---- 字体 ----
+   * Copernicus / StyreneB 是 Anthropic 授权字体。按 DESIGN.md 的说明：
+   * 衬线用 Cormorant Garamond 近似（字重 500 + 负字距），无衬线用 Inter。
+   * 字体文件由 @fontsource 打进产物 —— 离线可用，不依赖任何 CDN。
+   */
+  --font-display: 'Cormorant Garamond', 'Tiempos Headline', Garamond, 'Times New Roman', serif;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* ---- 圆角层级 ---- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* ---- 区块节奏 ---- */
+  --spacing-section: 96px;
+}
+
+/* ============================================================================
+ * 基础层
+ * ==========================================================================*/
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-canvas);
+    color: var(--color-body);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.55;
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-primary) 24%, transparent);
+  }
+
+  /* 只在键盘导航时显示焦点环，鼠标点击不显示 */
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+
+  h1,
+  h2,
+  h3 {
+    color: var(--color-ink);
+    font-weight: 400;
+    margin: 0;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  button {
+    font-family: inherit;
+  }
+
+  code,
+  pre {
+    font-family: var(--font-mono);
+  }
+}
+
+/* ============================================================================
+ * 组件层 —— 把 DESIGN.md 的 components 一节落成可复用的类
+ * ==========================================================================*/
+@layer components {
+  /* ---------- 版心 ---------- */
+  .container-page {
+    width: 100%;
+    max-width: 1200px;
+    margin-inline: auto;
+    padding-inline: 24px;
+  }
+
+  /* ---------- 排版 ----------
+   * 衬线字重一律 400。Cormorant Garamond 视觉偏细，
+   * 这里统一加 0.02em 的负字距贴近 Copernicus 的紧凑感。
+   */
+  .display-xl {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: clamp(40px, 6vw, 64px);
+    line-height: 1.05;
+    letter-spacing: -0.024em;
+    color: var(--color-ink);
+  }
+
+  .display-lg {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: clamp(32px, 4.2vw, 48px);
+    line-height: 1.1;
+    letter-spacing: -0.021em;
+    color: var(--color-ink);
+  }
+
+  .display-md {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: clamp(28px, 3.2vw, 36px);
+    line-height: 1.15;
+    letter-spacing: -0.014em;
+    color: var(--color-ink);
+  }
+
+  .display-sm {
+    font-family: var(--font-display);
+    font-weight: 400;
+    font-size: 28px;
+    line-height: 1.2;
+    letter-spacing: -0.011em;
+    color: var(--color-ink);
+  }
+
+  .title-lg {
+    font-size: 22px;
+    font-weight: 500;
+    line-height: 1.3;
+    color: var(--color-ink);
+  }
+
+  .title-md {
+    font-size: 18px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--color-ink);
+  }
+
+  .title-sm {
+    font-size: 16px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--color-ink);
+  }
+
+  .caption {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--color-muted);
+  }
+
+  /* 全大写小字标签，字距 1.5px —— DESIGN.md 的 caption-uppercase */
+  .eyebrow {
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.4;
+    letter-spacing: 0.125em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+  }
+
+  .text-link {
+    color: var(--color-primary);
+    text-underline-offset: 3px;
+  }
+
+  .text-link:hover {
+    text-decoration: underline;
+  }
+
+  .text-link:active {
+    color: var(--color-primary-active);
+  }
+
+  /* ---------- 按钮 ---------- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 40px;
+    padding-inline: 20px;
+    border-radius: var(--radius-md);
+    border: 1px solid transparent;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 120ms ease-out;
+  }
+
+  .btn:disabled {
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background-color: var(--color-primary);
+    color: var(--color-on-primary);
+  }
+
+  .btn-primary:not(:disabled):active {
+    background-color: var(--color-primary-active);
+  }
+
+  .btn-primary:disabled {
+    background-color: var(--color-primary-disabled);
+    color: var(--color-muted);
+  }
+
+  .btn-secondary {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    border-color: var(--color-hairline);
+  }
+
+  .btn-secondary:not(:disabled):active {
+    background-color: var(--color-surface-card);
+  }
+
+  .btn-secondary:disabled {
+    color: var(--color-muted-soft);
+  }
+
+  /* 深色面板上的次级按钮：系统从不反相成浅色 */
+  .btn-secondary-dark {
+    background-color: var(--color-surface-dark-elevated);
+    color: var(--color-on-dark);
+  }
+
+  .btn-secondary-dark:not(:disabled):active {
+    background-color: var(--color-surface-dark-soft);
+  }
+
+  .btn-text {
+    background-color: transparent;
+    color: var(--color-ink);
+    padding-inline: 8px;
+  }
+
+  .btn-text:not(:disabled):active {
+    color: var(--color-primary);
+  }
+
+  .btn-danger {
+    background-color: transparent;
+    color: var(--color-error);
+    border-color: color-mix(in srgb, var(--color-error) 28%, transparent);
+    padding-inline: 14px;
+  }
+
+  .btn-danger:not(:disabled):active {
+    background-color: color-mix(in srgb, var(--color-error) 8%, transparent);
+  }
+
+  .btn-sm {
+    height: 32px;
+    padding-inline: 14px;
+    font-size: 13px;
+  }
+
+  .btn-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 9999px;
+    background-color: var(--color-canvas);
+    border: 1px solid var(--color-hairline);
+    color: var(--color-ink);
+    cursor: pointer;
+  }
+
+  .btn-icon:active {
+    background-color: var(--color-surface-card);
+  }
+
+  /* ---------- 卡片 ---------- */
+  .card-cream {
+    background-color: var(--color-canvas);
+    border: 1px solid var(--color-hairline);
+    border-radius: var(--radius-lg);
+  }
+
+  .card-feature {
+    background-color: var(--color-surface-card);
+    border-radius: var(--radius-lg);
+    padding: 32px;
+  }
+
+  .card-dark {
+    background-color: var(--color-surface-dark);
+    color: var(--color-on-dark);
+    border-radius: var(--radius-lg);
+    padding: 32px;
+  }
+
+  /* 代码窗：更深一层的内嵌代码块 + 等宽字体 */
+  .code-window {
+    background-color: var(--color-surface-dark);
+    color: var(--color-on-dark);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .code-window-inner {
+    background-color: var(--color-surface-dark-soft);
+    border-radius: var(--radius-md);
+    padding: 16px;
+    overflow-x: auto;
+  }
+
+  .card-coral {
+    background-color: var(--color-primary);
+    color: var(--color-on-primary);
+    border-radius: var(--radius-lg);
+    padding: 48px;
+  }
+
+  /* ---------- 表单 ---------- */
+  .text-input {
+    width: 100%;
+    height: 40px;
+    padding: 10px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-hairline);
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.55;
+  }
+
+  .text-input::placeholder {
+    color: var(--color-muted-soft);
+  }
+
+  .text-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 15%, transparent);
+  }
+
+  .text-input:disabled {
+    background-color: var(--color-surface-soft);
+    color: var(--color-muted);
+  }
+
+  .field-label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--color-muted);
+  }
+
+  /* ---------- 徽章 ---------- */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 9999px;
+    background-color: var(--color-surface-card);
+    color: var(--color-ink);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+  }
+
+  .badge-coral {
+    background-color: var(--color-primary);
+    color: var(--color-on-primary);
+    font-size: 12px;
+    letter-spacing: 0.125em;
+    text-transform: uppercase;
+  }
+
+  .badge-quiet {
+    background-color: color-mix(in srgb, var(--color-surface-card) 60%, transparent);
+    color: var(--color-muted);
+  }
+
+  /* ---------- 分隔线 ---------- */
+  .hairline {
+    border-color: var(--color-hairline);
+  }
+
+  /* ---------- 数据表 ---------- */
+  .data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+
+  .data-table th {
+    padding: 12px 16px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    border-bottom: 1px solid var(--color-hairline);
+  }
+
+  .data-table td {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--color-hairline-soft);
+    color: var(--color-body);
+    vertical-align: middle;
+  }
+
+  .data-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+}
+
+/* ============================================================================
+ * 工具层
+ * ==========================================================================*/
+@layer utilities {
+  /* 骨架屏 / 加载态用的呼吸动画（唯一允许的动画） */
+  .animate-breathe {
+    animation: breathe 1.6s ease-in-out infinite;
+  }
+
+  @keyframes breathe {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.45;
+    }
+  }
+
+  /* 长 URL / 短码在窄屏下折行，避免撑破卡片 */
+  .break-anywhere {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+}
+
+/* 尊重用户的「减少动效」偏好 —— DESIGN.md 也不主张花哨动画 */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .animate-breathe {
+    animation: none;
+  }
+}

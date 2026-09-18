@@ -1,0 +1,126 @@
+# ============================================================
+# AshenCourier —— 生产形态一键部署
+#   cp .env.example .env   # 填好 POSTGRES_PASSWORD / REDIS_PASSWORD / JWT_SECRET
+#   docker compose up -d --build
+#   → http://localhost:8080
+#
+# 要求：Docker Compose v2+（本项目不使用顶层 version: 字段）
+# ============================================================
+
+# 后端 / worker 共用同一套环境变量（YAML 锚点复用）
+x-backend-env: &backend-env
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+  REDIS_ADDR: redis:6379
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+  JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_USER: ashen
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ashen
+    volumes:
+      # ⚠️ PG18 起默认数据目录变为 /var/lib/postgresql/18/docker，
+      #    必须挂父目录 /var/lib/postgresql —— 挂旧的 .../data 路径容器会直接启动失败
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ashen -d ashen"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.10-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      # $$ 转义：让 $REDIS_PASSWORD 在容器内展开，而不是被 compose 插值
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    restart: unless-stopped
+
+  # 一次性任务：迁移跑完即退出
+  migrate:
+    image: migrate/migrate:v4.18.3
+    volumes:
+      - ./backend/migrations:/migrations:ro
+    command: ["-path", "/migrations", "-database", "${DATABASE_URL:?DATABASE_URL is required}", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      <<: *backend-env
+      HTTP_ADDR: ":8080"
+      WORKER_ENABLED: "false" # 生产由独立 worker 容器承担
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    # ⚠️ 必须用 entrypoint 覆盖，不能用 command：
+    #    Dockerfile 里是 exec 形式的 ENTRYPOINT ["/app/api"]，
+    #    而 compose 的 command 只会成为 ENTRYPOINT 的**参数**，
+    #    写成 command 会真正启动 `/app/api /app/worker` —— 变成第二个 API 进程，
+    #    只是恰好因为 WORKER_ENABLED 被顺带打开才显得「能跑」。
+    entrypoint: ["/app/worker"]
+    # 覆盖镜像里的默认健康检查（那是给 api 用的 /app/api -healthcheck）；
+    # worker 没有 HTTP 端口，用自己的探针去 ping PG / Redis
+    healthcheck:
+      test: ["CMD", "/app/worker", "-healthcheck"]
+      interval: 15s
+      timeout: 6s
+      retries: 3
+      start_period: 10s
+    environment:
+      <<: *backend-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      # 上下文是仓库根目录：镜像需要同时拿到 frontend/ 源码与 deploy/nginx/nginx.conf。
+      # 单独构建用：docker build -f frontend/Dockerfile .
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "${FRONTEND_PORT:-8080}:80" # 对外唯一入口
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

@@ -1,0 +1,307 @@
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"ashen-courier/internal/domain"
+	"uuid"
+)
+
+// LinkStore 实现 domain.LinkRepository，
+// 与 DB 共用同一个连接池，拆成独立类型是为了避免不同实体的同名方法互相覆盖。
+type LinkStore struct {
+	db *DB
+}
+
+// linkColumns 是 SELECT / RETURNING 里统一的列顺序，必须与 linkRow 的字段一一对应。
+// created_ip 用 ::text 取出来，避免 inet 类型在不同驱动版本下的扫描差异。
+const linkColumns = `id, short_code, target_url, title, owner_id, key_hash, status,
+       click_count, expires_at, coalesce(created_ip::text, ''), created_at, updated_at`
+
+// linkRow 是 links 表的一行。
+type linkRow struct {
+	id         pgtype.UUID
+	shortCode  string
+	targetURL  string
+	title      string
+	ownerID    pgtype.UUID
+	keyHash    []byte
+	status     int16
+	clickCount int64
+	expiresAt  pgtype.Timestamptz
+	createdIP  string
+	createdAt  time.Time
+	updatedAt  time.Time
+}
+
+// dest 返回交给 rows.Scan 的扫描目标，顺序与 linkColumns 完全一致。
+func (r *linkRow) dest() []any {
+	return []any{
+		&r.id, &r.shortCode, &r.targetURL, &r.title, &r.ownerID, &r.keyHash,
+		&r.status, &r.clickCount, &r.expiresAt, &r.createdIP, &r.createdAt, &r.updatedAt,
+	}
+}
+
+// toDomain 把行数据转成领域实体。
+func (r *linkRow) toDomain() *domain.Link {
+	l := &domain.Link{
+		ID:         fromPgUUID(r.id),
+		ShortCode:  r.shortCode,
+		TargetURL:  r.targetURL,
+		Title:      r.title,
+		OwnerID:    uuidPtr(r.ownerID),
+		KeyHash:    r.keyHash,
+		Status:     domain.LinkStatus(r.status),
+		ClickCount: r.clickCount,
+		CreatedIP:  r.createdIP,
+		CreatedAt:  r.createdAt,
+		UpdatedAt:  r.updatedAt,
+	}
+	if r.expiresAt.Valid {
+		t := r.expiresAt.Time
+		l.ExpiresAt = &t
+	}
+	return l
+}
+
+// Create 插入一条短链。ID 由调用方（service 层）生成，不依赖数据库默认值。
+func (s *LinkStore) Create(ctx context.Context, link *domain.Link) error {
+	const q = `
+INSERT INTO links (id, short_code, target_url, title, owner_id, key_hash,
+                   status, click_count, expires_at, created_ip, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::inet, now(), now())
+RETURNING created_at, updated_at`
+
+	err := s.db.pool.QueryRow(ctx, q,
+		toPgUUID(link.ID),
+		link.ShortCode,
+		link.TargetURL,
+		link.Title,
+		uuidParam(link.OwnerID),
+		link.KeyHash,
+		int16(link.Status),
+		link.ClickCount,
+		link.ExpiresAt,
+		link.CreatedIP,
+	).Scan(&link.CreatedAt, &link.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("store.postgres: create link %q: %w", link.ShortCode, mapWriteError(err, "short_code", link.ShortCode))
+	}
+	return nil
+}
+
+// GetByCode 按短码精确查询（大小写敏感）。软删除的行也会返回，
+// 由调用方（domain.Link.Redirectable）决定是 404 还是 410。
+func (s *LinkStore) GetByCode(ctx context.Context, code string) (*domain.Link, error) {
+	q := `SELECT ` + linkColumns + ` FROM links WHERE short_code = $1`
+
+	var r linkRow
+	if err := s.db.pool.QueryRow(ctx, q, code).Scan(r.dest()...); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.NotFound("link", code)
+		}
+		return nil, fmt.Errorf("store.postgres: get link %q: %w", code, err)
+	}
+	return r.toDomain(), nil
+}
+
+// Update 按短码做部分更新，返回更新后的实体。
+func (s *LinkStore) Update(ctx context.Context, code string, patch domain.LinkPatch) (*domain.Link, error) {
+	const q = `
+UPDATE links SET
+    target_url = COALESCE($2, target_url),
+    title      = COALESCE($3, title),
+    status     = COALESCE($4, status),
+    expires_at = CASE WHEN $5 THEN NULL ELSE COALESCE($6, expires_at) END,
+    updated_at = now()
+WHERE short_code = $1
+RETURNING ` + linkColumns
+
+	// status 需要 *int16；用 Go 1.26+ 的 new(表达式) 直接构造，不写多余的临时变量
+	var statusArg *int16
+	if patch.Status != nil {
+		statusArg = new(int16(*patch.Status))
+	}
+
+	var r linkRow
+	err := s.db.pool.QueryRow(ctx, q,
+		code, patch.TargetURL, patch.Title, statusArg, patch.ClearExpires, patch.ExpiresAt,
+	).Scan(r.dest()...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.NotFound("link", code)
+		}
+		return nil, fmt.Errorf("store.postgres: update link %q: %w", code, mapWriteError(err, "short_code", code))
+	}
+	return r.toDomain(), nil
+}
+
+// SoftDelete 把状态改为 deleted。对已删除的行是幂等的（仍然返回成功）。
+func (s *LinkStore) SoftDelete(ctx context.Context, code string) error {
+	const q = `
+UPDATE links
+SET status = $2, updated_at = now()
+WHERE short_code = $1
+RETURNING id`
+
+	var id pgtype.UUID
+	err := s.db.pool.QueryRow(ctx, q, code, int16(domain.LinkStatusDeleted)).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.NotFound("link", code)
+		}
+		return fmt.Errorf("store.postgres: soft delete link %q: %w", code, err)
+	}
+	return nil
+}
+
+// ListByOwner 用 keyset 分页列出归属某用户的链接。
+// 多取一条用于判断「是否还有下一页」，返回值里的游标即下一页起点。
+func (s *LinkStore) ListByOwner(ctx context.Context, filter domain.LinkFilter) ([]domain.Link, domain.LinkCursor, error) {
+	args := []any{uuidParam(&filter.OwnerID)}
+	where := []string{"owner_id = $1", "status <> " + strconv.Itoa(int(domain.LinkStatusDeleted))}
+
+	if q := strings.TrimSpace(filter.Query); q != "" {
+		args = append(args, "%"+escapeLike(q)+"%")
+		n := strconv.Itoa(len(args))
+		where = append(where, "(short_code ILIKE $"+n+" OR target_url ILIKE $"+n+" OR title ILIKE $"+n+")")
+	}
+	if filter.Cursor.Valid {
+		args = append(args, filter.Cursor.CreatedAt, toPgUUID(filter.Cursor.ID))
+		where = append(where, "(created_at, id) < ($"+strconv.Itoa(len(args)-1)+", $"+strconv.Itoa(len(args))+")")
+	}
+
+	// 多取 1 条用于探测下一页
+	args = append(args, filter.Limit+1)
+	sql := `SELECT ` + linkColumns + ` FROM links WHERE ` + strings.Join(where, " AND ") +
+		` ORDER BY created_at DESC, id DESC LIMIT $` + strconv.Itoa(len(args))
+
+	rows, err := s.db.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, domain.LinkCursor{}, fmt.Errorf("store.postgres: list links: %w", err)
+	}
+	defer rows.Close()
+
+	links := make([]domain.Link, 0, filter.Limit)
+	for rows.Next() {
+		var r linkRow
+		if err := rows.Scan(r.dest()...); err != nil {
+			return nil, domain.LinkCursor{}, fmt.Errorf("store.postgres: scan link row: %w", err)
+		}
+		links = append(links, *r.toDomain())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, domain.LinkCursor{}, fmt.Errorf("store.postgres: iterate link rows: %w", err)
+	}
+
+	var next domain.LinkCursor
+	if len(links) > filter.Limit {
+		links = links[:filter.Limit]
+		last := links[len(links)-1]
+		next = domain.LinkCursor{CreatedAt: last.CreatedAt, ID: last.ID, Valid: true}
+	}
+	return links, next, nil
+}
+
+// Claim 把匿名链接挂到指定账号下，并清空管理密钥。
+// 已被他人认领 / 不存在 / 已删除都会返回领域错误。
+func (s *LinkStore) Claim(ctx context.Context, code string, ownerID uuid.UUID) (*domain.Link, error) {
+	const q = `
+UPDATE links
+SET owner_id = $2, key_hash = NULL, updated_at = now()
+WHERE short_code = $1 AND owner_id IS NULL AND status <> $3
+RETURNING ` + linkColumns
+
+	var r linkRow
+	err := s.db.pool.QueryRow(ctx, q, code, toPgUUID(ownerID), int16(domain.LinkStatusDeleted)).Scan(r.dest()...)
+	if err == nil {
+		return r.toDomain(), nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("store.postgres: claim link %q: %w", code, err)
+	}
+
+	// 没更新到行：区分「不存在」与「已被占用」，后者返回 409
+	existing, getErr := s.GetByCode(ctx, code)
+	if getErr != nil {
+		return nil, getErr
+	}
+	if existing.Status == domain.LinkStatusDeleted {
+		return nil, domain.NotFound("link", code)
+	}
+	return nil, domain.Conflict("owner_id", code)
+}
+
+// AddClickCount 把 Redis 侧的计数增量累加进 PG 基线，返回累加后的值。
+func (s *LinkStore) AddClickCount(ctx context.Context, code string, delta int64) (int64, error) {
+	const q = `
+UPDATE links
+SET click_count = click_count + $2, updated_at = now()
+WHERE short_code = $1
+RETURNING click_count`
+
+	var total int64
+	if err := s.db.pool.QueryRow(ctx, q, code, delta).Scan(&total); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, domain.NotFound("link", code)
+		}
+		return 0, fmt.Errorf("store.postgres: add click count %q: %w", code, err)
+	}
+	return total, nil
+}
+
+// ExpireDue 把已过期但仍为 active 的链接批量置为 disabled，返回被处理的短码。
+// 一次只处理 limit 条，避免单条 SQL 长时间持锁。
+func (s *LinkStore) ExpireDue(ctx context.Context, now time.Time, limit int) ([]string, error) {
+	const q = `
+UPDATE links SET status = $3, updated_at = now()
+WHERE short_code IN (
+    SELECT short_code FROM links
+    WHERE expires_at IS NOT NULL AND expires_at < $1 AND status = $2
+    ORDER BY expires_at
+    LIMIT $4
+)
+RETURNING short_code`
+
+	rows, err := s.db.pool.Query(ctx, q, now, int16(domain.LinkStatusActive), int16(domain.LinkStatusDisabled), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store.postgres: expire due links: %w", err)
+	}
+	defer rows.Close()
+
+	var codes []string
+	for rows.Next() {
+		var code string
+		if err := rows.Scan(&code); err != nil {
+			return nil, fmt.Errorf("store.postgres: scan expired code: %w", err)
+		}
+		codes = append(codes, code)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store.postgres: iterate expired codes: %w", err)
+	}
+	return codes, nil
+}
+
+// escapeLike 转义 LIKE / ILIKE 的通配符，避免用户输入的 % 与 _ 变成通配。
+// PostgreSQL 的 ILIKE 默认转义符就是反斜杠，无需额外 ESCAPE 子句。
+func escapeLike(s string) string {
+	var sb strings.Builder
+	sb.Grow(len(s) + 8)
+	for i := range len(s) {
+		switch s[i] {
+		case '%', '_', '\\':
+			sb.WriteByte('\\')
+		}
+		sb.WriteByte(s[i])
+	}
+	return sb.String()
+}

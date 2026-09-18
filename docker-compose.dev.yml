@@ -1,0 +1,65 @@
+# ============================================================
+# AshenCourier —— 本地开发形态：只起 PG + Redis，其余在宿主跑
+#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml --profile tools run --rm migrate   # 跑迁移
+#   cd backend  && go run ./cmd/api       # :8080（内嵌 worker）
+#   cd frontend && pnpm dev               # :5173
+#
+# migrate 挂在 tools profile 下：`up -d` 不会拉起它，需要显式 run。
+# 这样本地就有两条跑迁移的路：容器化的 migrate CLI，或宿主自己的 migrate。
+# ============================================================
+
+services:
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_USER: ashen
+      POSTGRES_PASSWORD: ashen
+      POSTGRES_DB: ashen
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata_dev:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ashen -d ashen"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:8.10-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379" # 仅开发形态对外映射
+    volumes:
+      - redisdata_dev:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # 迁移：挂在 tools profile 下，用 run 显式触发
+  #   docker compose -f docker-compose.dev.yml --profile tools run --rm migrate
+  #   ... run --rm migrate -database "postgres://ashen:ashen@postgres:5432/ashen?sslmode=disable" down 1   # 回滚一步
+  migrate:
+    image: migrate/migrate:v4.18.3
+    profiles: ["tools"]
+    volumes:
+      - ./backend/migrations:/migrations:ro
+    command:
+      - "-path"
+      - "/migrations"
+      - "-database"
+      - "postgres://ashen:ashen@postgres:5432/ashen?sslmode=disable"
+      - "up"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata_dev:
+  redisdata_dev:
