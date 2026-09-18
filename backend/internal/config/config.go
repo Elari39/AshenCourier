@@ -105,6 +105,7 @@ const (
 func Load() (*Config, error) { return LoadFor(RoleAPI) }
 
 // LoadFor 从环境变量装载配置，并做启动前的强制校验。
+// role 决定哪些项是必需的：RoleWorker 可省掉 JWT_SECRET 与 PUBLIC_BASE_URL。
 func LoadFor(role Role) (*Config, error) {
 	cfg := &Config{
 		HTTPAddr:      cmp.Or(os.Getenv("HTTP_ADDR"), DefaultHTTPAddr),
@@ -146,11 +147,16 @@ func LoadFor(role Role) (*Config, error) {
 	if err := validateDatabaseURL(cfg.DatabaseURL); err != nil {
 		errs = append(errs, err)
 	}
-	if err := validateJWTSecret(cfg.JWTSecret); err != nil {
-		errs = append(errs, err)
-	}
-	if err := validateBaseURL(cfg.PublicBaseURL); err != nil {
-		errs = append(errs, err)
+	// JWT_SECRET / PUBLIC_BASE_URL 是「只有 api 才需要」的两项：
+	// worker 既不签发令牌，也不拼对外短链（见 Role 的注释）。
+	// 判定写成「除 RoleWorker 之外一律要求」，这样将来新增角色时默认更严，不会误放行。
+	if role != RoleWorker {
+		if err := validateJWTSecret(cfg.JWTSecret); err != nil {
+			errs = append(errs, err)
+		}
+		if err := validateBaseURL(cfg.PublicBaseURL); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if cfg.RedisAddr == "" {
 		errs = append(errs, errors.New("config: REDIS_ADDR 不能为空"))
@@ -218,15 +224,25 @@ func intEnv(key string, def int) (int, error) {
 	return v, nil
 }
 
-// boolEnv 读取布尔环境变量，接受 1/0/true/false/yes/no/on/off。
+// boolEnv 读取布尔环境变量：未设置时返回 def。
+//
+// 除 strconv.ParseBool 认的 1/0/t/f/true/false 之外，额外接受 .env 与 compose
+// 里更常见的 yes/on/no/off。只认 ParseBool 的话，照本函数注释写
+// WORKER_ENABLED=yes 会直接让进程启动失败 —— 注释与实现必须一致。
 func boolEnv(key string, def bool) (bool, error) {
-	raw := strings.TrimSpace(os.Getenv(key))
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	if raw == "" {
 		return def, nil
 	}
-	v, err := strconv.ParseBool(strings.ToLower(raw))
+	switch raw {
+	case "yes", "on":
+		return true, nil
+	case "no", "off":
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		return false, fmt.Errorf("config: %s 不是合法布尔值（%q）", key, raw)
+		return false, fmt.Errorf("config: %s 不是合法布尔值（%q），可用 1/0/true/false/yes/no/on/off", key, raw)
 	}
 	return v, nil
 }
