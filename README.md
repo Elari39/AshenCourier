@@ -452,20 +452,31 @@ MVP 有意不做的部分：
 以下都是实测结果，不是设计意图。基线快照：**2026-09-18**，Windows 本机 + Docker Desktop
 （Go 1.27.1 / Node 24.19.0 / pnpm 11.15.1）。
 
-| 项 | 结果 |
-| --- | --- |
-| `gofmt -l .`（backend） | 无输出 |
-| `go vet ./...` | 通过 |
-| `go test ./...` | 通过（config / domain / httpx / base62 / shortcode / ua / validator / service / store.postgres / worker） |
-| `go test -race ./...` | 通过。⚠️ 本机需 `CGO_LDFLAGS=-static`：mingw-w64 8.1.0 的运行时 DLL 与 Go 1.27 的 race runtime 不匹配，裸跑会得到 `exit status 0xc0000139`（环境问题，不是代码问题）；CI 跑在 ubuntu-latest，原生可用 |
-| `pnpm typecheck` / `pnpm lint` / `pnpm build` | 通过（lint 0 error 0 warning） |
-| `docker compose up -d --build` | 5 个容器全部 healthy（PG / Redis / backend / worker / frontend） |
-| **容器级 ①**：`docker compose stop postgres` + 删短码缓存后跳转 | **503 + `Retry-After: 2`**，体为 `{"error":{"code":"unavailable"}}`（不是 500；缓存 `DEL` 返回 1，确认真的回源） |
-| **容器级 ②**：`docker compose restart backend` 的关停顺序 | 日志顺序为 `收到退出信号 / 开始优雅关闭` → `统计写入队列已排空` → `api 已退出`；`dropped_clicks` 0 → 0；关停前 12 次跳转全部进流（`stream_len` 1 → 13） |
-| **容器级 ③**：`go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | **24 / 24 通过**（含「SPA 顶级路由经 nginx 返回 HTML」） |
-| `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 |
-| 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 |
-| Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） |
+「在哪跑过」一列区分**本机实测**与 **CI 实测**——两者会得出同一结论，但覆盖面不同：
+CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比如停掉 PG、重启 backend 看关停顺序）。
+
+| 项 | 结果 | 在哪跑过 |
+| --- | --- | --- |
+| `gofmt -l .`（backend） | 无输出 | 本机 + CI `backend` |
+| `go vet ./...` | 通过 | 本机 + CI `backend` |
+| `go test ./...` | 通过（config / domain / httpx / base62 / shortcode / ua / validator / service / store.postgres / worker） | 本机 |
+| `go test -race ./...` | 通过。⚠️ 本机需 `CGO_LDFLAGS=-static`：mingw-w64 8.1.0 的运行时 DLL 与 Go 1.27 的 race runtime 不匹配，裸跑会得到 `exit status 0xc0000139`（环境问题，不是代码问题） | 本机（带 `-static`）+ CI `backend`（ubuntu 原生） |
+| `pnpm typecheck` / `pnpm lint` / `pnpm build` | 通过（lint 0 error 0 warning） | 本机 + CI `frontend` |
+| `docker compose up -d --build` | 5 个容器全部 healthy（PG / Redis / backend / worker / frontend） | 本机 + CI `smoke` |
+| **容器级 ①**：`docker compose stop postgres` + 删短码缓存后跳转 | **503 + `Retry-After: 2`**，体为 `{"error":{"code":"unavailable"}}`（不是 500；缓存 `DEL` 返回 1，确认真的回源） | 本机 |
+| **容器级 ②**：`docker compose restart backend` 的关停顺序 | 日志顺序为 `收到退出信号 / 开始优雅关闭` → `统计写入队列已排空` → `api 已退出`；`dropped_clicks` 0 → 0；关停前 12 次跳转全部进流（`stream_len` 1 → 13） | 本机 |
+| **容器级 ③**：`go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | **24 / 24 通过**（含「SPA 顶级路由经 nginx 返回 HTML」） | 本机 + CI `smoke` |
+| `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
+| 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
+| Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
+
+**责任划分**：容器级验收（起全栈 + 端到端冒烟）由 CI 的 `smoke` job 承担 —— 每次推 `main`
+与手动触发（`workflow_dispatch`）都会真跑一遍，失败时自动 dump 容器日志。PR 只跑 `backend`
+与 `frontend` 两个快 job（约 1 分钟），因为 `docker compose up -d --build` 要几分钟。
+
+**CI 自身也实测过「会红」**（不是只看过绿灯）：故意破坏一个文件的 gofmt → `backend` job 红并列出
+文件名；故意改错冒烟工具的期望值 → `smoke` job 红、日志里能看到断言失败与容器日志。配置见
+[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)。
 
 ## 许可
 
