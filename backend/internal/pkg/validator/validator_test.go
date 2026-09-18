@@ -21,6 +21,13 @@ func TestNormalize(t *testing.T) {
 		{"首尾空白被裁掉", "  https://example.com  ", "https://example.com", nil},
 		{"大写 scheme 与小写化 host", "HTTPS://Example.COM/Path", "https://example.com/Path", nil},
 		{"带端口", "https://example.com:8443/x", "https://example.com:8443/x", nil},
+		// IPv6 字面量：方括号必须原样保留。
+		// 曾经的实现用 Hostname() 重组 host，会剥掉方括号写出 http://::1:8080/x，
+		// 这个坏地址能过 DB 的 scheme CHECK 与 IsAllowedTarget，最终 302 到打不开的地址。
+		{"IPv6 字面量带端口", "http://[::1]:8080/path", "http://[::1]:8080/path", nil},
+		{"IPv6 字面量无端口", "http://[::1]/path", "http://[::1]/path", nil},
+		{"IPv6 大写折叠保留方括号", "http://[::FFFF:1.2.3.4]:80/x", "http://[::ffff:1.2.3.4]:80/x", nil},
+		{"带 userinfo", "https://user:pass@example.com/x", "https://user:pass@example.com/x", nil},
 		{"保留 fragment", "https://example.com/a#frag", "https://example.com/a#frag", nil},
 		{"路径大小写不动", "https://example.com/AbC", "https://example.com/AbC", nil},
 		{"空串", "", "", ErrEmpty},
@@ -59,6 +66,7 @@ func TestNormalizeIsIdempotent(t *testing.T) {
 		"example.com/very/long/path?x=1",
 		"HTTPS://Example.COM/Path?Q=1#F",
 		"http://sub.example.co.uk:8080/%E4%B8%AD%E6%96%87",
+		"http://[::1]:8080/ipv6",
 	}
 
 	for _, in := range inputs {

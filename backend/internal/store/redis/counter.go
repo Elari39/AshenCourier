@@ -74,6 +74,29 @@ func (c *Client) TakeDelta(ctx context.Context, code string) (int64, error) {
 	return n, nil
 }
 
+// RestoreDelta 把「已被 TakeDelta 取走、但未能落库」的增量按值归还，并重新登记 dirty。
+//
+// 只补 dirty 标记是不够的：TakeDelta 用 GETDEL 把计数键删掉了，若只把短码塞回
+// dirty 集合，下一轮 GETDEL 会得到 0，于是命中「本轮无增量」而跳过 —— 那部分点击
+// 就永久丢失了（明细已通过 Stream 落库，基线增量却没了，两个口径再也对不上）。
+// 因此必须把值本身写回去。
+func (c *Client) RestoreDelta(ctx context.Context, code string, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	opCtx, cancel := c.opCtx(ctx)
+	defer cancel()
+
+	pipe := c.rdb.Pipeline()
+	pipe.IncrBy(opCtx, ClickCounterKey(code), delta)
+	pipe.SAdd(opCtx, dirtySetKey, code)
+
+	if _, err := pipe.Exec(opCtx); err != nil {
+		return fmt.Errorf("store.redis: restore delta %q: %w", code, err)
+	}
+	return nil
+}
+
 // MarkDirty 把短码重新登记回 dirty 集合，用于 PG 写入失败后的重排队。
 func (c *Client) MarkDirty(ctx context.Context, codes ...string) error {
 	if len(codes) == 0 {

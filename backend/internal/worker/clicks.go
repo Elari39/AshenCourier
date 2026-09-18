@@ -241,11 +241,14 @@ func (w *Worker) countSyncLoop(ctx context.Context) {
 					w.log.Warn("短码已不存在，丢弃待同步的点击增量", "code", code, "delta", delta)
 					continue
 				}
-				// 写库失败：把增量还回去，下一轮重试（宁可重复累加也不能丢）
-				if err := w.rdb.MarkDirty(ctx, code); err != nil {
-					w.log.Error("重新标记 dirty 失败，该批增量可能丢失", "code", code, "err", err)
+				// 写库失败：把取走的增量「按值」还回去，下一轮重试。
+				// 注意不能只调 MarkDirty —— TakeDelta 已用 GETDEL 删掉计数键，
+				// 只补标记的话下一轮会读到 0，这批点击就永久丢了。
+				if rerr := w.rdb.RestoreDelta(ctx, code, delta); rerr != nil {
+					// 归还失败：这一批增量确实丢了，必须留明确日志（不是「可能」）
+					w.log.Error("归还点击增量失败，该批增量已丢失",
+						"code", code, "delta", delta, "err", rerr)
 				}
-				retry = append(retry, code)
 				continue
 			}
 			synced++

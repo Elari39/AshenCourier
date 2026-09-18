@@ -67,12 +67,11 @@ func Normalize(raw string) (string, error) {
 	if c.Host == "" || c.Hostname() == "" {
 		return "", fmt.Errorf("validator: normalize %q: %w", s, ErrNoHost)
 	}
-	// Host 里可能带端口，只小写主机名本身
-	if c.Port() != "" {
-		c.Host = c.Hostname() + ":" + c.Port()
-	} else {
-		c.Host = c.Hostname()
-	}
+	// 只小写化，绝不手工拆重组 host。
+	// url.URL 已经把 host 与 port 分开，`Host` 里本来就带着 IPv6 需要的方括号；
+	// 用 Hostname() 重新拼回去会剥掉方括号，把 http://[::1]:8080/x 写成
+	// http://::1:8080/x —— 这种坏地址能过 DB 的 scheme CHECK，也过 IsAllowedTarget，
+	// 最后作为 Location 头发给浏览器，用户拿到 302 却打不开。
 	c.Host = strings.ToLower(c.Host)
 
 	out := c.String()
