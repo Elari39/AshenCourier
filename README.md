@@ -146,6 +146,10 @@ Browser ──┬─ /api/*         ─┐
 { "error": { "code": "invalid_url", "message": "仅支持 http/https 链接", "field": "target_url", "request_id": "01J..." } }
 ```
 
+> 请求体里的**未知字段会被拒绝**（400 `invalid_json`）：`encoding/json/v2` 的默认是静默
+> 忽略未知成员，字段名拼错（`titel` / `targetUrl`）会「成功但没生效」，所以这里显式打开了
+> `RejectUnknownMembers`。重复键、非法 UTF-8、类型不匹配同样是 400；请求体超过 64 KiB 是 413。
+
 | # | Method | Path | 鉴权 | 说明 |
 | --- | --- | --- | --- | --- |
 | 1 | GET | `/healthz` | — | 存活 + 就绪（PG / Redis / Stream 积压 / 丢弃计数） |

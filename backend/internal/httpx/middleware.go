@@ -95,13 +95,19 @@ func CORS(allowedOrigins ...string) Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 			if origin != "" {
+				// 命中白名单才回显 ACAO；但**无论是否命中都要 Vary: Origin**——
+				// 否则共享缓存会把「没带 CORS 头」的响应回给允许的来源（或反过来），
+				// 这类缓存投毒在 CORS 里是经典问题。
+				w.Header().Add("Vary", "Origin")
 				if _, ok := allowed[origin]; ok {
 					w.Header().Set("Access-Control-Allow-Origin", origin)
 					w.Header().Set("Access-Control-Allow-Credentials", "true")
-					w.Header().Set("Vary", "Origin")
 				}
 			}
-			if r.Method == http.MethodOptions {
+			// 预检只可能发生在 /api 下：跨域 fetch 的是接口，而短码跳转是导航，
+			// 不会发预检。其他路径的 OPTIONS 交给 mux，让它照常回 405，
+			// 而不是拿一个假的 204 掩盖「这个路径不支持 OPTIONS」。
+			if r.Method == http.MethodOptions && strings.HasPrefix(r.URL.Path, "/api/") {
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 				w.Header().Set("Access-Control-Allow-Headers",
 					"Content-Type, Authorization, X-Manage-Key, X-Request-Id")
