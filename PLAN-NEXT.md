@@ -8,6 +8,57 @@
 
 ---
 
+## 0. 执行进度（2026-09-18 更新）
+
+> 本文件其余部分是**计划**；这一节记录**实际做到哪一步**。一个批次一个 commit，
+> 全部已推到 `origin/main`，CI（[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)）
+> 三个 job 全绿。验收都是实测输出，不是「应该没问题」。
+
+| 批次 | 内容 | 状态 | commit | 实测验收 |
+| --- | --- | --- | --- | --- |
+| — | 会话起点：`PLAN-NEXT.md` 入库 | ✅ | `6c29265` | — |
+| **M0** | 三条容器级验收 | ✅ | `b10a20a` | ① 停 PG + 删缓存后跳转 = **503 + `Retry-After: 2`**；② 关停顺序 `收到退出信号/开始优雅关闭` → `统计写入队列已排空` → `api 已退出`，`dropped_clicks` 0→0；③ 冒烟 **24/24**。另：清掉了占用 8080 的孤儿栈（`F:\WorkSpace\Coding\Go\Link` 已不存在） |
+| **M1-1** | CI 三个 job | ✅ | `4e3a611` | main 上全绿；临时分支实测「破坏 gofmt → backend 红」「改错 smoke 期望 → smoke 红并 dump 容器日志」。相对 §4 草稿修了 4 处（见下） |
+| **M1-2** | handler / httpx 单测 | ✅ | `dfff9e8` | 新增 3 个测试文件（buildPatch / loadAuthorized / 路由表 12 条 + 405 / ClientIP / statusRecorder / RetryAfterHeader / sanitizeRequestID）；变异验证：删掉 `status:"deleted"` 拦截 → 用例变红 |
+| **M1-3** | README 验收记录补「在哪跑过」 | ✅ | `7c447f4` | 区分本机 / CI；写明容器级验收由 smoke job 承担 |
+| **M2-1** | `event_uid` 幂等去重（迁移 000002） | ✅ | `c69ff71` | 5 次跳转后 `count(event_uid)=count(distinct event_uid)=5`；用显式 Stream ID 重投一条已插过的消息 → 明细 7→7、uid 行数 1→1；`migrate down 1` + `up` 两轮无报错 |
+| **M2-2** | 列表口径 = 基线 + 待同步增量 | ✅ | `b68f2a4` | 停 worker 跳 4 次：PG 基线 0 / Redis 增量 4，而列表 `click_count` = 4，与详情 `total_clicks` 相等；Redis 挂掉时列表仍 **200**（退回基线） |
+| **M3-1** | 补偿式计数（读值不删 + 成功才结算） | ✅ | `bac1b19` | 停 worker 跳 10 次：键里 10、dirty 含该码、基线 0（没被取走）；结算后基线 10、明细 10、**计数键被删除**；100 次跳转后两口径都是 100，全库 `base_count<>event_count` = 0 |
+| **M3-2** | singleflight 防击穿 + `pg_fallbacks` | ✅ | `52d6a98` | 冷短码 20 个并发请求（`curl --parallel-immediate`）全部 302，`pg_fallbacks` 增量 = **1**；单测 50 goroutine 并发 miss 只回源 1 次 |
+| **M3-3** | 备份与恢复演练 | ✅ | `d134658` | dump → 恢复到临时库后与主库逐项一致（links 14 / events 169 / 两个口径 169）→ 删临时库；保留策略实测（2000 年的假备份被清理、当天的留下） |
+| **M4-1** | 链接标签（迁移 000003） | ✅ | `ff67663` | 归一化 `Ops`+`  ops  `+`Dev` → `ops,dev`；`?tag=ops` 命中 1 条、`?tag=DEV` 命中 2 条；11 个 / 33 字符标签 → 422；`EXPLAIN` 走 `links_tags_gin`；无头 Chrome 里输入 `ops` 列表 2→1 |
+| **M4-2** | 点击明细页（迁移 000004） | ⏳ 未开始 | — | — |
+| **M4-3** | 二维码 | ⏳ 未开始 | — | — |
+| **M5** | 四个大件（需 §15 拍板） | ⏸ 按计划推迟 | — | — |
+
+**与计划的偏离（5 条，逐条给理由）**
+
+1. **删掉 `RestoreDelta`，而不是「保留给写库报错分支」**（§6 M3-1）。
+   补偿式下 `TakeDelta` 只读不删，失败时值本来就在键里；此时再「按值归还」会让基线**翻倍**。
+   §6 自己上面的崩溃推演表写的正是「键里还有 delta → 下一轮重做，不丢」，两者矛盾，按推演表实现。
+2. **`SettleDelta` 用 Lua 脚本**（而不是 `INCRBY -delta` + `SREM` 两条命令）。
+   非原子会留下「只摘不减 = 少计」的窗口；顺带在减到 0 时删键 —— 只 `DECRBY` 的话，
+   每个被点过的短码都会永久留一个 0 值键（无 TTL），也就与「回刷后 `clicks:cnt:*` 清空」的验收冲突。
+3. **标签统一小写存储**（而不是 §7 写的「保留原大小写、按小写比较」）。
+   筛选走 `tags @> ARRAY[$1]`，**数组包含是大小写敏感的**：保留大小写就会出现
+   「存了 `Ops`、按 `ops` 筛不到」。三者只能取其二，这里选了「比较一致」。
+4. **本机 `go test -race` 需要 `CGO_LDFLAGS=-static`**：mingw-w64 8.1.0 的运行时 DLL 与
+   Go 1.27 的 race runtime 不匹配（裸跑 `exit status 0xc0000139`）。CI 在 ubuntu 上原生可用。
+5. **`docker-compose.override.yml`（未入库，`.gitignore` 已忽略）跳过 nginx 的 entrypoint 脚本**：
+   本机网络下 `/docker-entrypoint.d/10-listen-on-ipv6-by-default.sh` 里的 `apk manifest nginx`
+   会卡死，容器一直 unhealthy。我们的 `nginx.conf` 是整体替换的，那批脚本一个都不需要；
+   CI 没有这个文件，走真实 entrypoint（也就是说 entrypoint 能跑通这件事仍由 CI 守着）。
+
+**顺带修掉的小问题**：`Input.vue` 之前把 `aria-label` 透传到外层 `<div>`，输入框本身没有可访问名
+（屏幕阅读器只念「编辑框」）。M4-1 的浏览器验收发现后改为：`class`/`style` 留给外层容器，
+其余属性绑到 `<input>`。
+
+**本机验收用到的临时工具（未入库）**：`.workbuddy/tmp/browser-check.mjs` —— 无头 Chrome + CDP
+的小脚本（只用 Node 内置 fetch / WebSocket），用来在真实浏览器里截图并断言页面文本。
+M4 剩下的两个批次会继续用它做 UI 验收。
+
+---
+
 ## 1. 基线：现在是什么状态
 
 ### 1.1 已完成的（不要重复做）
