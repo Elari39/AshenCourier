@@ -132,7 +132,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   if (!response.ok) {
     // 401 = 令牌失效：通知 useAuth 清空会话（router 里注册的处理器会送回登录页）。
     // 放在这里而不是各处 view：只要有一处忘了判断就会留下「半登录」的脏状态。
-    if (response.status === 401) {
+    //
+    // 但只有「本次请求确实带了令牌」时才算令牌失效。登录/注册接口在口令错误时
+    // 同样返回 401，那是凭据不对而不是会话过期 —— 不能因为输错一次密码就去清空
+    // 本地会话（否则将来往 clearSession 里加任何清理逻辑都会连带误伤）。
+    if (response.status === 401 && token !== null) {
       notifyUnauthorized()
     }
     throw toApiError(response, payload)
