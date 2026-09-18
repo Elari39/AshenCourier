@@ -135,6 +135,17 @@ type ClickDeltaReader interface {
 	PendingDelta(ctx context.Context, code string) (int64, error)
 }
 
+// ClickDeltaBatchReader 一次读取多个短码的待同步增量，实现在 internal/store/redis。
+//
+// 与 ClickDeltaReader 并存而不是把它替换掉：详情页只需要一个短码（单键 GET 最省），
+// 列表页有 N 条（一页最多 MaxLinkPageSize 条），逐条 GET 会变成 N 次往返 ——
+// 这里用一次 MGET 拿完，避免把列表接口的延迟拖成 N 倍。
+type ClickDeltaBatchReader interface {
+	// PendingDeltas 返回这批短码尚未回刷的增量，只包含**有增量**的短码；
+	// 键不存在的短码不出现在结果里（调用方按 0 处理即可，与 map 零值语义一致）。
+	PendingDeltas(ctx context.Context, codes []string) (map[string]int64, error)
+}
+
 // ClickRepository 是点击明细仓储接口，实现在 internal/store/postgres。
 type ClickRepository interface {
 	// InsertBatch 在一个事务里批量插入明细；events 为空时直接返回 nil。

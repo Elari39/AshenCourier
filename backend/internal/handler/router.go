@@ -23,6 +23,8 @@ type Options struct {
 	Health httpx.HealthProbe
 	// Limiter 是限流器，nil 表示不限流。
 	Limiter domain.RateLimiter
+	// DeltaBatch 读取列表页尚未回刷进 PG 的计数增量；nil 表示列表只报 PG 基线。
+	DeltaBatch domain.ClickDeltaBatchReader
 
 	// TrustProxy 为 true 时从 X-Real-IP 取客户端 IP。
 	TrustProxy bool
@@ -66,6 +68,7 @@ func Router(opts Options) http.Handler {
 		trustProxy:  opts.TrustProxy,
 		pageSize:    opts.PageSize,
 		maxPageSize: opts.MaxPageSize,
+		deltas:      opts.DeltaBatch,
 	}
 	statsAPI := &statsHandler{shortener: opts.Shortener, stats: opts.Stats}
 	redirectAPI := &redirectHandler{shortener: opts.Shortener, trustProxy: opts.TrustProxy}

@@ -26,9 +26,9 @@
   缓存未命中才回源一次 PostgreSQL。数据库挂了对已缓存的短链都没有影响。
 - **统计不阻塞跳转。** 点击写入一个有界队列（默认 4096），队满直接丢弃并计数。
   丢弃数在 `/healthz` 里可见 —— 宁可少记一次点击，也不让 302 慢 1 毫秒。
-- **界面上「总点击」不会卡住。** 详情页数字 = `links.click_count`（PG 基线）+
-  `clicks:cnt:{code}`（Redis 待同步增量），worker 每 2 秒回刷，正常情况下偏差小于 2 秒；
-  仪表盘汇总数只含 PG 基线，最多滞后一个回刷周期。
+- **界面上「总点击」不会卡住。** 详情页与列表页的数字都是 `links.click_count`（PG 基线）
+  + `clicks:cnt:{code}`（Redis 待同步增量）：详情页单键 `GET`，列表页一次 `MGET` 批量取，
+  worker 每 2 秒回刷，正常情况下偏差小于 2 秒。统计侧读不到时列表退回纯基线，不报 5xx。
 - **匿名也能管理。** 不注册就能建短链，返回一次性管理密钥（数据库只存 SHA-256，
   明文只在创建响应里出现一次）。登录后可以用它把链接**认领**到自己账号下。
 - **限流降级而不是熔断。** Redis 挂了就全量放行并累计降级次数，绝不因为限流组件故障把整站打成 5xx。
@@ -113,10 +113,11 @@ Browser ──┬─ /api/*         ─┐
 
 1. **跳转不落库**：`GET /{code}` 只做 Redis `GET` + `INCR` + `XADD`，全程无 PostgreSQL 写入。
    缓存 miss 才回源一次，并把结果回填。
-2. **计数最终一致**：详情页的「总点击」= `links.click_count`（PG 基线）+ `clicks:cnt:{code}`
-   （Redis 待同步增量）。worker 每 2 秒把增量刷回 PG，正常情况下偏差 < 2 秒。
-   仪表盘的汇总数只取列表接口的 `click_count`（纯 PG 基线，不为 N 条链接各读一次 Redis），
-   最多滞后一个回刷周期。
+2. **计数最终一致**：详情页与列表页的「总点击」都是 `links.click_count`（PG 基线）
+   + `clicks:cnt:{code}`（Redis 待同步增量），**两个口径一致** —— 不会出现「详情有数、列表没数」。
+   worker 每 2 秒把增量刷回 PG，正常情况下偏差 < 2 秒。
+   列表页用一次 `MGET` 批量读本页所有短码（不逐条查，延迟不随页大小线性增长）；
+   统计侧读失败只记 warn 并退回纯基线，绝不把列表打成 5xx。
 3. **统计不阻塞跳转**：统计写入走**有界队列**（默认 4096），队列满直接丢弃并计数，
    丢弃数在 `/healthz` 的 `dropped_clicks` 里可见。
 
@@ -479,6 +480,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ③**：`go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | **24 / 24 通过**（含「SPA 顶级路由经 nginx 返回 HTML」） | 本机 + CI `smoke` |
 | **容器级 ④**：明细幂等去重（M2-1） | 5 次跳转后 `count(event_uid) = count(distinct event_uid) = 5`（迁移前的 19 行历史数据为 NULL）；用**显式 Stream ID** 重投一条「已经插过」的消息 → 明细 7 → 7、该 `event_uid` 行数 1 → 1，worker 无 ERROR/WARN 且消息被 ACK | 本机 |
 | 迁移往返（M2-1） | `migrate down 1` + `up` 连续两轮无报错；`version` = 2；列与部分唯一索引恢复，之后的新跳转仍写入 `event_uid` | 本机 |
+| **容器级 ⑤**：列表口径 = 基线 + 待同步增量（M2-2） | 停掉 worker 后跳转 4 次：PG 基线仍 `0`、Redis 增量 `4`，而 `GET /api/links` 的 `click_count` = **4**，与详情 `total_clicks` 相等；恢复 worker 后基线刷成 `4`、增量键清空、列表仍为 `4`；把 Redis 停掉时列表仍 **200**（退回纯基线，不 5xx） | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |

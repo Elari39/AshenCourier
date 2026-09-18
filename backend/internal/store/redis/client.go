@@ -14,6 +14,22 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+
+	"ashen-courier/internal/domain"
+)
+
+// 编译期断言：*Client 必须满足这几个 domain 端口。
+//
+// 端口定义在 domain、实现散在本包的三个文件里（counter / stream / client），
+// 签名一旦漂移，这里会在编译期就失败 —— 而不是等到 cmd 里接线时才发现，
+// 或者更糟：等到某个降级分支静默走不通。
+//
+// 缓存 / 限流是独立的包装类型（Cache / Recorder / Limiter），不在这里断言。
+var (
+	_ domain.ClickCounter          = (*Client)(nil)
+	_ domain.ClickStream           = (*Client)(nil)
+	_ domain.ClickDeltaReader      = (*Client)(nil)
+	_ domain.ClickDeltaBatchReader = (*Client)(nil)
 )
 
 // 键前缀与固定键。短码字符集是 [0-9A-Za-z_-]，不含 ':'，因此拼键无歧义。

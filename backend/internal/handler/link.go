@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -17,6 +19,8 @@ type linkHandler struct {
 	trustProxy  bool
 	pageSize    int
 	maxPageSize int
+	// deltas 读取列表页尚未回刷进 PG 的计数增量；nil 表示不叠加（只报 PG 基线）。
+	deltas domain.ClickDeltaBatchReader
 }
 
 // create 处理 POST /api/links。登录与匿名均可调用。
@@ -73,11 +77,41 @@ func (h *linkHandler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 叠加尚未回刷进 PG 的增量：列表的 click_count 必须与详情页的 total_clicks 同口径，
+	// 否则仪表盘汇总最多滞后一个回刷周期（2s），用户会看到「详情有数、列表没数」。
+	deltas := h.pendingDeltas(r.Context(), links)
+
 	items := make([]linkDTO, 0, len(links))
 	for i := range links {
-		items = append(items, toLinkDTO(&links[i], h.shortener.ShortURL(links[i].ShortCode)))
+		link := &links[i]
+		// map 里没有该短码 = 没有待同步增量，按 0 处理（不写 map 的零值也一样）
+		link.ClickCount += deltas[link.ShortCode]
+		items = append(items, toLinkDTO(link, h.shortener.ShortURL(link.ShortCode)))
 	}
 	httpx.WriteJSON(w, r, http.StatusOK, linkListResponse{Links: items, NextCursor: nextCursor})
+}
+
+// pendingDeltas 读取本页短码尚未回刷进 PG 的点击增量。
+//
+// 失败只记 warn 并返回 nil（调用方退回纯基线）：统计侧读不到不能让列表变成 5xx ——
+// 数字稍滞后是可接受的降级，接口整体不可用不是。
+func (h *linkHandler) pendingDeltas(ctx context.Context, links []domain.Link) map[string]int64 {
+	if h.deltas == nil || len(links) == 0 {
+		return nil
+	}
+
+	codes := make([]string, 0, len(links))
+	for i := range links {
+		codes = append(codes, links[i].ShortCode)
+	}
+
+	deltas, err := h.deltas.PendingDeltas(ctx, codes)
+	if err != nil {
+		slog.Warn("读取待同步点击增量失败，列表的 click_count 只反映 PG 基线",
+			"err", err, "codes", len(codes))
+		return nil
+	}
+	return deltas
 }
 
 // get 处理 GET /api/links/{code}。

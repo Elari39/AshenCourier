@@ -186,6 +186,7 @@ func run() error {
 		Stats:       statsSvc,
 		Health:      probe,
 		Limiter:     limiter,
+		DeltaBatch:  rdb,
 		TrustProxy:  cfg.TrustProxy,
 		CORSOrigins: corsOrigins(cfg.PublicBaseURL),
 		PageSize:    cfg.LinkPageSize,

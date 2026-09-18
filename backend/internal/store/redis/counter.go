@@ -3,6 +3,8 @@ package redis
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strconv"
 )
 
 // PendingDelta 读取某短码尚未回刷到 PG 的计数增量；键不存在返回 0。
@@ -18,6 +20,63 @@ func (c *Client) PendingDelta(ctx context.Context, code string) (int64, error) {
 		return 0, fmt.Errorf("store.redis: pending delta %q: %w", code, err)
 	}
 	return n, nil
+}
+
+// PendingDeltas 用一次 MGET 读出多个短码尚未回刷进 PG 的增量。
+//
+// 为什么不是循环调 PendingDelta：列表页一页最多 100 条（MaxLinkPageSize），
+// 逐条 GET 就是 100 次往返；MGET 一次拿完，列表接口的延迟不随页大小线性增长。
+//
+// 键不存在的短码不进结果（那表示「没有待同步增量」，不是错误）；
+// 值解析不出来时按 0 处理并记 debug：统计口径掉一点，好过把列表打成 5xx。
+func (c *Client) PendingDeltas(ctx context.Context, codes []string) (map[string]int64, error) {
+	if len(codes) == 0 {
+		return nil, nil
+	}
+
+	keys := make([]string, 0, len(codes))
+	for _, code := range codes {
+		keys = append(keys, ClickCounterKey(code))
+	}
+
+	opCtx, cancel := c.opCtx(ctx)
+	defer cancel()
+
+	values, err := c.rdb.MGet(opCtx, keys...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("store.redis: pending deltas (%d codes): %w", len(codes), err)
+	}
+
+	out := make(map[string]int64, len(codes))
+	for i, raw := range values {
+		if i >= len(codes) || raw == nil {
+			continue
+		}
+		n, ok := deltaValue(raw)
+		if !ok {
+			slog.Debug("计数增量值无法解析，按 0 处理", "code", codes[i], "value", raw)
+			continue
+		}
+		out[codes[i]] = n
+	}
+	return out, nil
+}
+
+// deltaValue 把 MGET 的返回值转成整数。go-redis 默认给 string，但换编解码器
+// （或用 Do 手动发命令）时可能是 []byte 或 int64，这里一并认掉。
+func deltaValue(raw any) (int64, bool) {
+	switch v := raw.(type) {
+	case string:
+		n, err := strconv.ParseInt(v, 10, 64)
+		return n, err == nil
+	case []byte:
+		n, err := strconv.ParseInt(string(v), 10, 64)
+		return n, err == nil
+	case int64:
+		return v, true
+	default:
+		return 0, false
+	}
 }
 
 // DirtyCodes 返回最多 limit 个待回刷的短码。

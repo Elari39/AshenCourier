@@ -23,11 +23,31 @@ import (
 // 一旦被测路径意外走到那里就会立刻 panic（而不是悄悄返回零值把断言蒙混过去）。
 type stubLinkRepo struct {
 	domain.LinkRepository
-	getByCode func(ctx context.Context, code string) (*domain.Link, error)
+	getByCode   func(ctx context.Context, code string) (*domain.Link, error)
+	listByOwner func(ctx context.Context, filter domain.LinkFilter) ([]domain.Link, domain.LinkCursor, error)
 }
 
 func (r *stubLinkRepo) GetByCode(ctx context.Context, code string) (*domain.Link, error) {
 	return r.getByCode(ctx, code)
+}
+
+func (r *stubLinkRepo) ListByOwner(ctx context.Context, filter domain.LinkFilter) ([]domain.Link, domain.LinkCursor, error) {
+	return r.listByOwner(ctx, filter)
+}
+
+// stubDeltas 是 domain.ClickDeltaBatchReader 的替身：记录被问过的短码，并可注入读失败。
+type stubDeltas struct {
+	byCode map[string]int64
+	err    error
+	asked  [][]string
+}
+
+func (d *stubDeltas) PendingDeltas(_ context.Context, codes []string) (map[string]int64, error) {
+	d.asked = append(d.asked, codes)
+	if d.err != nil {
+		return nil, d.err
+	}
+	return d.byCode, nil
 }
 
 // stubCache 是「永远不会命中」的缓存：测试关心的是仓储与鉴权路径，
