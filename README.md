@@ -449,19 +449,23 @@ MVP 有意不做的部分：
 
 ## 验收记录
 
-以下都是本机实测结果，不是设计意图：
+以下都是实测结果，不是设计意图。基线快照：**2026-09-18**，Windows 本机 + Docker Desktop
+（Go 1.27.1 / Node 24.19.0 / pnpm 11.15.1）。
 
 | 项 | 结果 |
 | --- | --- |
-| `gofmt -l .` | 无输出 |
+| `gofmt -l .`（backend） | 无输出 |
 | `go vet ./...` | 通过 |
-| `go test ./...` | 通过（base62 / shortcode / ua / validator） |
-| `go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | **24 / 24 通过** |
+| `go test ./...` | 通过（config / domain / httpx / base62 / shortcode / ua / validator / service / store.postgres / worker） |
+| `go test -race ./...` | 通过。⚠️ 本机需 `CGO_LDFLAGS=-static`：mingw-w64 8.1.0 的运行时 DLL 与 Go 1.27 的 race runtime 不匹配，裸跑会得到 `exit status 0xc0000139`（环境问题，不是代码问题）；CI 跑在 ubuntu-latest，原生可用 |
 | `pnpm typecheck` / `pnpm lint` / `pnpm build` | 通过（lint 0 error 0 warning） |
 | `docker compose up -d --build` | 5 个容器全部 healthy（PG / Redis / backend / worker / frontend） |
-| `docker compose down && docker compose up -d` | 数据仍在（volume 持久化），`/healthz` 立即 200 |
-| 计数一致性 | `links.click_count` 与 `click_events` 条数一致；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 |
-| Stream 消费 | 落库后 0 pending；worker 日志无 HTTP 记录（确认跑的是 worker 而非 api） |
+| **容器级 ①**：`docker compose stop postgres` + 删短码缓存后跳转 | **503 + `Retry-After: 2`**，体为 `{"error":{"code":"unavailable"}}`（不是 500；缓存 `DEL` 返回 1，确认真的回源） |
+| **容器级 ②**：`docker compose restart backend` 的关停顺序 | 日志顺序为 `收到退出信号 / 开始优雅关闭` → `统计写入队列已排空` → `api 已退出`；`dropped_clicks` 0 → 0；关停前 12 次跳转全部进流（`stream_len` 1 → 13） |
+| **容器级 ③**：`go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | **24 / 24 通过**（含「SPA 顶级路由经 nginx 返回 HTML」） |
+| `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 |
+| 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 |
+| Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） |
 
 ## 许可
 
