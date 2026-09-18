@@ -50,11 +50,12 @@ type BucketCount struct {
 }
 
 // StatsAggregate 是一次统计查询的全部结果。
+//
+// 注意：Daily / Referers 等是「窗口内的明细聚合」，不是界面上的「总点击」——
+// 总点击由 service 用 links.click_count（PG 基线）+ Redis 待同步增量算出
+// （全量、跨窗口）。响应里的 window_clicks 由 handler 对 Daily 求和得到，
+// 因此这里不再单独跑一次 count(*)。
 type StatsAggregate struct {
-	// WindowClicks 是统计窗口内的明细条数。
-	// 注意：它不是界面上的「总点击」—— 总点击由 service 用
-	// links.click_count（PG 基线）+ Redis 待同步增量算出（全量、跨窗口）。
-	WindowClicks int64
 	// Daily 是按天趋势，按日期升序。
 	Daily []DailyCount
 	// Referers 是来源分布，按点击数降序。

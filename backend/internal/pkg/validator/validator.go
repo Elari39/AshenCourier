@@ -12,7 +12,13 @@ import (
 	"strings"
 )
 
-// MaxURLLength 是目标 URL 的最大长度，与 DB 约束 links_target_url_len 保持一致。
+// MaxURLLength 是目标 URL 的最大长度。
+//
+// 两处长度检查都用字节数，与 DB 的 links_target_url_len 不冲突：
+// 入库的是 c.String() 的输出，而它已把非 ASCII 百分号编码成纯 ASCII
+// （一个中文字符 → %XX%XX%XX 共 9 字节），编码只会变长、不会变短；
+// 因此「原始输入超过上限 ⇒ 编码后必然超限」，按字节卡原始输入不会
+// 误拒任何 DB 能接受的值 —— 它只是把必然失败的请求提前挡掉。
 const MaxURLLength = 2048
 
 // 目标 URL 校验哨兵错误。
@@ -30,7 +36,7 @@ var (
 )
 
 // Normalize 规范化目标 URL：
-//  1. 去掉首尾空白；空串、超长直接拒绝
+//  1. 去掉首尾空白；空串、超长直接拒绝（长度按字符数计，与 DB 的 char_length 同口径）
 //  2. 缺 scheme 时按 https 补齐（用户粘贴 example.com/xx 是常见输入）
 //  3. scheme 只允许 http / https，host 必须存在
 //  4. 小写化 scheme 与 host，其余部分原样保留（path 大小写有意义）
@@ -49,8 +55,12 @@ func Normalize(raw string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("validator: normalize %q: %w", s, ErrMalformed)
 	}
-	if u.Scheme == "" {
-		// 无 scheme：按 https 补齐后重新解析
+	// 补 scheme 的判定不能只看 u.Scheme == ""：
+	// "example.com:8080/x" 会被 url.Parse 拆成 scheme="example.com" + opaque="8080/x"
+	// （scheme 的合法字符集里本来就有 '.'），随后落进 ErrBadScheme —— 用户并没有写
+	// 协议，报「仅支持 http/https」就成了误导。形如「主机名:纯数字端口」的输入
+	// 在这里一律按「缺 scheme」补齐再解析。
+	if u.Scheme == "" || looksLikeHostPort(u.Scheme, u.Opaque) {
 		u, err = url.Parse("https://" + s)
 		if err != nil {
 			return "", fmt.Errorf("validator: normalize %q: %w", s, ErrMalformed)
@@ -94,28 +104,29 @@ func IsAllowedTarget(target string) bool {
 	return u.Hostname() != ""
 }
 
-// RefererHost 从 Referer 头里取出主机名，用于统计「来源分布」。
-// 取不到（空值、纯路径、脏数据）时返回空串，调用方应归入「直接访问」。
-func RefererHost(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
+// looksLikeHostPort 判定「scheme + opaque」形态是否其实是 host:port 被误读。
+//
+// 条件（全部满足才认）：
+//   - scheme 形如主机名：含点号（example.com / 127.0.0.1）或是 localhost
+//   - opaque 的首段是纯数字端口（8080/x 的 "8080"）
+//
+// 这样 mailto:foo、javascript:alert(1) 这类真 scheme 不会被误补 https，
+// 而用户忘写协议的「域名:端口」输入能落到正确的补全分支。
+func looksLikeHostPort(scheme, opaque string) bool {
+	if scheme == "" || opaque == "" {
+		return false
 	}
-	if u, err := url.Parse(raw); err == nil && u.Host != "" {
-		return strings.ToLower(u.Hostname())
+	if !strings.Contains(scheme, ".") && !strings.EqualFold(scheme, "localhost") {
+		return false
 	}
-	// 兜底：手工剥掉 scheme 与 path
-	rest := raw
-	if _, after, found := strings.Cut(raw, "//"); found {
-		rest = after
+	port, _, _ := strings.Cut(opaque, "/")
+	if port == "" {
+		return false
 	}
-	host, _, _ := strings.Cut(rest, "/")
-	// 去掉可能的 userinfo 与端口
-	if _, after, found := strings.Cut(host, "@"); found {
-		host = after
+	for i := range len(port) {
+		if port[i] < '0' || port[i] > '9' {
+			return false
+		}
 	}
-	if h, _, found := strings.Cut(host, ":"); found {
-		host = h
-	}
-	return strings.ToLower(host)
+	return true
 }

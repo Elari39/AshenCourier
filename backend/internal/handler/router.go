@@ -106,8 +106,10 @@ func Router(opts Options) http.Handler {
 	mux.Handle("GET /api/links/{code}/stats",
 		limit(opts.RateLimitStats)(optionalUser(http.HandlerFunc(statsAPI.show))))
 
-	// ---- 短码跳转：兜底模式，必须最后注册 ----
-	mux.Handle("/{code}", limit(opts.RateLimitRedirect)(http.HandlerFunc(redirectAPI.serve)))
+	// ---- 短码跳转：兜底模式 ----
+	// 显式限定 GET：不加方法前缀时 POST /abc、DELETE /abc 也会命中这里
+	// 并返回 302（顺带记一次点击）。ServeMux 的 "GET" 模式顺带匹配 HEAD。
+	mux.Handle("GET /{code}", limit(opts.RateLimitRedirect)(http.HandlerFunc(redirectAPI.serve)))
 
 	return httpx.Chain(mux,
 		httpx.Recover(opts.Logger),

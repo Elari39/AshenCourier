@@ -8,7 +8,9 @@ import (
 // 保留字表：这些前缀/路径已经在 nginx 或前端路由层被占用，
 // 一旦被注册成短码就会「吃掉」真实页面或 API。
 //
-// ⚠️ 硬约束：前端新增任何顶级路由，必须同步加到本表，并更新 reserved_test.go 的断言。
+// ⚠️ 硬约束：前端新增任何顶级路由，必须同步加到本表，并更新 shortcode_test.go
+// 里 TestReservedSetContents 的 wantContains 断言（不是 reserved_test.go，
+// 那个文件并不存在）。
 // 详见 PLAN.md §9.1 与 README「新增前端顶级路由」一节。
 var reserved = map[string]struct{}{
 	// --- 基础设施 / 静态资源 ---

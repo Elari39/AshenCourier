@@ -135,6 +135,14 @@ func TestIsValidShape(t *testing.T) {
 func TestGenerate(t *testing.T) {
 	t.Parallel()
 
+	// 前置条件：保留字表里必须存在「7 位纯 base62 字符」的词。
+	// 否则 Generate 的保留字过滤就成了空断言，本测试也测不出东西。
+	for _, word := range []string{"favicon", "privacy", "pricing", "contact"} {
+		if !IsReserved(word) {
+			t.Fatalf("前置条件不成立：%q 应被判定为保留字", word)
+		}
+	}
+
 	seen := make(map[string]struct{}, 512)
 	for range 512 {
 		code, err := Generate()

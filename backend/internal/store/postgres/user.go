@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"ashen-courier/internal/domain"
 	"uuid"
@@ -22,8 +23,11 @@ type UserStore struct {
 const userColumns = `id, email, password_hash, display_name, created_at, updated_at`
 
 // userRow 是 users 表的一行。
+// id 用 pgtype.UUID 而不是领域层的 uuid.UUID：与 linkRow 保持一致，
+// 也遵守本包 db.go 的约定 —— 不依赖 pgx 对「底层为 [16]byte 的命名类型」
+// 的隐式 scan plan 识别。
 type userRow struct {
-	id           uuid.UUID
+	id           pgtype.UUID
 	email        string
 	passwordHash string
 	displayName  string
@@ -39,7 +43,7 @@ func (r *userRow) dest() []any {
 // toDomain 把行数据转成领域实体。
 func (r *userRow) toDomain() *domain.User {
 	return &domain.User{
-		ID:           r.id,
+		ID:           fromPgUUID(r.id),
 		Email:        r.email,
 		PasswordHash: r.passwordHash,
 		DisplayName:  r.displayName,

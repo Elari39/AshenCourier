@@ -25,9 +25,11 @@ VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''),
 
 // InsertBatch 用 pgx.Batch 一次性提交整批明细。
 //
-// 该操作本身不是原子的（Batch 在 PG 里是一条条执行的，除非包在显式事务里），
-// 但整体包在隐式事务中由 pgx 处理：任一语句失败即返回错误，worker 会重投整批。
-// at-least-once 语义下允许重复插入，计数不依赖明细条数，因此可接受。
+// ⚠️ 注意：这不是事务。pgx 的 Batch 靠一次往返把多条语句发出去，但在没有显式
+// 事务包裹时每条仍各自自动提交 —— 第 N 条失败时前 N-1 条已经落库，且后续语句
+// 会被跳过。整体设计已声明接受 at-least-once：worker 在本批失败时不 ACK，
+// 消息会重投，因此重复明细是可预期的，计数也走 INCR 累加而不依赖明细条数。
+// 若将来需要「整批原子」，得显式开 pgx.Tx（代价是牺牲批量吞吐）。
 func (s *ClickStore) InsertBatch(ctx context.Context, events []domain.ClickEvent) error {
 	if len(events) == 0 {
 		return nil
@@ -80,15 +82,15 @@ func (s *ClickStore) Aggregate(ctx context.Context, q domain.StatsQuery) (*domai
 		Browsers: []domain.BucketCount{},
 	}
 
-	// 1) 窗口内明细总数
-	const totalSQL = `SELECT count(*) FROM click_events WHERE link_id = $1 AND occurred_at >= $2`
-	if err := s.db.pool.QueryRow(ctx, totalSQL, args...).Scan(&out.WindowClicks); err != nil {
-		return nil, fmt.Errorf("store.postgres: stats total: %w", err)
-	}
-
-	// 2) 按天趋势
+	// 1) 按天趋势
+	//
+	// occurred_at 是 timestamptz，date_trunc('day', ...) 会先按**会话时区**转换再截断。
+	// 而 Go 侧 service.fillDaily 是按 UTC 日历日补齐和比对的，两者只在会话时区为
+	// UTC 时一致 —— 官方 PG 镜像默认就是 UTC 所以看不出来，一旦给容器设了 TZ
+	// （或换成时区跟随实例配置的托管库），跨日边界的点击会被归到错的那一天。
+	// 因此显式固定 UTC 日历日。
 	const dailySQL = `
-SELECT date_trunc('day', occurred_at)::date AS day, count(*) AS clicks
+SELECT date_trunc('day', occurred_at AT TIME ZONE 'UTC')::date AS day, count(*) AS clicks
 FROM click_events
 WHERE link_id = $1 AND occurred_at >= $2
 GROUP BY day
@@ -101,7 +103,7 @@ ORDER BY day`
 		return nil, err
 	}
 
-	// 3) 来源分布
+	// 2) 来源分布
 	refererSQL := `
 SELECT ` + refererHostExpr + ` AS host, count(*) AS clicks
 FROM click_events
@@ -113,7 +115,7 @@ LIMIT $3`
 		return nil, err
 	}
 
-	// 4) 设备分布
+	// 3) 设备分布
 	const deviceSQL = `
 SELECT coalesce(nullif(device, ''), 'unknown') AS bucket, count(*) AS clicks
 FROM click_events
@@ -125,7 +127,7 @@ LIMIT $3`
 		return nil, err
 	}
 
-	// 5) 浏览器分布
+	// 4) 浏览器分布
 	const browserSQL = `
 SELECT coalesce(nullif(browser, ''), 'unknown') AS bucket, count(*) AS clicks
 FROM click_events

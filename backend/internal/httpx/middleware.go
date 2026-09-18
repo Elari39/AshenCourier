@@ -115,22 +115,33 @@ func CORS(allowedOrigins ...string) Middleware {
 }
 
 // statusRecorder 记录状态码与响应字节数，供访问日志使用。
+//
+// 用独立的 wrote 标志而不是拿 status 当哨兵：初始 status 就是 200，
+// 若处理器先用 Write 隐式写出 200 再调 WriteHeader(500)（net/http 会忽略
+// 第二次调用），拿 status 判断会把「已隐式 200」误认成「还没写头」，
+// 于是日志记成 500 而客户端实际收到 200。
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
 	bytes  int
+	wrote  bool
 }
 
 // WriteHeader 记录首次状态码（后续重复调用被忽略，与 net/http 语义一致）。
 func (r *statusRecorder) WriteHeader(code int) {
-	if r.status == http.StatusOK {
+	if !r.wrote {
 		r.status = code
+		r.wrote = true
 	}
 	r.ResponseWriter.WriteHeader(code)
 }
 
-// Write 记录写入字节数。
+// Write 记录写入字节数；首次写入意味着隐式 200。
 func (r *statusRecorder) Write(b []byte) (int, error) {
+	if !r.wrote {
+		r.status = http.StatusOK
+		r.wrote = true
+	}
 	n, err := r.ResponseWriter.Write(b)
 	r.bytes += n
 	return n, err

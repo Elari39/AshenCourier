@@ -22,6 +22,8 @@ const (
 	MaxLength = 32
 	// MaxAttempts 是短码唯一约束冲突后的最大重试次数。
 	MaxAttempts = 5
+	// maxReservedRetries 是 Generate 撞上保留字后的最大重试次数。
+	maxReservedRetries = 8
 )
 
 // 短码校验哨兵错误。
@@ -37,12 +39,24 @@ var (
 )
 
 // Generate 生成一个随机短码；随机源为 crypto/rand，失败时向上传递错误。
+//
+// 结果一定不是保留字：跳转路径会用 IsReserved 把保留字一律挡成 404
+// （见 handler/redirect.go），若随机结果撞上保留字，链接能创建成功却
+// 永远跳不了。保留字表里存在 favicon / privacy / pricing / contact 这几个
+// 7 位纯 base62 字符的词，概率虽小但不为零，因此这里重试直到不撞为止。
 func Generate() (string, error) {
-	code, err := base62.Random(DefaultLength)
-	if err != nil {
-		return "", fmt.Errorf("shortcode: generate: %w", err)
+	for range maxReservedRetries {
+		code, err := base62.Random(DefaultLength)
+		if err != nil {
+			return "", fmt.Errorf("shortcode: generate: %w", err)
+		}
+		if !IsReserved(code) {
+			return code, nil
+		}
 	}
-	return code, nil
+	// 62^7 里只有 4 个保留字（含大小写变体），连撞 8 次的概率可视为 0；
+	// 真走到这里说明保留字表被填成了异常规模，应当显式失败而不是放行。
+	return "", fmt.Errorf("shortcode: generate: 连续 %d 次撞上保留字", maxReservedRetries)
 }
 
 // Validate 校验「用户自定义别名」：长度、字符集、保留字三重检查。

@@ -36,6 +36,18 @@ func TestNormalize(t *testing.T) {
 		{"data 协议被拒", "data:text/html,<h1>x</h1>", "", ErrBadScheme},
 		{"file 协议被拒", "file:///etc/passwd", "", ErrBadScheme},
 		{"ftp 协议被拒", "ftp://example.com/x", "", ErrBadScheme},
+		{"mailto 被拒（不误补 https）", "mailto:foo@bar.com", "", ErrBadScheme},
+		// 「域名:端口」没写协议：此前会被误读成 scheme=域名，报「仅支持 http/https」，
+		// 对没写协议的用户是误导 —— 应按缺 scheme 补 https 处理。
+		{"域名带端口缺 scheme", "example.com:8080/x", "https://example.com:8080/x", nil},
+		{"localhost 带端口缺 scheme", "localhost:3000/dev", "https://localhost:3000/dev", nil},
+		{"域名带端口无路径", "example.com:8443", "https://example.com:8443", nil},
+		{"域名端口非数字仍是非法 scheme", "example.com:abc", "", ErrBadScheme},
+		// 多字节会被百分号编码放大（一个中文 → 9 字节 ASCII），所以「原始输入没超」
+		// 不代表「入库后没超」：这条原始输入 1820 字节能过输入检查，
+		// 但 c.String() 之后是 5420 字节，必须被输出检查拦下。
+		{"多字节编码后超限", "https://example.com/" + strings.Repeat("中", 600), "", ErrTooLong},
+		{"多字节完全超限", "https://example.com/" + strings.Repeat("中", 3000), "", ErrTooLong},
 		{"无主机名", "https://", "", ErrNoHost},
 		{"超长", "https://example.com/" + strings.Repeat("a", MaxURLLength), "", ErrTooLong},
 	}
@@ -117,31 +129,28 @@ func TestIsAllowedTarget(t *testing.T) {
 	}
 }
 
-func TestRefererHost(t *testing.T) {
+// TestLooksLikeHostPort 单测护住「域名:端口」误判为 scheme 的判定逻辑本身。
+func TestLooksLikeHostPort(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		in   string
-		want string
+		scheme string
+		opaque string
+		want   bool
 	}{
-		{"完整 URL", "https://twitter.com/user/status/1", "twitter.com"},
-		{"无路径", "https://twitter.com", "twitter.com"},
-		{"带端口", "https://news.ycombinator.com:8443/item?id=1", "news.ycombinator.com"},
-		{"大写折叠", "HTTPS://Weibo.COM/a", "weibo.com"},
-		{"无 scheme", "twitter.com/x", "twitter.com"},
-		{"空值", "", ""},
-		{"只给了路径", "/foo/bar", ""},
-		{"带 userinfo", "https://user:pass@example.com/x", "example.com"},
+		{"example.com", "8080/x", true},   // 域名 + 数字端口
+		{"localhost", "3000", true},       // localhost + 端口
+		{"example.com", "8443", true},     // 无路径
+		{"example.com", "abc/x", false},   // 端口非数字 → 真 scheme
+		{"mailto", "foo@bar", false},      // 真 scheme 无点号
+		{"javascript", "alert(1)", false}, // 同上
+		{"", "8080", false},               // scheme 为空（走不到这里）
+		{"example.com", "", false},        // opaque 为空（是 authority 形态）
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			if got := RefererHost(tc.in); got != tc.want {
-				t.Fatalf("RefererHost(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
+		if got := looksLikeHostPort(tc.scheme, tc.opaque); got != tc.want {
+			t.Errorf("looksLikeHostPort(%q, %q) = %v, want %v", tc.scheme, tc.opaque, got, tc.want)
+		}
 	}
 }
