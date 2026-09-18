@@ -92,7 +92,8 @@ docker compose up -d --build
 | 部署 | Docker Compose + nginx | 单域名同时托管 SPA、反代 `/api`、承接短码跳转 |
 
 设计系统的来源是仓库里的 [`DESIGN.md`](./DESIGN.md)（暖奶油画布 + 珊瑚主色 + 深色产品面板 +
-衬线大标题）。实施计划与全部技术取舍见 [`PLAN.md`](./PLAN.md)。
+衬线大标题）。实施计划与全部技术取舍见 [`PLAN.md`](./PLAN.md)；后续迭代计划（M0–M5：CI、
+幂等去重、明细页、标签、密码保护、GeoIP……）见 [`PLAN-NEXT.md`](./PLAN-NEXT.md)。
 
 ## 架构
 
