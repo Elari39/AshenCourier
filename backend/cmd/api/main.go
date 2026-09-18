@@ -91,7 +91,11 @@ func run() error {
 	defer stop()
 
 	// ---- 依赖 ----
-	pg, err := postgres.Open(ctx, cfg.DatabaseURL, 16)
+	pg, err := postgres.Open(ctx, postgres.Options{
+		DSN:       cfg.DatabaseURL,
+		MaxConns:  16,
+		OpTimeout: cfg.PGTimeout,
+	})
 	if err != nil {
 		return err
 	}

@@ -140,8 +140,12 @@ func WriteError(w http.ResponseWriter, r *http.Request, status int, code, messag
 //	ErrConflict        → 409 conflict
 //	ErrGone            → 410 gone
 //	ErrUnauthorized    → 401 unauthorized
-//	ErrUnavailable     → 503 unavailable（可重试）
+//	ErrUnavailable     → 503 unavailable（可重试，带 Retry-After）
 //	ErrInternal / 其他  → 500 internal（并打 error 日志）
+//
+// 判定顺序即优先级。多个哨兵同时成立时，「可重试」压过「业务冲突」：
+// service.Create 在自动短码连续冲突后返回 errors.Join(ErrUnavailable, *ConflictError)，
+// 若让 ErrConflict 先命中，用户会看到「该短链已被占用，请换一个」——可他根本没提供短码。
 func WriteDomainError(w http.ResponseWriter, r *http.Request, err error) {
 	if invalid, ok := errors.AsType[*domain.InvalidInputError](err); ok {
 		WriteError(w, r, http.StatusUnprocessableEntity, invalidCode(invalid.Field), invalid.Reason, invalid.Field)
@@ -150,6 +154,9 @@ func WriteDomainError(w http.ResponseWriter, r *http.Request, err error) {
 
 	status, code, message := http.StatusInternalServerError, "internal", "服务器内部错误"
 	switch {
+	case errors.Is(err, domain.ErrUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "unavailable", "服务暂时不可用，请稍后重试"
+		w.Header().Set("Retry-After", "2")
 	case errors.Is(err, domain.ErrNotFound):
 		status, code, message = http.StatusNotFound, "not_found", "未找到该资源"
 	case errors.Is(err, domain.ErrForbidden):
@@ -160,9 +167,6 @@ func WriteDomainError(w http.ResponseWriter, r *http.Request, err error) {
 		status, code, message = http.StatusGone, "gone", "该短链已失效"
 	case errors.Is(err, domain.ErrUnauthorized):
 		status, code, message = http.StatusUnauthorized, "unauthorized", "登录状态无效，请重新登录"
-	case errors.Is(err, domain.ErrUnavailable):
-		status, code, message = http.StatusServiceUnavailable, "unavailable", "服务暂时不可用，请稍后重试"
-		w.Header().Set("Retry-After", "2")
 	}
 
 	if status >= http.StatusInternalServerError {
@@ -186,16 +190,25 @@ func WriteUnauthorized(w http.ResponseWriter, r *http.Request, message string) {
 // DecodeJSON 读取并解析请求体。
 //
 // 用 encoding/json/v2 的 UnmarshalRead：v2 默认拒绝非法 UTF-8 与重复键，
-// 这两点恰好是常见的参数走私手法。
+// 这两点恰好是常见的参数走私手法。再显式打开 RejectUnknownMembers ——
+// v2 的默认是**忽略**未知字段，字段名拼错（titel / targetUrl）时请求会
+// 看起来「成功但没生效」（PATCH 场景下还会退化成「没有需要更新的字段」），
+// 很难排查；直接 400 把问题指出来。
 func DecodeJSON[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 	var payload T
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 
-	if err := json.UnmarshalRead(r.Body, &payload); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+	if err := json.UnmarshalRead(r.Body, &payload, json.RejectUnknownMembers(true)); err != nil {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			WriteError(w, r, http.StatusRequestEntityTooLarge, "body_too_large",
 				"请求体过大", "")
+			return payload, false
+		}
+		// 语义错误（未知字段、类型不匹配）与语法错误分开提示：
+		// 前者多半是字段名写错，后者才是 JSON 本身坏了。
+		if _, ok := errors.AsType[*json.SemanticError](err); ok {
+			WriteError(w, r, http.StatusBadRequest, "invalid_json",
+				"请求体字段不合法（含未知字段或类型不匹配）", "")
 			return payload, false
 		}
 		WriteError(w, r, http.StatusBadRequest, "invalid_json", "请求体不是合法 JSON", "")

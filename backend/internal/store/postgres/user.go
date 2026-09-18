@@ -59,7 +59,10 @@ INSERT INTO users (id, email, password_hash, display_name, created_at, updated_a
 VALUES ($1, $2, $3, $4, now(), now())
 RETURNING created_at, updated_at`
 
-	err := s.db.pool.QueryRow(ctx, q,
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
+	err := s.db.pool.QueryRow(opCtx, q,
 		toPgUUID(u.ID), u.Email, u.PasswordHash, u.DisplayName,
 	).Scan(&u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
@@ -72,12 +75,15 @@ RETURNING created_at, updated_at`
 func (s *UserStore) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	q := `SELECT ` + userColumns + ` FROM users WHERE lower(email) = lower($1)`
 
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
 	var r userRow
-	if err := s.db.pool.QueryRow(ctx, q, email).Scan(r.dest()...); err != nil {
+	if err := s.db.pool.QueryRow(opCtx, q, email).Scan(r.dest()...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.NotFound("user", email)
 		}
-		return nil, fmt.Errorf("store.postgres: get user by email: %w", err)
+		return nil, fmt.Errorf("store.postgres: get user by email: %w", storageError(err))
 	}
 	return r.toDomain(), nil
 }
@@ -86,12 +92,15 @@ func (s *UserStore) GetByEmail(ctx context.Context, email string) (*domain.User,
 func (s *UserStore) GetByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
 	q := `SELECT ` + userColumns + ` FROM users WHERE id = $1`
 
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
 	var r userRow
-	if err := s.db.pool.QueryRow(ctx, q, toPgUUID(id)).Scan(r.dest()...); err != nil {
+	if err := s.db.pool.QueryRow(opCtx, q, toPgUUID(id)).Scan(r.dest()...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.NotFound("user", id.String())
 		}
-		return nil, fmt.Errorf("store.postgres: get user by id: %w", err)
+		return nil, fmt.Errorf("store.postgres: get user by id: %w", storageError(err))
 	}
 	return r.toDomain(), nil
 }

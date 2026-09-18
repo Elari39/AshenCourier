@@ -220,6 +220,10 @@ func (s *Shortener) Create(ctx context.Context, in CreateInput) (*CreateResult, 
 		}
 		lastErr = err
 	}
+	// 连续撞码说明随机源或唯一约束出了异常，是「内部耗尽」而非用户输入错误：
+	// 因此报可重试的 503（客户端直接重试即可），而不是 409「请换一个短码」。
+	// 这里 errors.Join 同时保留了最后一次 ErrConflict 供日志归因，映射优先级由
+	// httpx.WriteDomainError 保证（ErrUnavailable 判在 ErrConflict 之前）。
 	return nil, fmt.Errorf("service.shortener: 连续 %d 次短码冲突: %w", shortcode.MaxAttempts, errors.Join(domain.ErrUnavailable, lastErr))
 }
 

@@ -44,16 +44,19 @@ func (s *ClickStore) InsertBatch(ctx context.Context, events []domain.ClickEvent
 		)
 	}
 
-	br := s.db.pool.SendBatch(ctx, batch)
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
+	br := s.db.pool.SendBatch(opCtx, batch)
 	// 必须把每条结果都消费掉，否则连接无法释放
 	for range len(events) {
 		if _, err := br.Exec(); err != nil {
 			_ = br.Close()
-			return fmt.Errorf("store.postgres: insert click events: %w", err)
+			return fmt.Errorf("store.postgres: insert click events: %w", storageError(err))
 		}
 	}
 	if err := br.Close(); err != nil {
-		return fmt.Errorf("store.postgres: close click batch: %w", err)
+		return fmt.Errorf("store.postgres: close click batch: %w", storageError(err))
 	}
 	return nil
 }
@@ -95,9 +98,12 @@ FROM click_events
 WHERE link_id = $1 AND occurred_at >= $2
 GROUP BY day
 ORDER BY day`
-	dailyRows, err := s.db.pool.Query(ctx, dailySQL, args...)
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
+	dailyRows, err := s.db.pool.Query(opCtx, dailySQL, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store.postgres: stats daily: %w", err)
+		return nil, fmt.Errorf("store.postgres: stats daily: %w", storageError(err))
 	}
 	if out.Daily, err = collectDaily(dailyRows); err != nil {
 		return nil, err
@@ -151,7 +157,7 @@ func (s *ClickStore) queryBuckets(ctx context.Context, sql string, baseArgs []an
 
 	rows, err := s.db.pool.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store.postgres: %s: %w", op, err)
+		return nil, fmt.Errorf("store.postgres: %s: %w", op, storageError(err))
 	}
 	return collectBuckets(rows, op)
 }
@@ -164,12 +170,12 @@ func collectDaily(rows pgx.Rows) ([]domain.DailyCount, error) {
 	for rows.Next() {
 		var d domain.DailyCount
 		if err := rows.Scan(&d.Date, &d.Clicks); err != nil {
-			return nil, fmt.Errorf("store.postgres: stats daily: scan: %w", err)
+			return nil, fmt.Errorf("store.postgres: stats daily: scan: %w", storageError(err))
 		}
 		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store.postgres: stats daily: iterate: %w", err)
+		return nil, fmt.Errorf("store.postgres: stats daily: iterate: %w", storageError(err))
 	}
 	return out, nil
 }
@@ -182,12 +188,12 @@ func collectBuckets(rows pgx.Rows, op string) ([]domain.BucketCount, error) {
 	for rows.Next() {
 		var b domain.BucketCount
 		if err := rows.Scan(&b.Name, &b.Clicks); err != nil {
-			return nil, fmt.Errorf("store.postgres: %s: scan: %w", op, err)
+			return nil, fmt.Errorf("store.postgres: %s: scan: %w", op, storageError(err))
 		}
 		out = append(out, b)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store.postgres: %s: iterate: %w", op, err)
+		return nil, fmt.Errorf("store.postgres: %s: iterate: %w", op, storageError(err))
 	}
 	return out, nil
 }

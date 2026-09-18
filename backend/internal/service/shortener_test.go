@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 	"uuid"
@@ -254,6 +255,36 @@ func TestCreateFailureDoesNotEvict(t *testing.T) {
 	}
 	if len(cache.evicted) != 0 {
 		t.Fatalf("创建失败不应 Evict，实际记录：%v", cache.evicted)
+	}
+}
+
+// TestCreateCollisionExhaustionIsRetryable 守住 409/503 的映射优先级：
+// 自动生成短码连续撞上唯一约束，说明随机源或约束索引出了问题，是「内部耗尽」
+// 而不是用户输入错误。若让 errors.Join 里的 *ConflictError 抢先命中映射，
+// 用户会收到 409「该短链已被占用，请换一个」——可他根本没提供短码。
+func TestCreateCollisionExhaustionIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	repo := newLinkRepoFake()
+	cache := newMemCache()
+	s := newShortenerForTest(repo, cache)
+	ctx := t.Context()
+
+	// 让每一次落库都撞唯一约束，逼 Create 走完 MaxAttempts 次重试
+	repo.createF = func(link *domain.Link) error {
+		return domain.Conflict("short_code", link.ShortCode)
+	}
+
+	_, err := s.Create(ctx, CreateInput{TargetURL: "https://example.com/boom"})
+	if !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("连续短码冲突应报可重试的 ErrUnavailable，实际：%v", err)
+	}
+	// 最后一次冲突仍要能被 errors.Is 到，否则日志里只剩一句「连续 5 次冲突」而无从归因
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("错误里应保留最后一次冲突，实际：%v", err)
+	}
+	if !strings.Contains(err.Error(), "短码冲突") {
+		t.Fatalf("错误文案应说明是短码冲突，实际：%v", err)
 	}
 }
 

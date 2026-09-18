@@ -80,7 +80,10 @@ INSERT INTO links (id, short_code, target_url, title, owner_id, key_hash,
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::inet, now(), now())
 RETURNING created_at, updated_at`
 
-	err := s.db.pool.QueryRow(ctx, q,
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
+	err := s.db.pool.QueryRow(opCtx, q,
 		toPgUUID(link.ID),
 		link.ShortCode,
 		link.TargetURL,
@@ -103,12 +106,15 @@ RETURNING created_at, updated_at`
 func (s *LinkStore) GetByCode(ctx context.Context, code string) (*domain.Link, error) {
 	q := `SELECT ` + linkColumns + ` FROM links WHERE short_code = $1`
 
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
 	var r linkRow
-	if err := s.db.pool.QueryRow(ctx, q, code).Scan(r.dest()...); err != nil {
+	if err := s.db.pool.QueryRow(opCtx, q, code).Scan(r.dest()...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.NotFound("link", code)
 		}
-		return nil, fmt.Errorf("store.postgres: get link %q: %w", code, err)
+		return nil, fmt.Errorf("store.postgres: get link %q: %w", code, storageError(err))
 	}
 	return r.toDomain(), nil
 }
@@ -131,8 +137,11 @@ RETURNING ` + linkColumns
 		statusArg = new(int16(*patch.Status))
 	}
 
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
 	var r linkRow
-	err := s.db.pool.QueryRow(ctx, q,
+	err := s.db.pool.QueryRow(opCtx, q,
 		code, patch.TargetURL, patch.Title, statusArg, patch.ClearExpires, patch.ExpiresAt,
 	).Scan(r.dest()...)
 	if err != nil {
@@ -152,13 +161,16 @@ SET status = $2, updated_at = now()
 WHERE short_code = $1
 RETURNING id`
 
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
 	var id pgtype.UUID
-	err := s.db.pool.QueryRow(ctx, q, code, int16(domain.LinkStatusDeleted)).Scan(&id)
+	err := s.db.pool.QueryRow(opCtx, q, code, int16(domain.LinkStatusDeleted)).Scan(&id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.NotFound("link", code)
 		}
-		return fmt.Errorf("store.postgres: soft delete link %q: %w", code, err)
+		return fmt.Errorf("store.postgres: soft delete link %q: %w", code, storageError(err))
 	}
 	return nil
 }
@@ -184,9 +196,12 @@ func (s *LinkStore) ListByOwner(ctx context.Context, filter domain.LinkFilter) (
 	sql := `SELECT ` + linkColumns + ` FROM links WHERE ` + strings.Join(where, " AND ") +
 		` ORDER BY created_at DESC, id DESC LIMIT $` + strconv.Itoa(len(args))
 
-	rows, err := s.db.pool.Query(ctx, sql, args...)
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
+	rows, err := s.db.pool.Query(opCtx, sql, args...)
 	if err != nil {
-		return nil, domain.LinkCursor{}, fmt.Errorf("store.postgres: list links: %w", err)
+		return nil, domain.LinkCursor{}, fmt.Errorf("store.postgres: list links: %w", storageError(err))
 	}
 	defer rows.Close()
 
@@ -194,12 +209,12 @@ func (s *LinkStore) ListByOwner(ctx context.Context, filter domain.LinkFilter) (
 	for rows.Next() {
 		var r linkRow
 		if err := rows.Scan(r.dest()...); err != nil {
-			return nil, domain.LinkCursor{}, fmt.Errorf("store.postgres: scan link row: %w", err)
+			return nil, domain.LinkCursor{}, fmt.Errorf("store.postgres: scan link row: %w", storageError(err))
 		}
 		links = append(links, *r.toDomain())
 	}
 	if err := rows.Err(); err != nil {
-		return nil, domain.LinkCursor{}, fmt.Errorf("store.postgres: iterate link rows: %w", err)
+		return nil, domain.LinkCursor{}, fmt.Errorf("store.postgres: iterate link rows: %w", storageError(err))
 	}
 
 	var next domain.LinkCursor
@@ -220,13 +235,16 @@ SET owner_id = $2, key_hash = NULL, updated_at = now()
 WHERE short_code = $1 AND owner_id IS NULL AND status <> $3
 RETURNING ` + linkColumns
 
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
 	var r linkRow
-	err := s.db.pool.QueryRow(ctx, q, code, toPgUUID(ownerID), int16(domain.LinkStatusDeleted)).Scan(r.dest()...)
+	err := s.db.pool.QueryRow(opCtx, q, code, toPgUUID(ownerID), int16(domain.LinkStatusDeleted)).Scan(r.dest()...)
 	if err == nil {
 		return r.toDomain(), nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("store.postgres: claim link %q: %w", code, err)
+		return nil, fmt.Errorf("store.postgres: claim link %q: %w", code, storageError(err))
 	}
 
 	// 没更新到行：区分「不存在」与「已被占用」，后者返回 409
@@ -248,12 +266,15 @@ SET click_count = click_count + $2, updated_at = now()
 WHERE short_code = $1
 RETURNING click_count`
 
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
 	var total int64
-	if err := s.db.pool.QueryRow(ctx, q, code, delta).Scan(&total); err != nil {
+	if err := s.db.pool.QueryRow(opCtx, q, code, delta).Scan(&total); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, domain.NotFound("link", code)
 		}
-		return 0, fmt.Errorf("store.postgres: add click count %q: %w", code, err)
+		return 0, fmt.Errorf("store.postgres: add click count %q: %w", code, storageError(err))
 	}
 	return total, nil
 }
@@ -271,9 +292,12 @@ WHERE short_code IN (
 )
 RETURNING short_code`
 
-	rows, err := s.db.pool.Query(ctx, q, now, int16(domain.LinkStatusActive), int16(domain.LinkStatusDisabled), limit)
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
+	rows, err := s.db.pool.Query(opCtx, q, now, int16(domain.LinkStatusActive), int16(domain.LinkStatusDisabled), limit)
 	if err != nil {
-		return nil, fmt.Errorf("store.postgres: expire due links: %w", err)
+		return nil, fmt.Errorf("store.postgres: expire due links: %w", storageError(err))
 	}
 	defer rows.Close()
 
@@ -281,12 +305,12 @@ RETURNING short_code`
 	for rows.Next() {
 		var code string
 		if err := rows.Scan(&code); err != nil {
-			return nil, fmt.Errorf("store.postgres: scan expired code: %w", err)
+			return nil, fmt.Errorf("store.postgres: scan expired code: %w", storageError(err))
 		}
 		codes = append(codes, code)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store.postgres: iterate expired codes: %w", err)
+		return nil, fmt.Errorf("store.postgres: iterate expired codes: %w", storageError(err))
 	}
 	return codes, nil
 }

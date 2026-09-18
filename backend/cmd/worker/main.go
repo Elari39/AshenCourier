@@ -53,7 +53,11 @@ func probeDependencies() int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pg, err := postgres.Open(ctx, cfg.DatabaseURL, 2)
+	pg, err := postgres.Open(ctx, postgres.Options{
+		DSN:       cfg.DatabaseURL,
+		MaxConns:  2,
+		OpTimeout: cfg.PGTimeout,
+	})
 	if err != nil {
 		return 1
 	}
@@ -96,7 +100,11 @@ func run() error {
 	logger.Info("启动 AshenCourier worker",
 		"version", version, "consumer", consumer, "redis", cfg.RedisAddr)
 
-	pg, err := postgres.Open(ctx, cfg.DatabaseURL, 8)
+	pg, err := postgres.Open(ctx, postgres.Options{
+		DSN:       cfg.DatabaseURL,
+		MaxConns:  8,
+		OpTimeout: cfg.PGTimeout,
+	})
 	if err != nil {
 		return err
 	}
