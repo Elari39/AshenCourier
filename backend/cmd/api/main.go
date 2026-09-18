@@ -135,9 +135,15 @@ func run() error {
 		logger.Warn("限流应急开关已打开（RATE_LIMIT_DISABLED=true），本次启动全量放行")
 	}
 
-	// 统计写入协程：独立于请求生命周期，关闭时会把队列冲完
-	shortener.Start(ctx)
-	defer shortener.Stop()
+	// 统计写入协程用**独立**的 ctx，并且要到 HTTP 优雅关闭结束之后才取消。
+	//
+	// 直接复用上面的 ctx 会有一个静默丢数据的窗口：信号一到，写协程立刻 drain 并退出，
+	// 而此刻 http.Server.Shutdown 还在等在途请求 —— 这些请求记录进来的点击只会堆在
+	// 队列里被进程带走，既不写 Redis，也不计入 dropped_clicks。
+	statsCtx, stopStats := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopStats() // 兜底：正常路径下已在关闭流程里显式调用过
+	shortener.Start(statsCtx)
+	defer shortener.Stop() // 兜底：正常路径下已在关闭流程里显式等待过
 
 	// ---- 内嵌 worker（本地开发形态）----
 	var embedded *worker.Worker
@@ -223,6 +229,12 @@ func run() error {
 		runErr = <-errCh
 	case runErr = <-errCh:
 	}
+
+	// 到这里 HTTP 已不再接新请求、在途请求也已结束，此刻才让统计协程把队列冲完。
+	// Stop 内部是 wg.Wait，会一直等到 drain 结束（最长 drainTimeout）。
+	stopStats()
+	shortener.Stop()
+
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr
 	}

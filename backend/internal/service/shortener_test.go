@@ -258,6 +258,44 @@ func TestCreateFailureDoesNotEvict(t *testing.T) {
 	}
 }
 
+// TestStopDrainsQueueBeforeReturning 钉住关停顺序所依赖的前提：
+// Stop() 返回时队列必须已经冲完（内部是 wg.Wait）。
+//
+// cmd/api 因此可以「先停 HTTP、再 stopStats()、最后 Stop()」——在途请求在这之前
+// 记录进来的点击都还能落进 Redis，而不是被进程直接带走（F5 的静默丢失窗口）。
+func TestStopDrainsQueueBeforeReturning(t *testing.T) {
+	t.Parallel()
+
+	recorder := &recorderFake{}
+	s := NewShortener(newLinkRepoFake(), newMemCache(), recorder, ShortenerConfig{
+		BaseURL:     "https://sho.rt",
+		CacheTTL:    time.Hour,
+		NegativeTTL: time.Minute,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	const pending = 5
+	for range pending {
+		s.RecordClick(domain.ClickRecord{
+			Code:       "abc1234",
+			OccurredAt: time.Now().UTC(),
+		})
+	}
+
+	cancel()
+	s.Stop()
+
+	if recorder.calls != pending {
+		t.Fatalf("Stop 返回时队列应已冲完：写入 %d 条，实际 %d 条", pending, recorder.calls)
+	}
+	if got := s.QueueLen(); got != 0 {
+		t.Fatalf("Stop 返回后队列长度 = %d, want 0", got)
+	}
+}
+
 // TestCreateCollisionExhaustionIsRetryable 守住 409/503 的映射优先级：
 // 自动生成短码连续撞上唯一约束，说明随机源或约束索引出了问题，是「内部耗尽」
 // 而不是用户输入错误。若让 errors.Join 里的 *ConflictError 抢先命中映射，

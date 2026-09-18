@@ -464,11 +464,15 @@ func (s *Shortener) drain(ctx context.Context) {
 	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainTimeout)
 	defer cancel()
 
+	drained := 0
 	for {
 		select {
 		case rec := <-s.queue:
 			s.write(drainCtx, rec)
+			drained++
 		default:
+			// 这条日志是关停顺序的验收依据：它必须出现在 HTTP 优雅关闭完成之后
+			slog.Info("统计写入队列已排空", "drained", drained)
 			return
 		}
 	}
