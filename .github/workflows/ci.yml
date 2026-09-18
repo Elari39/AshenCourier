@@ -1,0 +1,134 @@
+# ============================================================
+# AshenCourier —— CI
+#
+# 三个 job：
+#   backend  快（~1 分钟）：gofmt / go vet / go test -race
+#   frontend 快（~1 分钟）：typecheck / lint / build
+#   smoke    慢（3–5 分钟，要真起 5 个容器）：端到端冒烟 + SPA 路由断言
+#
+# smoke 刻意只在 main 与手动触发时跑：`docker compose up -d --build` 要几分钟，
+# 放进每个 PR 会把反馈时间拖垮。PR 走上面两个快 job。
+#
+# 与 PLAN-NEXT.md §4 的草稿相比修了四处（照抄草稿会跑不起来）：
+#   1. smoke job 的 go 步骤必须在 backend/ 下执行（Go 模块在 backend/，不在仓库根）
+#   2. 等待健康检查改用 curl 轮询 —— 草稿里 `grep -c '"A"|"B"'` 在 BRE 下 `|` 是字面量，永远匹配不到
+#   3. pnpm/action-setup 显式给 version：仓库根没有 package.json，它读不到 packageManager 字段
+#   4. frontend job 补上 pnpm build（全局 DoD 要求）
+# ============================================================
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新推送取消上一轮未完成的运行，避免排队堆积
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend（fmt / vet / test -race）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod # 1.27.1
+          cache-dependency-path: backend/go.sum
+
+      # 不用 `test -z "$(gofmt -l .)"`：失败时看不到到底是哪个文件没格式化
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::以下文件未通过 gofmt，请运行 gofmt -w："
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt 干净"
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race 需要 cgo；ubuntu-latest 自带 gcc，无需额外安装
+      - name: go test -race
+        run: go test -race -count=1 ./...
+
+  frontend:
+    name: frontend（typecheck / lint / build）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      # 必须在 setup-node 之前：下面的 cache: pnpm 依赖已安装的 pnpm
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm build
+
+  smoke:
+    name: smoke（容器级端到端）
+    # 只在 main 与手动触发时跑；PR 不跑（见文件头说明）
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      # compose 强制要求三个必填口令（缺一个直接拒绝启动），这里从模板造一份
+      - name: 造 .env
+        run: |
+          cp .env.example .env
+          sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-postgres-pwd/" .env
+          sed -i "s/^REDIS_PASSWORD=.*/REDIS_PASSWORD=ci-redis-pwd/" .env
+          sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgres://ashen:ci-postgres-pwd@postgres:5432/ashen?sslmode=disable|" .env
+          sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -base64 32)|" .env
+
+      - name: docker compose up -d --build
+        run: docker compose up -d --build
+
+      - name: 等 /healthz 就绪（最多 3 分钟）
+        run: |
+          for i in $(seq 1 36); do
+            if curl -fsS http://localhost:8080/healthz >/dev/null 2>&1; then
+              echo "服务已就绪（第 $i 次探测）"
+              break
+            fi
+            echo "第 $i 次探测未就绪，等待 5s…"
+            sleep 5
+          done
+          docker compose ps
+
+      - name: 端到端冒烟（含 SPA 顶级路由断言）
+        working-directory: backend
+        run: go run ./cmd/smoke -base http://localhost:8080 -expect-spa
+
+      - name: 失败时 dump 容器日志
+        if: failure()
+        run: docker compose logs --no-color --tail 200
