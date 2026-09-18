@@ -26,8 +26,9 @@
   缓存未命中才回源一次 PostgreSQL。数据库挂了对已缓存的短链都没有影响。
 - **统计不阻塞跳转。** 点击写入一个有界队列（默认 4096），队满直接丢弃并计数。
   丢弃数在 `/healthz` 里可见 —— 宁可少记一次点击，也不让 302 慢 1 毫秒。
-- **界面上「总点击」不会卡住。** 数字 = `links.click_count`（PG 基线）+ `clicks:cnt:{code}`
-  （Redis 待同步增量），worker 每 2 秒回刷，正常情况下偏差小于 2 秒。
+- **界面上「总点击」不会卡住。** 详情页数字 = `links.click_count`（PG 基线）+
+  `clicks:cnt:{code}`（Redis 待同步增量），worker 每 2 秒回刷，正常情况下偏差小于 2 秒；
+  仪表盘汇总数只含 PG 基线，最多滞后一个回刷周期。
 - **匿名也能管理。** 不注册就能建短链，返回一次性管理密钥（数据库只存 SHA-256，
   明文只在创建响应里出现一次）。登录后可以用它把链接**认领**到自己账号下。
 - **限流降级而不是熔断。** Redis 挂了就全量放行并累计降级次数，绝不因为限流组件故障把整站打成 5xx。
@@ -111,8 +112,10 @@ Browser ──┬─ /api/*         ─┐
 
 1. **跳转不落库**：`GET /{code}` 只做 Redis `GET` + `INCR` + `XADD`，全程无 PostgreSQL 写入。
    缓存 miss 才回源一次，并把结果回填。
-2. **计数最终一致**：界面上的「总点击」= `links.click_count`（PG 基线）+ `clicks:cnt:{code}`
+2. **计数最终一致**：详情页的「总点击」= `links.click_count`（PG 基线）+ `clicks:cnt:{code}`
    （Redis 待同步增量）。worker 每 2 秒把增量刷回 PG，正常情况下偏差 < 2 秒。
+   仪表盘的汇总数只取列表接口的 `click_count`（纯 PG 基线，不为 N 条链接各读一次 Redis），
+   最多滞后一个回刷周期。
 3. **统计不阻塞跳转**：统计写入走**有界队列**（默认 4096），队列满直接丢弃并计数，
    丢弃数在 `/healthz` 的 `dropped_clicks` 里可见。
 
@@ -132,7 +135,7 @@ Browser ──┬─ /api/*         ─┐
 | 对象 | 作用 | 关键约束 |
 | --- | --- | --- |
 | `links` | 短链主体 | `short_code` 全局唯一；`status` 用 `smallint` 而非 PG enum（改状态机不用 `ALTER TYPE`）；`key_hash bytea` 存匿名管理密钥的 SHA-256 |
-| `users` | 账号 | `email` 用 `citext`（大小写不敏感唯一） |
+| `users` | 账号 | `email` 存 `text` + `unique index (lower(email))` 做大小写不敏感唯一（不引入 `citext` 扩展，省掉一次 `CREATE EXTENSION`） |
 | `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入 |
 | `link_click_totals` | 视图 | `links.click_count + count(click_events)`，用于人工对账 |
 
@@ -178,6 +181,7 @@ Browser ──┬─ /api/*         ─┐
   "total_clicks": 1284,
   "window_clicks": 342,
   "days": 30,
+  "since": "2026-08-28T00:00:00Z",
   "daily":        [{ "date": "2026-09-01", "clicks": 12 }],
   "top_referers": [{ "referer": "twitter.com", "clicks": 300 }],
   "devices":      [{ "device": "mobile", "clicks": 800 }],
@@ -187,6 +191,10 @@ Browser ──┬─ /api/*         ─┐
 
 `total_clicks` 是全量口径（PG 基线 + Redis 待同步增量）；
 `daily` 与三个分布是窗口口径。`daily` 一定补齐成连续的 `days` 天，缺失日期为 0。
+
+标记为 `omitzero` 的字段（`window_clicks` / `since` 等）在零值时不出现——
+`window_clicks` 为 0 就是「窗口内还没有明细落库」，前端按 `?? 0` 兜底。
+`frontend/src/api/types.ts` 里这些字段都是可选的，正是这个原因。
 
 ## 目录结构
 

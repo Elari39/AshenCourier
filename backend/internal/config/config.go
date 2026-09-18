@@ -1,7 +1,12 @@
 // Package config 把环境变量装载成一份带默认值、并做过合法性校验的配置。
 //
 // 约定：
-//   - 所有键都可通过环境变量覆盖，缺省值由 cmp.Or 提供，不使用 .env 解析库
+//   - 走环境变量的键就是下面这些（README 的「环境变量」一节是同一份清单）：
+//     HTTP_ADDR / DATABASE_URL / REDIS_ADDR / REDIS_PASSWORD / REDIS_DB / JWT_SECRET /
+//     PUBLIC_BASE_URL / LOG_LEVEL / WORKER_ENABLED / TRUST_PROXY / RATE_LIMIT_DISABLED。
+//     缺省值由 cmp.Or 提供，不使用 .env 解析库
+//   - 其余项（各类超时、TTL、页大小、限流配额）是内置默认值，调整要改代码：
+//     它们**不是**环境变量，别照上面那份清单去猜
 //   - 只有真正无法给出安全默认值的项（数据库地址、Redis 口令、JWT 密钥）才拒绝启动
 package config
 

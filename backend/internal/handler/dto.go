@@ -125,14 +125,14 @@ type linkListResponse struct {
 
 // statsResponse 是统计响应，字段名与 PLAN.md §7 的契约一致。
 type statsResponse struct {
-	TotalClicks int64        `json:"total_clicks"`
-	WindowClick int64        `json:"window_clicks,omitzero"`
-	Days        int          `json:"days"`
-	Since       time.Time    `json:"since,omitzero"`
-	Daily       []dailyDTO   `json:"daily"`
-	TopReferers []refererDTO `json:"top_referers"`
-	Devices     []deviceDTO  `json:"devices"`
-	Browsers    []browserDTO `json:"browsers"`
+	TotalClicks  int64        `json:"total_clicks"`
+	WindowClicks int64        `json:"window_clicks,omitzero"`
+	Days         int          `json:"days"`
+	Since        time.Time    `json:"since,omitzero"`
+	Daily        []dailyDTO   `json:"daily"`
+	TopReferers  []refererDTO `json:"top_referers"`
+	Devices      []deviceDTO  `json:"devices"`
+	Browsers     []browserDTO `json:"browsers"`
 }
 
 // dailyDTO 是趋势图的一个数据点。
@@ -162,14 +162,14 @@ type browserDTO struct {
 // toStatsResponse 把聚合结果转成响应 DTO。
 func toStatsResponse(s *service.StatsResult) statsResponse {
 	resp := statsResponse{
-		TotalClicks: s.TotalClicks,
-		WindowClick: windowClicks(s),
-		Days:        s.Days,
-		Since:       s.Since,
-		Daily:       make([]dailyDTO, 0, len(s.Daily)),
-		TopReferers: make([]refererDTO, 0, len(s.Referers)),
-		Devices:     make([]deviceDTO, 0, len(s.Devices)),
-		Browsers:    make([]browserDTO, 0, len(s.Browsers)),
+		TotalClicks:  s.TotalClicks,
+		WindowClicks: windowClicks(s),
+		Days:         s.Days,
+		Since:        s.Since,
+		Daily:        make([]dailyDTO, 0, len(s.Daily)),
+		TopReferers:  make([]refererDTO, 0, len(s.Referers)),
+		Devices:      make([]deviceDTO, 0, len(s.Devices)),
+		Browsers:     make([]browserDTO, 0, len(s.Browsers)),
 	}
 	// dateLayout 与 service 内部保持一致：趋势图横轴固定 YYYY-MM-DD
 	const dateLayout = "2006-01-02"

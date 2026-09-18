@@ -38,6 +38,11 @@ func IsValidEmail(email string) bool {
 	if at <= 0 || at == len(email)-1 {
 		return false
 	}
+	// IndexByte 只找得到第一个 '@'，所以必须显式拒掉第二个 ——
+	// 否则注释里的「含单个 '@'」就是空话（a@b@c.com 会一路通过）。
+	if strings.ContainsRune(email[at+1:], '@') {
+		return false
+	}
 	if strings.ContainsAny(email, " \t\r\n") {
 		return false
 	}
