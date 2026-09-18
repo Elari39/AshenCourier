@@ -100,16 +100,19 @@ type ReadResult struct {
 
 // ClickCounter 是计数回刷所需的原子操作，实现在 internal/store/redis。
 //
-// 这组操作是「计数不丢」的全部关键路径：TakeDelta 取走即删，写库失败时必须用
-// RestoreDelta **按值**归还（只补 dirty 标记的话下一轮会读到 0，那批点击就永久丢了）。
-// 抽成端口是为了让 worker 能用手写 fake 单测这些不变量。
+// 这组操作是「计数不丢」的全部关键路径，语义在 M3-1 调整为**补偿式**：
+//
+//	TakeDelta 只读不删（键里的增量一直留着）→ 写库 → SettleDelta 结算（减掉 + 摘 dirty）
+//
+// 这样进程崩在「写库之后、结算之前」只会让基线**重复累加一批**，而不是把增量丢掉；
+// 崩在写库之前则原样重做。抽成端口是为了让 worker 能用手写 fake 单测这些不变量。
 type ClickCounter interface {
 	// DirtyCodes 返回最多 limit 个待回刷的短码。
 	DirtyCodes(ctx context.Context, limit int) ([]string, error)
-	// TakeDelta 原子地取走某短码当前的计数增量（取走即删）；无增量返回 0。
+	// TakeDelta 读取某短码当前的计数增量（**不删键**，也不摘 dirty）；无增量返回 0。
 	TakeDelta(ctx context.Context, code string) (int64, error)
-	// RestoreDelta 把已取走但未能落库的增量按值归还，并重新登记 dirty。
-	RestoreDelta(ctx context.Context, code string, delta int64) error
+	// SettleDelta 在增量成功落库后结算：计数键减去这批增量并摘掉 dirty 标记（原子）。
+	SettleDelta(ctx context.Context, code string, delta int64) error
 	// MarkDirty 把短码重新登记回 dirty 集合。
 	MarkDirty(ctx context.Context, codes ...string) error
 }

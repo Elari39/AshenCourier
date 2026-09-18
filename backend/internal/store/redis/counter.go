@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+
+	goredis "github.com/redis/go-redis/v9"
 )
 
 // PendingDelta 读取某短码尚未回刷到 PG 的计数增量；键不存在返回 0。
@@ -98,32 +100,26 @@ func (c *Client) DirtyCodes(ctx context.Context, limit int) ([]string, error) {
 	return codes, nil
 }
 
-// TakeDelta 原子地取走某短码当前的计数增量。
+// TakeDelta 读取某短码当前的计数增量。
 //
-// ⚠️ 内部顺序是「先 SREM 再 GETDEL」，而不是直觉上的「先取值再移除」：
+// ⚠️ 这里刻意**不删键** —— 这是 M3-1 要修的「崩溃少计」窗口：
 //
-//	若先 GETDEL 再 SREM，存在丢更新窗口 ——
-//	GETDEL 之后、SREM 之前若发生一次新点击（INCR + SADD），
-//	SREM 会把这枚新点击重新摘掉 dirty 标记，那 +1 就再也不会被回刷。
+//	旧实现是 SREM + GETDEL「取走即删」：进程若在 GETDEL 之后被 SIGKILL，
+//	那批增量就永久少计（写库报错的路径还能按值归还，崩溃这条路不能）。
 //
-//	反过来先 SREM 则两种交错都安全：
-//	  · 新点击的 SADD 排在 SREM 之后 → dirty 里仍有它，下一轮补刷（GETDEL 得 0，无害）
-//	  · 新点击的 SADD 排在 SREM 之前 → 它的 INCR 也必然在 GETDEL 之前，增量被一并取走
+//	新实现只读，于是崩溃只剩两种结果：
+//	  · 崩在写库之前 → 键里还有 delta、dirty 也还在 → 下一轮重做，**不丢**
+//	  · 崩在写库之后、结算之前 → 基线多算一批（≤ 一个批次），是**重复累加**而非丢失
 //
-// 返回 0 表示这一轮没有增量（上一轮刚取过、dirty 标记尚未清理时会这样）。
+// 与 README 的口径一致：宁可重复累加，也不能丢。
+// 结算归 SettleDelta；写库失败时**什么都不用还** —— 值一直留在键里。
+//
+// 返回 0 表示这一轮没有增量。
 func (c *Client) TakeDelta(ctx context.Context, code string) (int64, error) {
 	opCtx, cancel := c.opCtx(ctx)
 	defer cancel()
 
-	pipe := c.rdb.Pipeline()
-	pipe.SRem(opCtx, dirtySetKey, code)
-	get := pipe.GetDel(opCtx, ClickCounterKey(code))
-
-	if _, err := pipe.Exec(opCtx); err != nil && !isNil(err) {
-		return 0, fmt.Errorf("store.redis: take delta %q: %w", code, err)
-	}
-
-	n, err := get.Int64()
+	n, err := c.rdb.Get(opCtx, ClickCounterKey(code)).Int64()
 	if err != nil {
 		if isNil(err) {
 			return 0, nil
@@ -133,25 +129,44 @@ func (c *Client) TakeDelta(ctx context.Context, code string) (int64, error) {
 	return n, nil
 }
 
-// RestoreDelta 把「已被 TakeDelta 取走、但未能落库」的增量按值归还，并重新登记 dirty。
+// settleDeltaScript 原子地结算一批增量：
+//  1. delta > 0 时减掉这批增量；
+//  2. 减到 0（或更少）就把计数键删掉 —— 只 DECRBY 的话，每个被点过的短码都会永久
+//     留下一个值为 0 的键（这些键没有 TTL），键数量随「历史上被点过的链接数」无限增长；
+//  3. 摘掉 dirty 标记。
 //
-// 只补 dirty 标记是不够的：TakeDelta 用 GETDEL 把计数键删掉了，若只把短码塞回
-// dirty 集合，下一轮 GETDEL 会得到 0，于是命中「本轮无增量」而跳过 —— 那部分点击
-// 就永久丢失了（明细已通过 Stream 落库，基线增量却没了，两个口径再也对不上）。
-// 因此必须把值本身写回去。
-func (c *Client) RestoreDelta(ctx context.Context, code string, delta int64) error {
-	if delta == 0 {
-		return nil
+// 整段必须原子：拆成「先减、后删」两条命令时，若两次之间有新点击（INCR），
+// 那个 DEL 会把新点击一起删掉 —— 少计一次，正是本批次要消灭的东西。
+var settleDeltaScript = goredis.NewScript(`
+local delta = tonumber(ARGV[1])
+if delta > 0 then
+  local left = redis.call('DECRBY', KEYS[1], delta)
+  if left <= 0 then
+    redis.call('DEL', KEYS[1])
+  end
+end
+redis.call('SREM', KEYS[2], ARGV[2])
+return 1
+`)
+
+// SettleDelta 在增量成功写进 PG 基线之后结算：减掉这批增量 + 摘掉 dirty 标记。
+//
+// 两步必须原子（Lua 由 Redis 单线程执行），否则会留下两种坏状态：
+//   - 只减不摘：短码下一轮被再扫一次（读到 0，无害但白跑）
+//   - 只摘不减：那批增量留在键里却再也不会被回刷 —— 等于少计
+//
+// delta <= 0 表示「这一轮没有增量」，此时只摘标记。
+func (c *Client) SettleDelta(ctx context.Context, code string, delta int64) error {
+	if delta < 0 {
+		delta = 0
 	}
+
 	opCtx, cancel := c.opCtx(ctx)
 	defer cancel()
 
-	pipe := c.rdb.Pipeline()
-	pipe.IncrBy(opCtx, ClickCounterKey(code), delta)
-	pipe.SAdd(opCtx, dirtySetKey, code)
-
-	if _, err := pipe.Exec(opCtx); err != nil {
-		return fmt.Errorf("store.redis: restore delta %q: %w", code, err)
+	keys := []string{ClickCounterKey(code), dirtySetKey}
+	if _, err := settleDeltaScript.Run(opCtx, c.rdb, keys, delta, code).Result(); err != nil {
+		return fmt.Errorf("store.redis: settle delta %q: %w", code, err)
 	}
 	return nil
 }

@@ -118,6 +118,8 @@ Browser ──┬─ /api/*         ─┐
    worker 每 2 秒把增量刷回 PG，正常情况下偏差 < 2 秒。
    列表页用一次 `MGET` 批量读本页所有短码（不逐条查，延迟不随页大小线性增长）；
    统计侧读失败只记 warn 并退回纯基线，绝不把列表打成 5xx。
+   回刷是**补偿式**的（见下面第 3 条）：增量只读不删、写库成功后才结算，
+   进程崩溃最多让基线重复累加一批，不会丢计数。
 3. **统计不阻塞跳转**：统计写入走**有界队列**（默认 4096），队列满直接丢弃并计数，
    丢弃数在 `/healthz` 的 `dropped_clicks` 里可见。
 
@@ -411,6 +413,30 @@ worker 在「处理完但 ACK 前」重启时，同一批明细会被重投。�
 
 人工对账用视图 `link_click_totals` 比较 `base_count` 与 `event_count`。
 
+### 3b. 计数回刷是补偿式的（崩溃只重复、不丢失）
+
+worker 刷计数分三步，**增量只读不删**（M3-1）：
+
+```text
+读取：GET clicks:cnt:{code}                  ← 不删键
+写库：UPDATE links SET click_count += delta
+结算：INCRBY clicks:cnt:{code} -delta + SREM clicks:dirty {code}   ← MULTI/EXEC 原子
+```
+
+于是进程崩溃只剩两种结果：
+
+| 崩在哪 | 结果 |
+| --- | --- |
+| `GET` 之后、写库之前 | 键里还有 delta、dirty 也还在 → 下一轮重做，**不丢** |
+| 写库之后、结算之前 | 基线**重复累加一批**（≤ 一个批次），不是丢失 |
+| 结算之后 | 正常 |
+
+写库**报错**时不需要「归还」：值一直留在键里，只需保证 dirty 标记还在（下一轮重试）。
+这与「宁可重复累加也不能丢」一致；用 `link_click_totals` 对账时，
+`base_count` 比 `event_count` 略大属于已知情形，上限是一批。
+结算失败会打 `基线可能重复累加（上限一批）` 的 error 日志（内嵌 worker 时还会进入
+`/healthz` 的 `worker_errors`；生产形态下 worker 是独立容器，看它的容器日志）。
+
 ### 4. api 与 worker 共用镜像，换入口必须用 `entrypoint` 而不是 `command`
 
 `backend/Dockerfile` 是 exec 形式的 `ENTRYPOINT ["/app/api"]`。
@@ -481,6 +507,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ④**：明细幂等去重（M2-1） | 5 次跳转后 `count(event_uid) = count(distinct event_uid) = 5`（迁移前的 19 行历史数据为 NULL）；用**显式 Stream ID** 重投一条「已经插过」的消息 → 明细 7 → 7、该 `event_uid` 行数 1 → 1，worker 无 ERROR/WARN 且消息被 ACK | 本机 |
 | 迁移往返（M2-1） | `migrate down 1` + `up` 连续两轮无报错；`version` = 2；列与部分唯一索引恢复，之后的新跳转仍写入 `event_uid` | 本机 |
 | **容器级 ⑤**：列表口径 = 基线 + 待同步增量（M2-2） | 停掉 worker 后跳转 4 次：PG 基线仍 `0`、Redis 增量 `4`，而 `GET /api/links` 的 `click_count` = **4**，与详情 `total_clicks` 相等；恢复 worker 后基线刷成 `4`、增量键清空、列表仍为 `4`；把 Redis 停掉时列表仍 **200**（退回纯基线，不 5xx） | 本机 |
+| **容器级 ⑥**：补偿式计数（M3-1） | 停 worker 后跳转 10 次：`clicks:cnt:{code}` = `10`、`clicks:dirty` 含该码、PG 基线 `0`（增量没被「取走」）；启动 worker 后基线 `10`、明细 `10`，**计数键被删除**（不是留一个 0）且 dirty 清空；再压 100 次跳转 → 基线/明细都是 `100`；全库 `base_count <> event_count` 的链接数 = 0，`dropped_clicks` / `failed_clicks` 均为 0 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |

@@ -249,7 +249,7 @@ func (w *Worker) countSyncLoop(ctx context.Context) {
 }
 
 // syncCounts 回刷一轮计数增量。返回 error 只表示「这一轮整体失败」（取不到 dirty 列表），
-// 单个短码的失败都在内部消化：能归还的按值归还，短码已删除的丢弃并告警。
+// 单个短码的失败都在内部消化：写库失败就留着下一轮重做，短码已删除的丢弃并告警。
 func (w *Worker) syncCounts(ctx context.Context) error {
 	codes, err := w.counter.DirtyCodes(ctx, dirtyBatchSize)
 	if err != nil {
@@ -262,30 +262,46 @@ func (w *Worker) syncCounts(ctx context.Context) error {
 	synced := 0
 	var retry []string
 	for _, code := range codes {
+		// TakeDelta 只读不删：值留在键里，崩在任何一步都不会丢（见 domain.ClickCounter 注释）
 		delta, err := w.counter.TakeDelta(ctx, code)
 		if err != nil {
-			// 取不到增量：把标记放回去，下一轮重试
+			// 读不到增量：把标记放回去，下一轮重试
 			retry = append(retry, code)
 			continue
 		}
 		if delta == 0 {
+			// 没有增量也要结算：TakeDelta 不再顺手摘 dirty，不摘的话这个短码每轮都被扫到
+			if serr := w.counter.SettleDelta(ctx, code, 0); serr != nil {
+				w.log.Warn("清理空增量的 dirty 标记失败，下一轮会重扫", "code", code, "err", serr)
+			}
 			continue
 		}
 		if _, err := w.counts.AddClickCount(ctx, code, delta); err != nil {
 			if errors.Is(err, domain.ErrNotFound) {
-				// 短码已被删除，增量无处可去，直接丢弃并告警
+				// 短码已被删除，增量无处可去：结算掉（把键减到 0 并摘 dirty）后丢弃。
+				// 不结算的话值会一直留在键里、dirty 也一直在 —— 每 2 秒重试一次直到永远。
+				if serr := w.counter.SettleDelta(ctx, code, delta); serr != nil {
+					w.log.Warn("短码已删除，丢弃增量失败，下一轮会重试",
+						"code", code, "delta", delta, "err", serr)
+				}
 				w.log.Warn("短码已不存在，丢弃待同步的点击增量", "code", code, "delta", delta)
 				continue
 			}
-			// 写库失败：把取走的增量「按值」还回去，下一轮重试。
-			// 注意不能只调 MarkDirty —— TakeDelta 已用 GETDEL 删掉计数键，
-			// 只补标记的话下一轮会读到 0，这批点击就永久丢了。
-			if rerr := w.counter.RestoreDelta(ctx, code, delta); rerr != nil {
-				// 归还失败：这一批增量确实丢了，必须留明确日志（不是「可能」）
-				w.log.Error("归还点击增量失败，该批增量已丢失",
-					"code", code, "delta", delta, "err", rerr)
+			// 写库失败：不需要「归还」—— 补偿式下增量一直在键里。
+			// 只补一次 dirty 标记作为兜底（正常情况下它本来就没被摘掉）。
+			if merr := w.counter.MarkDirty(ctx, code); merr != nil {
+				w.log.Error("重新标记 dirty 失败，该批增量要等下一轮扫描才会重试",
+					"code", code, "delta", delta, "err", merr)
 			}
 			continue
+		}
+		// 落库成功才结算：减掉这批增量 + 摘掉 dirty 标记
+		if serr := w.counter.SettleDelta(ctx, code, delta); serr != nil {
+			// 结算失败 → 增量仍在键里、dirty 也还在 → 下一轮会把同一批再累加一次。
+			// 这是设计上接受的失败模式（重复累加 ≤ 一批），但必须留明确日志。
+			w.errors.Add(1)
+			w.log.Error("结算点击增量失败，基线可能重复累加（上限一批）",
+				"code", code, "delta", delta, "err", serr)
 		}
 		synced++
 	}

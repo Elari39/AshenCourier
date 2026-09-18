@@ -13,22 +13,27 @@ import (
 
 // ---- 测试替身：全部手写，与 service/shortener_test.go 的风格一致（不引 mock 库）----
 
-// fakeCounter 记录计数回刷的全部调用，用来钉住「取走要不回来就按值归还」这条不变量。
+// fakeCounter 记录计数回刷的全部调用，用来钉住补偿式的两条不变量：
+//
+//	写库失败 → 增量必须原样留在「键」里（绝不归还、绝不加回）
+//	写库成功 → 必须结算（减掉这批增量 + 摘 dirty）
 type fakeCounter struct {
 	dirty    []string
 	dirtyErr error
 	deltas   map[string]int64
 	takeErr  map[string]error
 
-	restored map[string]int64
-	marked   []string
+	settleErr map[string]error
+	settled   map[string]int64
+	marked    []string
 }
 
 func newFakeCounter() *fakeCounter {
 	return &fakeCounter{
-		deltas:   map[string]int64{},
-		takeErr:  map[string]error{},
-		restored: map[string]int64{},
+		deltas:    map[string]int64{},
+		takeErr:   map[string]error{},
+		settleErr: map[string]error{},
+		settled:   map[string]int64{},
 	}
 }
 
@@ -39,18 +44,21 @@ func (c *fakeCounter) DirtyCodes(context.Context, int) ([]string, error) {
 	return c.dirty, nil
 }
 
+// TakeDelta 对齐真实实现：只读不删（键里的值保持原样）。
 func (c *fakeCounter) TakeDelta(_ context.Context, code string) (int64, error) {
 	if err := c.takeErr[code]; err != nil {
 		return 0, err
 	}
-	delta := c.deltas[code]
-	delete(c.deltas, code)
-	return delta, nil
+	return c.deltas[code], nil
 }
 
-func (c *fakeCounter) RestoreDelta(_ context.Context, code string, delta int64) error {
-	c.restored[code] += delta
-	c.deltas[code] += delta
+// SettleDelta 对齐真实实现：减掉这批增量并摘掉 dirty 标记。
+func (c *fakeCounter) SettleDelta(_ context.Context, code string, delta int64) error {
+	if err := c.settleErr[code]; err != nil {
+		return err
+	}
+	c.settled[code] += delta
+	c.deltas[code] -= delta
 	return nil
 }
 
@@ -178,9 +186,10 @@ func newTestWorker(counter *fakeCounter, counts *fakeCounts, clicks *fakeClicks,
 
 // ---- 计数回刷 ----
 
-// TestSyncCountsRestoresDeltaOnWriteFailure 守住上一轮 P1 的修复：
-// TakeDelta 是「取走即删」，写库失败必须按值归还，只补 dirty 标记会让这批点击永久丢失。
-func TestSyncCountsRestoresDeltaOnWriteFailure(t *testing.T) {
+// TestSyncCountsKeepsDeltaWhenWriteFails 守住 M3-1 的补偿式语义：
+// TakeDelta 只读不删，写库失败时**什么都不用还** —— 增量必须原样留在键里，
+// 而且绝不能被「归还」成双份（旧实现的 RestoreDelta 在新语义下会让基线翻倍）。
+func TestSyncCountsKeepsDeltaWhenWriteFails(t *testing.T) {
 	t.Parallel()
 
 	counter := newFakeCounter()
@@ -195,22 +204,83 @@ func TestSyncCountsRestoresDeltaOnWriteFailure(t *testing.T) {
 	if err := w.syncCounts(t.Context()); err != nil {
 		t.Fatalf("单个短码写库失败不该让整轮报错：%v", err)
 	}
-	if got := counter.restored["abc1234"]; got != 7 {
-		t.Fatalf("RestoreDelta 归还的增量 = %d, want 7", got)
-	}
 	if got := counter.deltas["abc1234"]; got != 7 {
-		t.Fatalf("归还后计数键里应重新有 7，实际 %d", got)
+		t.Fatalf("写库失败后增量必须原样留在键里 7，实际 %d（少了=丢，多了=重复累加）", got)
 	}
-	if len(counter.marked) != 0 {
-		t.Fatalf("写库失败不该退化成 MarkDirty（它只补标记、不含数值）：%v", counter.marked)
+	if got := counter.settled["abc1234"]; got != 0 {
+		t.Fatalf("写库失败不该结算，实际结了 %d", got)
+	}
+	// 兜底重新登记 dirty：下一轮必须还能扫到这个短码
+	if len(counter.marked) != 1 || counter.marked[0] != "abc1234" {
+		t.Fatalf("写库失败应把短码重新登记进 dirty，实际 %v", counter.marked)
 	}
 	if got := w.Stats().CountSynced; got != 0 {
 		t.Fatalf("失败的短码不该计入 CountSynced，实际 %d", got)
 	}
 }
 
+// TestSyncCountsSettlesAfterSuccessfulWrite：成功路径必须结算（减掉 + 摘 dirty），
+// 否则增量会在下一轮被再加一次 —— 这就是「重复累加」的来源。
+func TestSyncCountsSettlesAfterSuccessfulWrite(t *testing.T) {
+	t.Parallel()
+
+	counter := newFakeCounter()
+	counter.dirty = []string{"abc1234"}
+	counter.deltas["abc1234"] = 5
+
+	counts := newFakeCounts()
+	w := newTestWorker(counter, counts, &fakeClicks{}, &fakeStream{}, &fakeCache{}, &fakeSweeper{})
+
+	if err := w.syncCounts(t.Context()); err != nil {
+		t.Fatalf("syncCounts 不应失败：%v", err)
+	}
+	if got := counts.added["abc1234"]; got != 5 {
+		t.Fatalf("基线增量 = %d, want 5", got)
+	}
+	if got := counter.settled["abc1234"]; got != 5 {
+		t.Fatalf("成功写库后应结算 5，实际 %d", got)
+	}
+	if got := counter.deltas["abc1234"]; got != 0 {
+		t.Fatalf("结算后键里应为 0，实际 %d", got)
+	}
+	if len(counter.marked) != 0 {
+		t.Fatalf("成功路径不该重新登记 dirty，实际 %v", counter.marked)
+	}
+	if got := w.Stats().CountSynced; got != 1 {
+		t.Fatalf("CountSynced = %d, want 1", got)
+	}
+}
+
+// TestSyncCountsSettleFailureMeansPossibleDoubleCount：结算失败时基线已经加过，
+// 增量却还在键里 —— 设计上接受「重复累加 ≤ 一批」，但必须记账并告警（不是静默）。
+func TestSyncCountsSettleFailureMeansPossibleDoubleCount(t *testing.T) {
+	t.Parallel()
+
+	counter := newFakeCounter()
+	counter.dirty = []string{"abc1234"}
+	counter.deltas["abc1234"] = 4
+	counter.settleErr["abc1234"] = errors.New("redis: i/o timeout")
+
+	counts := newFakeCounts()
+	w := newTestWorker(counter, counts, &fakeClicks{}, &fakeStream{}, &fakeCache{}, &fakeSweeper{})
+
+	if err := w.syncCounts(t.Context()); err != nil {
+		t.Fatalf("结算失败不该让整轮报错：%v", err)
+	}
+	if got := counts.added["abc1234"]; got != 4 {
+		t.Fatalf("基线已经加过 4，实际 %d", got)
+	}
+	if got := counter.deltas["abc1234"]; got != 4 {
+		t.Fatalf("结算失败后增量仍在键里（下一轮会重复累加），实际 %d", got)
+	}
+	if got := w.Stats().Errors; got != 1 {
+		t.Fatalf("结算失败必须计入 errors，实际 %d", got)
+	}
+}
+
 // TestSyncCountsDropsDeltaWhenLinkGone：短码已被删除时增量无处可去，
-// 只能丢弃并告警，但绝不能假装成功或反复归还。
+// 只能丢弃并告警 —— 但必须**结算掉**（把键减到 0 并摘 dirty），
+// 否则值会一直留在键里、dirty 也一直在，每 2 秒重试一次直到永远。
 func TestSyncCountsDropsDeltaWhenLinkGone(t *testing.T) {
 	t.Parallel()
 
@@ -226,8 +296,11 @@ func TestSyncCountsDropsDeltaWhenLinkGone(t *testing.T) {
 	if err := w.syncCounts(t.Context()); err != nil {
 		t.Fatalf("短码已删除不该让整轮报错：%v", err)
 	}
-	if got := counter.restored["gone123"]; got != 0 {
-		t.Fatalf("短码已删除时不该归还增量（还回去下一轮还是会失败），实际归还 %d", got)
+	if got := counter.settled["gone123"]; got != 3 {
+		t.Fatalf("丢弃增量必须走结算（减掉 3 + 摘 dirty），实际结算 %d", got)
+	}
+	if got := counter.deltas["gone123"]; got != 0 {
+		t.Fatalf("结算后键里应为 0，实际 %d（留着就会每轮重试）", got)
 	}
 	if got := w.Stats().CountSynced; got != 0 {
 		t.Fatalf("被丢弃的增量不该计入 CountSynced，实际 %d", got)
@@ -256,7 +329,8 @@ func TestSyncCountsReMarksDirtyWhenTakeFails(t *testing.T) {
 	}
 }
 
-// TestSyncCountsSuccessAndZeroDelta：正常路径累加进基线；增量为 0 的短码直接跳过。
+// TestSyncCountsSuccessAndZeroDelta：正常路径累加进基线；增量为 0 的短码直接跳过
+// —— 但仍要结算一次（delta=0 只摘 dirty），否则 TakeDelta 不摘标记会让它每轮重扫。
 func TestSyncCountsSuccessAndZeroDelta(t *testing.T) {
 	t.Parallel()
 
@@ -276,6 +350,9 @@ func TestSyncCountsSuccessAndZeroDelta(t *testing.T) {
 	}
 	if _, ok := counts.added["b1234"]; ok {
 		t.Fatal("增量为 0 的短码不该写库")
+	}
+	if _, ok := counter.settled["b1234"]; !ok {
+		t.Fatal("增量为 0 的短码也要结算（摘 dirty），否则每轮都会被重扫")
 	}
 	if got := w.Stats().CountSynced; got != 1 {
 		t.Fatalf("CountSynced = %d, want 1", got)
