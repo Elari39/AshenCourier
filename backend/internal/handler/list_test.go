@@ -25,6 +25,13 @@ func listLinks(t *testing.T, links []domain.Link, deltas domain.ClickDeltaBatchR
 		},
 	}
 
+	return listLinksWithRepo(t, repo, deltas, "")
+}
+
+// listLinksWithRepo 允许调用方自己给仓储替身（用来断言下推的筛选条件）。
+func listLinksWithRepo(t *testing.T, repo *stubLinkRepo, deltas domain.ClickDeltaBatchReader, rawQuery string) (*httptest.ResponseRecorder, linkListResponse) {
+	t.Helper()
+
 	h := &linkHandler{
 		shortener:   newTestShortener(repo),
 		pageSize:    20,
@@ -32,8 +39,12 @@ func listLinks(t *testing.T, links []domain.Link, deltas domain.ClickDeltaBatchR
 		deltas:      deltas,
 	}
 
+	target := "/api/links"
+	if rawQuery != "" {
+		target += "?" + rawQuery
+	}
 	userID := uuid.NewV7()
-	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/links", nil)
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
 	r = r.WithContext(withUserID(r.Context(), userID))
 
 	rr := httptest.NewRecorder()
@@ -46,6 +57,32 @@ func listLinks(t *testing.T, links []domain.Link, deltas domain.ClickDeltaBatchR
 		}
 	}
 	return rr, body
+}
+
+// TestListPassesTagFilter 守住 M4-1 的筛选下发：query 里的 `tag` 必须落到
+// 仓储的 LinkFilter.Tag（并统一小写），否则筛选只在界面上「看起来」生效。
+func TestListPassesTagFilter(t *testing.T) {
+	t.Parallel()
+
+	var got domain.LinkFilter
+	repo := &stubLinkRepo{
+		listByOwner: func(_ context.Context, filter domain.LinkFilter) ([]domain.Link, domain.LinkCursor, error) {
+			got = filter
+			return nil, domain.LinkCursor{}, nil
+		},
+	}
+
+	rr, _ := listLinksWithRepo(t, repo, nil, "tag=%20Ops%20&q=blog")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d：%s", rr.Code, rr.Body.String())
+	}
+	if got.Tag != "ops" {
+		t.Errorf("下推的 Tag = %q，期望 %q（统一小写）", got.Tag, "ops")
+	}
+	if got.Query != "blog" {
+		t.Errorf("下推的 Query = %q，期望 %q", got.Query, "blog")
+	}
 }
 
 // TestListOverlaysPendingDelta 守住 M2-2 的口径统一：

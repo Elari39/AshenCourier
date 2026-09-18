@@ -35,6 +35,7 @@ func (h *linkHandler) create(w http.ResponseWriter, r *http.Request) {
 		CustomCode: req.CustomCode,
 		Title:      req.Title,
 		ExpiresAt:  req.ExpiresAt,
+		Tags:       req.Tags,
 		ClientIP:   httpx.ClientIP(r, h.trustProxy),
 	}
 	if id, authed := userIDFrom(r.Context()); authed {
@@ -71,7 +72,14 @@ func (h *linkHandler) list(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	links, nextCursor, err := h.shortener.List(r.Context(), id, query.Get("q"), limit, query.Get("cursor"), h.maxPageSize)
+	links, nextCursor, err := h.shortener.List(r.Context(), service.ListInput{
+		OwnerID:  id,
+		Query:    query.Get("q"),
+		Tag:      query.Get("tag"),
+		Limit:    limit,
+		Cursor:   query.Get("cursor"),
+		MaxLimit: h.maxPageSize,
+	})
 	if err != nil {
 		httpx.WriteDomainError(w, r, err)
 		return
@@ -230,6 +238,7 @@ func (h *linkHandler) buildPatch(w http.ResponseWriter, r *http.Request, link *d
 	var patch domain.LinkPatch
 	patch.TargetURL = req.TargetURL
 	patch.Title = req.Title
+	patch.Tags = req.Tags
 
 	if req.ExpiresAt != nil && req.ClearExpires {
 		httpx.WriteError(w, r, http.StatusUnprocessableEntity, "invalid_expires_at",

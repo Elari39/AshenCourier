@@ -144,10 +144,31 @@ type CreateInput struct {
 	Title string
 	// ExpiresAt 是可选过期时刻。
 	ExpiresAt *time.Time
+	// Tags 是可选标签（会在服务层校验并统一小写）。
+	Tags []string
 	// OwnerID 非空表示登录用户创建。
 	OwnerID *uuid.UUID
 	// ClientIP 记录创建者 IP，用于风控排查。
 	ClientIP string
+}
+
+// ListInput 是「我的链接」列表的查询条件。
+//
+// 收成一个结构体而不是继续加参数：查询条件已经有五个（搜索词 / 标签 / 分页游标 /
+// 页大小 / 上限），相邻的多个 string 参数在调用点极容易传错位。
+type ListInput struct {
+	// OwnerID 是列表归属的用户。
+	OwnerID uuid.UUID
+	// Query 是可选搜索词。
+	Query string
+	// Tag 是可选标签筛选。
+	Tag string
+	// Limit 是本页条数。
+	Limit int
+	// Cursor 是上一页的游标（空串表示第一页）。
+	Cursor string
+	// MaxLimit 是页大小上限。
+	MaxLimit int
 }
 
 // CreateResult 是创建结果。
@@ -177,6 +198,11 @@ func (s *Shortener) Create(ctx context.Context, in CreateInput) (*CreateResult, 
 		return nil, err
 	}
 
+	tags, err := normalizeTags(in.Tags)
+	if err != nil {
+		return nil, err
+	}
+
 	var manageKey string
 	var keyHash []byte
 	if in.OwnerID == nil {
@@ -193,6 +219,7 @@ func (s *Shortener) Create(ctx context.Context, in CreateInput) (*CreateResult, 
 		KeyHash:   keyHash,
 		Status:    domain.LinkStatusActive,
 		ExpiresAt: expiresAt,
+		Tags:      tags,
 		CreatedIP: in.ClientIP,
 	}
 
@@ -325,21 +352,23 @@ func (s *Shortener) Get(ctx context.Context, code string) (*domain.Link, error) 
 }
 
 // List 列出某用户的短链，返回列表与下一页游标（末页为空串）。
-func (s *Shortener) List(ctx context.Context, ownerID uuid.UUID, query string, limit int, cursorRaw string, maxLimit int) ([]domain.Link, string, error) {
+func (s *Shortener) List(ctx context.Context, in ListInput) ([]domain.Link, string, error) {
+	limit := in.Limit
 	if limit <= 0 {
 		limit = 20
 	}
-	if maxLimit > 0 {
-		limit = min(limit, maxLimit)
+	if in.MaxLimit > 0 {
+		limit = min(limit, in.MaxLimit)
 	}
-	cursor, err := decodeCursor(cursorRaw)
+	cursor, err := decodeCursor(in.Cursor)
 	if err != nil {
 		return nil, "", err
 	}
 
 	links, next, err := s.links.ListByOwner(ctx, domain.LinkFilter{
-		OwnerID: ownerID,
-		Query:   query,
+		OwnerID: in.OwnerID,
+		Query:   in.Query,
+		Tag:     normalizeTagFilter(in.Tag),
 		Limit:   limit,
 		Cursor:  cursor,
 	})
@@ -374,6 +403,17 @@ func (s *Shortener) Update(ctx context.Context, code string, patch domain.LinkPa
 			return nil, err
 		}
 		patch.ExpiresAt = expiresAt
+	}
+	if patch.Tags != nil {
+		tags, err := normalizeTags(*patch.Tags)
+		if err != nil {
+			return nil, err
+		}
+		if tags == nil {
+			// 显式清空：指针指向空切片（与「不动」的 nil 指针区分开）
+			tags = []string{}
+		}
+		patch.Tags = &tags
 	}
 
 	link, err := s.links.Update(ctx, code, patch)

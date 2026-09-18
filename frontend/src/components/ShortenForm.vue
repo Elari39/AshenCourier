@@ -22,6 +22,7 @@ const { rememberManageKey, isAuthenticated } = useAuth()
 const targetURL = ref('')
 const customCode = ref('')
 const title = ref('')
+const tags = ref('')
 const expiresAt = ref('')
 const advancedOpen = ref(false)
 
@@ -39,10 +40,19 @@ function toISODateTime(local: string): string | undefined {
   return date.toISOString()
 }
 
+/** 把逗号分隔的输入拆成标签数组（中文逗号也认）。 */
+function splitTags(raw: string): string[] {
+  return raw
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+}
+
 function reset(): void {
   targetURL.value = ''
   customCode.value = ''
   title.value = ''
+  tags.value = ''
   expiresAt.value = ''
   formError.value = ''
   fieldErrors.value = {}
@@ -76,6 +86,7 @@ async function submit(): Promise<void> {
       target_url: targetURL.value.trim(),
       ...(customCode.value.trim() ? { custom_code: customCode.value.trim() } : {}),
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
+      ...(splitTags(tags.value).length > 0 ? { tags: splitTags(tags.value) } : {}),
       ...(toISODateTime(expiresAt.value) ? { expires_at: toISODateTime(expiresAt.value) } : {}),
     }
     const result = await linksApi.create(payload)
@@ -123,12 +134,12 @@ async function submit(): Promise<void> {
         :aria-expanded="advancedOpen"
         @click="advancedOpen = !advancedOpen"
       >
-        {{ advancedOpen ? '收起高级选项' : '高级选项：自定义短码 / 标题 / 有效期' }}
+        {{ advancedOpen ? '收起高级选项' : '高级选项：自定义短码 / 标题 / 标签 / 有效期' }}
       </button>
       <span v-if="!isAuthenticated" class="text-[13px] text-muted-soft">匿名创建，无需注册</span>
     </div>
 
-    <div v-if="advancedOpen" class="mt-4 grid gap-4 sm:grid-cols-3">
+    <div v-if="advancedOpen" class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <Input
         v-model="customCode"
         label="自定义短码"
@@ -143,6 +154,13 @@ async function submit(): Promise<void> {
         placeholder="给这条链接起个名字"
         :maxlength="200"
         :error="fieldErrors.title"
+      />
+      <Input
+        v-model="tags"
+        label="标签（可选）"
+        placeholder="ops, docs"
+        :error="fieldErrors.tags"
+        hint="逗号分隔，最多 10 个；统一按小写保存"
       />
       <Input
         v-model="expiresAt"

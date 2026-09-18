@@ -82,6 +82,8 @@ type Link struct {
 	ClickCount int64
 	// ExpiresAt 为空表示永久有效。
 	ExpiresAt *time.Time
+	// Tags 是标签，统一小写（筛选走数组包含，大小写敏感）。
+	Tags []string
 	// CreatedIP 记录创建者 IP，用于风控排查。
 	CreatedIP string
 	// CreatedAt / UpdatedAt 由数据库维护。
@@ -118,6 +120,7 @@ func (l *Link) Redirectable(now time.Time) error {
 // LinkPatch 描述一次部分更新；nil 字段表示「保持不变」。
 //
 // ExpiresAt 用「指针 + ClearExpires 标志」而不是双指针：可读性更好，也不容易误用。
+// Tags 则用指针：指向空切片表示「清空标签」，nil 表示「不动」。
 type LinkPatch struct {
 	// TargetURL 非空时更新目标地址。
 	TargetURL *string
@@ -129,11 +132,14 @@ type LinkPatch struct {
 	ExpiresAt *time.Time
 	// ClearExpires 为 true 时把 expires_at 置为 NULL（改为永久有效）。
 	ClearExpires bool
+	// Tags 指向新标签集合（空切片 = 清空）；nil 表示保持原样。
+	Tags *[]string
 }
 
 // IsEmpty 判断这个 patch 是否什么都没改。
 func (p LinkPatch) IsEmpty() bool {
-	return p.TargetURL == nil && p.Title == nil && p.Status == nil && p.ExpiresAt == nil && !p.ClearExpires
+	return p.TargetURL == nil && p.Title == nil && p.Status == nil &&
+		p.ExpiresAt == nil && !p.ClearExpires && p.Tags == nil
 }
 
 // LinkFilter 是「我的链接」列表的查询条件。
@@ -142,6 +148,8 @@ type LinkFilter struct {
 	OwnerID uuid.UUID
 	// Query 是可选搜索词，匹配短码 / 目标地址 / 标题。
 	Query string
+	// Tag 是可选标签筛选（统一小写后走 tags @> ARRAY[...]）。
+	Tag string
 	// Limit 是本页条数。
 	Limit int
 	// Cursor 是上一页最后一条的位置；零值表示第一页。

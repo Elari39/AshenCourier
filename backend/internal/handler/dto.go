@@ -37,6 +37,7 @@ type linkDTO struct {
 	ShortURL   string     `json:"short_url"`
 	TargetURL  string     `json:"target_url"`
 	Title      string     `json:"title,omitempty"`
+	Tags       []string   `json:"tags,omitempty"`
 	Status     string     `json:"status"`
 	ClickCount int64      `json:"click_count"`
 	ExpiresAt  *time.Time `json:"expires_at,omitzero"`
@@ -53,6 +54,7 @@ func toLinkDTO(link *domain.Link, shortURL string) linkDTO {
 		ShortURL:   shortURL,
 		TargetURL:  link.TargetURL,
 		Title:      link.Title,
+		Tags:       link.Tags,
 		Status:     link.Status.String(),
 		ClickCount: link.ClickCount,
 		ExpiresAt:  link.ExpiresAt,
@@ -82,6 +84,7 @@ type createLinkRequest struct {
 	TargetURL  string     `json:"target_url"`
 	CustomCode string     `json:"custom_code"`
 	Title      string     `json:"title"`
+	Tags       []string   `json:"tags"`
 	ExpiresAt  *time.Time `json:"expires_at"`
 }
 
@@ -92,6 +95,8 @@ type updateLinkRequest struct {
 	Status       *string    `json:"status"`
 	ExpiresAt    *time.Time `json:"expires_at"`
 	ClearExpires bool       `json:"clear_expires"`
+	// Tags 指向新标签集合；传 [] 表示清空，不传表示保持原样。
+	Tags *[]string `json:"tags"`
 }
 
 // ---- 响应体 ----

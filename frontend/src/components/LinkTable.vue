@@ -28,6 +28,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'delete', code: string): void
+  /** 点击某个标签 → 让父组件按该标签筛选（列表页才有意义）。 */
+  (event: 'filter-tag', tag: string): void
 }>()
 
 const { copy } = useCopy()
@@ -76,6 +78,18 @@ function statusClass(status: string): string {
                 /{{ link.short_code }}
               </RouterLink>
               <p v-if="link.title" class="mt-0.5 text-[13px] text-muted">{{ link.title }}</p>
+              <p v-if="link.tags?.length" class="mt-1 flex flex-wrap gap-1">
+                <button
+                  v-for="tag in link.tags"
+                  :key="tag"
+                  type="button"
+                  class="badge badge-quiet hover:text-ink"
+                  :title="`按标签「${tag}」筛选`"
+                  @click="emit('filter-tag', tag)"
+                >
+                  #{{ tag }}
+                </button>
+              </p>
             </td>
             <td>
               <span class="text-[13px] text-muted" :title="link.target_url">
@@ -137,6 +151,17 @@ function statusClass(status: string): string {
         </div>
 
         <p v-if="link.title" class="mt-2 text-[14px] text-ink">{{ link.title }}</p>
+        <p v-if="link.tags?.length" class="mt-1.5 flex flex-wrap gap-1">
+          <button
+            v-for="tag in link.tags"
+            :key="tag"
+            type="button"
+            class="badge badge-quiet"
+            @click="emit('filter-tag', tag)"
+          >
+            #{{ tag }}
+          </button>
+        </p>
         <p class="mt-2 break-anywhere font-mono text-[12px] text-muted">
           {{ truncateMiddle(link.target_url, 30, 14) }}
         </p>

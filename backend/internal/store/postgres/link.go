@@ -24,7 +24,7 @@ type LinkStore struct {
 // linkColumns 是 SELECT / RETURNING 里统一的列顺序，必须与 linkRow 的字段一一对应。
 // created_ip 用 ::text 取出来，避免 inet 类型在不同驱动版本下的扫描差异。
 const linkColumns = `id, short_code, target_url, title, owner_id, key_hash, status,
-       click_count, expires_at, coalesce(created_ip::text, ''), created_at, updated_at`
+       click_count, expires_at, tags, coalesce(created_ip::text, ''), created_at, updated_at`
 
 // linkRow 是 links 表的一行。
 type linkRow struct {
@@ -37,6 +37,7 @@ type linkRow struct {
 	status     int16
 	clickCount int64
 	expiresAt  pgtype.Timestamptz
+	tags       []string
 	createdIP  string
 	createdAt  time.Time
 	updatedAt  time.Time
@@ -46,7 +47,7 @@ type linkRow struct {
 func (r *linkRow) dest() []any {
 	return []any{
 		&r.id, &r.shortCode, &r.targetURL, &r.title, &r.ownerID, &r.keyHash,
-		&r.status, &r.clickCount, &r.expiresAt, &r.createdIP, &r.createdAt, &r.updatedAt,
+		&r.status, &r.clickCount, &r.expiresAt, &r.tags, &r.createdIP, &r.createdAt, &r.updatedAt,
 	}
 }
 
@@ -61,6 +62,7 @@ func (r *linkRow) toDomain() *domain.Link {
 		KeyHash:    r.keyHash,
 		Status:     domain.LinkStatus(r.status),
 		ClickCount: r.clickCount,
+		Tags:       r.tags,
 		CreatedIP:  r.createdIP,
 		CreatedAt:  r.createdAt,
 		UpdatedAt:  r.updatedAt,
@@ -72,12 +74,23 @@ func (r *linkRow) toDomain() *domain.Link {
 	return l
 }
 
+// tagsParam 保证写库的 []string 非 nil。
+//
+// 列是 NOT NULL DEFAULT '{}'，而 pgx 会把 nil 切片编码成 SQL NULL ——
+// 直接传 nil 会撞上 NOT NULL 约束（不是回落到默认值，那只有「不给这一列」时才发生）。
+func tagsParam(tags []string) []string {
+	if tags == nil {
+		return []string{}
+	}
+	return tags
+}
+
 // Create 插入一条短链。ID 由调用方（service 层）生成，不依赖数据库默认值。
 func (s *LinkStore) Create(ctx context.Context, link *domain.Link) error {
 	const q = `
 INSERT INTO links (id, short_code, target_url, title, owner_id, key_hash,
-                   status, click_count, expires_at, created_ip, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, '')::inet, now(), now())
+                   status, click_count, expires_at, tags, created_ip, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, '')::inet, now(), now())
 RETURNING created_at, updated_at`
 
 	opCtx, cancel := s.db.opCtx(ctx)
@@ -93,10 +106,15 @@ RETURNING created_at, updated_at`
 		int16(link.Status),
 		link.ClickCount,
 		link.ExpiresAt,
+		tagsParam(link.Tags),
 		link.CreatedIP,
 	).Scan(&link.CreatedAt, &link.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store.postgres: create link %q: %w", link.ShortCode, mapWriteError(err, "short_code", link.ShortCode))
+	}
+	if link.Tags == nil {
+		// 让内存里的实体与库里一致（列是 NOT NULL DEFAULT '{}'）
+		link.Tags = []string{}
 	}
 	return nil
 }
@@ -127,6 +145,7 @@ UPDATE links SET
     title      = COALESCE($3, title),
     status     = COALESCE($4, status),
     expires_at = CASE WHEN $5 THEN NULL ELSE COALESCE($6, expires_at) END,
+    tags       = COALESCE($7, tags),
     updated_at = now()
 WHERE short_code = $1
 RETURNING ` + linkColumns
@@ -137,12 +156,19 @@ RETURNING ` + linkColumns
 		statusArg = new(int16(*patch.Status))
 	}
 
+	// tags 用「指针指向的空切片」表示清空：nil 指针必须原样传成 SQL NULL，
+	// 否则 COALESCE 会把「不想动」误当成「清空」。
+	var tagsArg *[]string
+	if patch.Tags != nil {
+		tagsArg = new(tagsParam(*patch.Tags))
+	}
+
 	opCtx, cancel := s.db.opCtx(ctx)
 	defer cancel()
 
 	var r linkRow
 	err := s.db.pool.QueryRow(opCtx, q,
-		code, patch.TargetURL, patch.Title, statusArg, patch.ClearExpires, patch.ExpiresAt,
+		code, patch.TargetURL, patch.Title, statusArg, patch.ClearExpires, patch.ExpiresAt, tagsArg,
 	).Scan(r.dest()...)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -185,6 +211,12 @@ func (s *LinkStore) ListByOwner(ctx context.Context, filter domain.LinkFilter) (
 		args = append(args, "%"+escapeLike(q)+"%")
 		n := strconv.Itoa(len(args))
 		where = append(where, "(short_code ILIKE $"+n+" OR target_url ILIKE $"+n+" OR title ILIKE $"+n+")")
+	}
+	if tag := strings.TrimSpace(filter.Tag); tag != "" {
+		// 数组包含：走 links_tags_gin。参数用 []string 让 pgx 编码成 text[]，
+		// 与列类型一致（传裸字符串会被当成 text，PG 会报类型不匹配）。
+		args = append(args, []string{tag})
+		where = append(where, "tags @> $"+strconv.Itoa(len(args)))
 	}
 	if filter.Cursor.Valid {
 		args = append(args, filter.Cursor.CreatedAt, toPgUUID(filter.Cursor.ID))

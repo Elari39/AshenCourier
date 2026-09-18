@@ -232,10 +232,14 @@ export const linksApi = {
     return request<CreateLinkResponse>('/api/links', { method: 'POST', body: payload, manageKey, signal })
   },
 
-  /** 我的链接列表（需要登录）。 */
-  list(params: { limit?: number; cursor?: string; q?: string }, manageKey?: string | null, signal?: AbortSignal) {
+  /** 我的链接列表（需要登录）。tag 为标签筛选（后端按小写比较）。 */
+  list(
+    params: { limit?: number; cursor?: string; q?: string; tag?: string },
+    manageKey?: string | null,
+    signal?: AbortSignal,
+  ) {
     return request<LinkListResponse>('/api/links', {
-      query: { limit: params.limit, cursor: params.cursor, q: params.q },
+      query: { limit: params.limit, cursor: params.cursor, q: params.q, tag: params.tag },
       manageKey,
       signal,
     })

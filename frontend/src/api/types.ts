@@ -23,6 +23,8 @@ export interface Link {
   short_url: string
   target_url: string
   title?: string
+  /** 标签，统一小写（后端按小写比较；筛选走 ?tag=）。 */
+  tags?: string[]
   status: LinkStatus
   click_count: number
   expires_at?: string
@@ -119,6 +121,8 @@ export interface CreateLinkPayload {
   target_url: string
   custom_code?: string
   title?: string
+  /** 标签：最多 10 个、每个 32 字符；后端会统一转小写。 */
+  tags?: string[]
   expires_at?: string | null
 }
 
@@ -126,6 +130,8 @@ export interface CreateLinkPayload {
 export interface UpdateLinkPayload {
   target_url?: string
   title?: string
+  /** 传 [] 表示清空标签；不传表示保持原样。 */
+  tags?: string[]
   status?: Exclude<LinkStatus, 'deleted'>
   expires_at?: string | null
   /** 为 true 时把 expires_at 置空（改为永久有效）。 */

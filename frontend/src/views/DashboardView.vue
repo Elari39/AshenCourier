@@ -33,6 +33,7 @@ const loading = ref(false)
 const loadingMore = ref(false)
 const loadError = ref('')
 const query = ref('')
+const tagFilter = ref('')
 const deletingCode = ref('')
 const latest = ref<{ link: Link; manageKey?: string } | null>(null)
 
@@ -43,12 +44,29 @@ const activeLinks = computed(() => links.value.filter((link) => link.status === 
 
 const hasMore = computed(() => nextCursor.value !== '')
 
+/** 列表为空时区分三种情况：没有链接 / 搜不到 / 标签筛不到。 */
+const hasFilter = computed(() => query.value.trim() !== '' || tagFilter.value.trim() !== '')
+const emptyTitle = computed(() => (hasFilter.value ? '没有匹配的链接' : '还没有任何链接'))
+const emptyDescription = computed(() => {
+  if (tagFilter.value.trim()) {
+    return `没有带「${tagFilter.value.trim()}」标签的链接。清空标签筛选可以看到全部。`
+  }
+  if (query.value.trim()) {
+    return '换个关键词试试，短码、标题与目标地址都会被搜索。'
+  }
+  return '用上面的表单创建第一条短链吧。'
+})
+
 /** 首次加载 / 搜索变化时重置列表。 */
 async function reload(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const result = await linksApi.list({ limit: PAGE_SIZE, q: query.value.trim() || undefined })
+    const result = await linksApi.list({
+      limit: PAGE_SIZE,
+      q: query.value.trim() || undefined,
+      tag: tagFilter.value.trim() || undefined,
+    })
     links.value = result.links
     nextCursor.value = result.next_cursor ?? ''
   } catch (cause) {
@@ -68,6 +86,7 @@ async function loadMore(): Promise<void> {
       limit: PAGE_SIZE,
       cursor: nextCursor.value,
       q: query.value.trim() || undefined,
+      tag: tagFilter.value.trim() || undefined,
     })
     links.value = [...links.value, ...result.links]
     nextCursor.value = result.next_cursor ?? ''
@@ -101,9 +120,9 @@ function onCreated(payload: { link: Link; manageKey?: string }): void {
   links.value = [payload.link, ...links.value]
 }
 
-// 搜索：300ms 防抖，避免每敲一个字就打一次接口
+// 搜索 / 标签筛选：300ms 防抖，避免每敲一个字就打一次接口
 let searchTimer: number | undefined
-watch(query, () => {
+watch([query, tagFilter], () => {
   window.clearTimeout(searchTimer)
   searchTimer = window.setTimeout(() => void reload(), 300)
 })
@@ -152,8 +171,17 @@ onMounted(async () => {
       <Card class="mt-6 p-6 md:p-8">
         <div class="flex flex-wrap items-center justify-between gap-4">
           <p class="title-md">链接列表</p>
-          <div class="w-full sm:w-72">
-            <Input v-model="query" placeholder="搜索短码 / 标题 / 目标地址" aria-label="搜索链接" />
+          <div class="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
+            <div class="w-full sm:w-40">
+              <Input
+                v-model="tagFilter"
+                placeholder="按标签筛选"
+                aria-label="按标签筛选"
+              />
+            </div>
+            <div class="w-full sm:w-64">
+              <Input v-model="query" placeholder="搜索短码 / 标题 / 目标地址" aria-label="搜索链接" />
+            </div>
           </div>
         </div>
 
@@ -164,16 +192,17 @@ onMounted(async () => {
 
           <EmptyState
             v-else-if="links.length === 0"
-            :title="query.trim() ? '没有匹配的链接' : '还没有任何链接'"
-            :description="
-              query.trim()
-                ? '换个关键词试试，短码、标题与目标地址都会被搜索。'
-                : '用上面的表单创建第一条短链吧。'
-            "
+            :title="emptyTitle"
+            :description="emptyDescription"
           />
 
           <template v-else>
-            <LinkTable :links="links" :pending-code="deletingCode" @delete="handleDelete" />
+            <LinkTable
+              :links="links"
+              :pending-code="deletingCode"
+              @delete="handleDelete"
+              @filter-tag="(tag) => (tagFilter = tag)"
+            />
 
             <div v-if="hasMore" class="mt-6 flex justify-center">
               <Button variant="secondary" :loading="loadingMore" @click="loadMore">加载更多</Button>

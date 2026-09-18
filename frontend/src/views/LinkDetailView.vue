@@ -56,6 +56,7 @@ const loadingStats = ref(false)
 const editOpen = ref(false)
 const editTitle = ref('')
 const editTarget = ref('')
+const editTags = ref('')
 const editStatus = ref<'active' | 'disabled'>('active')
 const saving = ref(false)
 const editError = ref('')
@@ -101,6 +102,14 @@ const canClaim = computed(
   () => isAuthenticated.value && link.value?.anonymous === true && manageKey.value !== null,
 )
 
+/** 把逗号分隔的输入拆成标签数组（中文逗号也认）；空输入返回空数组 = 清空标签。 */
+function splitTags(raw: string): string[] {
+  return raw
+    .split(/[,，]/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+}
+
 async function loadLink(): Promise<void> {
   loading.value = true
   notFound.value = false
@@ -110,6 +119,7 @@ async function loadLink(): Promise<void> {
     link.value = await linksApi.get(code.value, manageKey.value)
     editTitle.value = link.value.title ?? ''
     editTarget.value = link.value.target_url
+    editTags.value = (link.value.tags ?? []).join(', ')
     editStatus.value = link.value.status === 'disabled' ? 'disabled' : 'active'
   } catch (cause) {
     if (cause instanceof ApiError && cause.status === 404) {
@@ -145,6 +155,7 @@ async function saveEdit(): Promise<void> {
       {
         title: editTitle.value.trim(),
         target_url: editTarget.value.trim(),
+        tags: splitTags(editTags.value),
         status: editStatus.value,
       },
       manageKey.value,
@@ -250,6 +261,9 @@ onMounted(async () => {
               /{{ link.short_code }}
             </h1>
             <p v-if="link.title" class="mt-2 text-[16px] text-body">{{ link.title }}</p>
+            <p v-if="link.tags?.length" class="mt-2 flex flex-wrap gap-1.5">
+              <span v-for="tag in link.tags" :key="tag" class="badge badge-quiet">#{{ tag }}</span>
+            </p>
             <p class="mt-3 break-anywhere font-mono text-[13px] text-muted">{{ link.target_url }}</p>
             <div class="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px] text-muted">
               <span>{{ describeStatus(link.status).label }}</span>
@@ -288,6 +302,12 @@ onMounted(async () => {
           <div class="mt-5 grid gap-4 md:grid-cols-2">
             <Input v-model="editTarget" label="目标地址" placeholder="https://example.com/new" />
             <Input v-model="editTitle" label="标题" placeholder="给这条链接起个名字" :maxlength="200" />
+            <Input
+              v-model="editTags"
+              label="标签"
+              placeholder="ops, docs"
+              hint="逗号分隔；清空即删除全部标签"
+            />
             <div>
               <label class="field-label" for="detail-status">状态</label>
               <select id="detail-status" v-model="editStatus" class="text-input">
