@@ -403,6 +403,41 @@ func TestExpireLinksEvictsCache(t *testing.T) {
 	}
 }
 
+// TestHandleBatchAssignsEventUID：明细的 event_uid 必须来自 Stream 消息 ID。
+//
+// 这是幂等去重的唯一依据：同一条消息重投时 ID 不变，唯一索引才认得出
+// 「这一行已经插过」。所以这里连同一批消息投两次，断言两次落库的事件
+// 带着**同一个**非空 uid —— 而不是只断言「有值」。
+func TestHandleBatchAssignsEventUID(t *testing.T) {
+	t.Parallel()
+
+	stream := &fakeStream{}
+	clicks := &fakeClicks{}
+	w := newTestWorker(newFakeCounter(), newFakeCounts(), clicks, stream, &fakeCache{}, &fakeSweeper{})
+
+	// 同一条消息，两次投递：模拟「处理完但 ACK 前重启」后被认领循环捞回来重投
+	msg := domain.StreamMessage{
+		ID:    "1712345678901-0",
+		Event: domain.ClickRecord{Code: "abc1234", UserAgent: uaChrome},
+	}
+	w.handleBatch(t.Context(), &domain.ReadResult{Messages: []domain.StreamMessage{msg}}, "consume")
+	w.handleBatch(t.Context(), &domain.ReadResult{Messages: []domain.StreamMessage{msg}}, "claim")
+
+	if len(clicks.inserted) != 2 {
+		t.Fatalf("两次投递都应触发落库（去重交给数据库的唯一索引），实际 %d 次", len(clicks.inserted))
+	}
+	first, second := clicks.inserted[0][0].EventUID, clicks.inserted[1][0].EventUID
+	if first == "" {
+		t.Fatal("event_uid 不该为空：没有它就等于没有幂等去重")
+	}
+	if first != msg.ID {
+		t.Errorf("event_uid = %q，期望等于 Stream 消息 ID %q", first, msg.ID)
+	}
+	if first != second {
+		t.Errorf("同一条消息重投两次的 uid 必须相同（%q vs %q），否则唯一索引挡不住重复行", first, second)
+	}
+}
+
 // uaChrome / uaIPhone 是 toClickEvent 断言用的真实 UA 片段。
 const (
 	uaChrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"

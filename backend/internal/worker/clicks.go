@@ -7,8 +7,9 @@
 //	C · 兜底认领  ：每 30s XAUTOCLAIM 认领 idle > 60s 的 pending 消息
 //	D · 过期清理  ：每小时把过期短链置为 disabled 并清缓存
 //
-// 投递语义是 at-least-once：极端情况下（处理完成但 ACK 前重启）明细可能重复插入，
-// 但计数走 INCR 累加不受影响，只有明细条数可能多算。P1 可以用 event_uid 唯一索引去重。
+// 投递语义是 at-least-once：极端情况下（处理完成但 ACK 前重启）明细会被重投，
+// 但两个口径都不会因此走样 —— 计数走 INCR 累加，重投不会多算；明细靠
+// click_events.event_uid（取自 Stream 消息 ID）的唯一索引做幂等去重（M2-1）。
 package worker
 
 import (
@@ -337,7 +338,9 @@ func (w *Worker) handleBatch(ctx context.Context, result *domain.ReadResult, sou
 		events := make([]domain.ClickEvent, 0, len(result.Messages))
 		ids := make([]string, 0, len(result.Messages))
 		for _, msg := range result.Messages {
-			events = append(events, toClickEvent(msg.Event))
+			// msg.ID 同时用于「落库时的幂等键」与「落库后的 XACK」：
+			// 这两件事必须基于同一个 ID，否则重投时对不上号。
+			events = append(events, toClickEvent(msg.ID, msg.Event))
 			ids = append(ids, msg.ID)
 		}
 
@@ -393,9 +396,14 @@ func (w *Worker) everyFixed(ctx context.Context, name string, interval time.Dura
 }
 
 // toClickEvent 把 Stream 事件补上 UA 解析结果，转成待落库的明细。
-func toClickEvent(ev domain.ClickRecord) domain.ClickEvent {
+//
+// msgID 是 Stream 消息 ID，落成 event_uid：at-least-once 投递下同一条消息会被
+// 重投（处理完但 ACK 前重启），唯一索引 + ON CONFLICT DO NOTHING 靠它去重。
+// 因此这个参数不能省 —— 少了它就等于没有幂等。
+func toClickEvent(msgID string, ev domain.ClickRecord) domain.ClickEvent {
 	info := ua.Parse(ev.UserAgent)
 	return domain.ClickEvent{
+		EventUID:   msgID,
 		LinkID:     ev.LinkID,
 		ShortCode:  ev.Code,
 		OccurredAt: ev.OccurredAt,

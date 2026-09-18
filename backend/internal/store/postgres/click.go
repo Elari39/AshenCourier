@@ -17,19 +17,33 @@ type ClickStore struct {
 
 // insertClickEventsSQL 用 NULLIF 把 Go 侧的空串落成 SQL NULL：
 // 「没有 Referer」与「Referer 是空串」在统计里都该归为直接访问。
+//
+// ON CONFLICT 的冲突目标必须复述 partial 唯一索引的谓词
+// （click_events_event_uid_key ... WHERE event_uid IS NOT NULL）——
+// 少写 WHERE event_uid IS NOT NULL，PG 会直接报
+// 「no unique or exclusion constraint matching the ON CONFLICT specification」。
+//
+// event_uid 为空串时 NULLIF 会把它变成 NULL：这类行（只可能来自手写 SQL 或旧版本
+// worker）不参与去重，照常插入，而不是被当成「同一批」互相顶掉。
 const insertClickEventsSQL = `
 INSERT INTO click_events (link_id, short_code, occurred_at, referer, user_agent,
-                          ip, country, device, browser, os)
+                          ip, country, device, browser, os, event_uid)
 VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''),
-        NULLIF($6, '')::inet, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''))`
+        NULLIF($6, '')::inet, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
+        NULLIF($11, ''))
+ON CONFLICT (event_uid) WHERE event_uid IS NOT NULL DO NOTHING`
 
 // InsertBatch 用 pgx.Batch 一次性提交整批明细。
 //
 // ⚠️ 注意：这不是事务。pgx 的 Batch 靠一次往返把多条语句发出去，但在没有显式
 // 事务包裹时每条仍各自自动提交 —— 第 N 条失败时前 N-1 条已经落库，且后续语句
 // 会被跳过。整体设计已声明接受 at-least-once：worker 在本批失败时不 ACK，
-// 消息会重投，因此重复明细是可预期的，计数也走 INCR 累加而不依赖明细条数。
+// 消息会重投；重投时被 event_uid 唯一索引挡掉的重复行由 ON CONFLICT DO NOTHING
+// 静默跳过（RowsAffected=0，不是错误）。计数走 INCR 累加而不依赖明细条数。
 // 若将来需要「整批原子」，得显式开 pgx.Tx（代价是牺牲批量吞吐）。
+//
+// 返回值保持 error：DO NOTHING 无法区分「插入」与「跳过」，
+// 要统计去重次数得改用 RETURNING + Query 或另加计数。
 func (s *ClickStore) InsertBatch(ctx context.Context, events []domain.ClickEvent) error {
 	if len(events) == 0 {
 		return nil
@@ -40,7 +54,7 @@ func (s *ClickStore) InsertBatch(ctx context.Context, events []domain.ClickEvent
 		batch.Queue(insertClickEventsSQL,
 			toPgUUID(e.LinkID), e.ShortCode, e.OccurredAt,
 			e.Referer, e.UserAgent, e.IP, e.Country,
-			e.Device, e.Browser, e.OS,
+			e.Device, e.Browser, e.OS, e.EventUID,
 		)
 	}
 

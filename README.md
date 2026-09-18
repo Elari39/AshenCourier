@@ -131,13 +131,14 @@ Browser ──┬─ /api/*         ─┐
 
 ### 数据模型
 
-三张表 + 一个视图，全部在 [`backend/migrations/000001_init.up.sql`](./backend/migrations/000001_init.up.sql)：
+三张表 + 一个视图，初始结构在 [`backend/migrations/000001_init.up.sql`](./backend/migrations/000001_init.up.sql)，
+后续迁移按编号递增（见 [`backend/migrations/`](./backend/migrations)）：
 
 | 对象 | 作用 | 关键约束 |
 | --- | --- | --- |
 | `links` | 短链主体 | `short_code` 全局唯一；`status` 用 `smallint` 而非 PG enum（改状态机不用 `ALTER TYPE`）；`key_hash bytea` 存匿名管理密钥的 SHA-256 |
 | `users` | 账号 | `email` 存 `text` + `unique index (lower(email))` 做大小写不敏感唯一（不引入 `citext` 扩展，省掉一次 `CREATE EXTENSION`） |
-| `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入 |
+| `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入；`event_uid`（000002 起）取自 Stream 消息 ID，配合部分唯一索引做幂等去重 |
 | `link_click_totals` | 视图 | `links.click_count + count(click_events)`，用于人工对账 |
 
 ## API
@@ -395,9 +396,19 @@ docker compose logs backend | grep '"level":"ERROR"'
 
 ### 3. `click_events` 的投递语义是 at-least-once
 
-worker 在「处理完但 ACK 前」重启时，同一批明细可能重复插入。
-**计数走 Redis `INCR` 累加，不受重复投递影响**；只有明细条数可能多算。
-若要精确对账，可以加 `event_uid`（由 Stream 消息 ID 派生）唯一索引做幂等去重。
+worker 在「处理完但 ACK 前」重启时，同一批明细会被重投。两个口径都不因此走样：
+
+- **计数**走 Redis `INCR` 累加，重投不会多算；
+- **明细**靠 `event_uid`（取自 Stream 消息 ID，迁移 `000002`）的**部分唯一索引**
+  做幂等去重，插入侧是
+  `ON CONFLICT (event_uid) WHERE event_uid IS NOT NULL DO NOTHING`，
+  重投的行被静默跳过（`RowsAffected=0`，不是错误）。
+
+⚠️ 冲突目标必须复述同一个谓词（`WHERE event_uid IS NOT NULL`），否则 PG 会报
+`no unique or exclusion constraint matching the ON CONFLICT specification`。
+`000002` 之前的历史行 `event_uid` 为 NULL，不参与去重。
+
+人工对账用视图 `link_click_totals` 比较 `base_count` 与 `event_count`。
 
 ### 4. api 与 worker 共用镜像，换入口必须用 `entrypoint` 而不是 `command`
 
@@ -466,6 +477,8 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ①**：`docker compose stop postgres` + 删短码缓存后跳转 | **503 + `Retry-After: 2`**，体为 `{"error":{"code":"unavailable"}}`（不是 500；缓存 `DEL` 返回 1，确认真的回源） | 本机 |
 | **容器级 ②**：`docker compose restart backend` 的关停顺序 | 日志顺序为 `收到退出信号 / 开始优雅关闭` → `统计写入队列已排空` → `api 已退出`；`dropped_clicks` 0 → 0；关停前 12 次跳转全部进流（`stream_len` 1 → 13） | 本机 |
 | **容器级 ③**：`go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | **24 / 24 通过**（含「SPA 顶级路由经 nginx 返回 HTML」） | 本机 + CI `smoke` |
+| **容器级 ④**：明细幂等去重（M2-1） | 5 次跳转后 `count(event_uid) = count(distinct event_uid) = 5`（迁移前的 19 行历史数据为 NULL）；用**显式 Stream ID** 重投一条「已经插过」的消息 → 明细 7 → 7、该 `event_uid` 行数 1 → 1，worker 无 ERROR/WARN 且消息被 ACK | 本机 |
+| 迁移往返（M2-1） | `migrate down 1` + `up` 连续两轮无报错；`version` = 2；列与部分唯一索引恢复，之后的新跳转仍写入 `event_uid` | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |

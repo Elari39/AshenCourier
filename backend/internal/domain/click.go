@@ -9,10 +9,15 @@ import (
 // ClickEvent 是一次跳转的明细事件。
 //
 // 写入路径完全异步：跳转时 XADD 进 Redis Stream，由 worker 批量落库。
-// 投递语义是 at-least-once，因此同一 (link_id, occurred_at, ip) 可能重复（P1 用 event_uid 去重）。
+// 投递语义是 at-least-once，因此同一 (link_id, occurred_at, ip) 可能重复；
+// EventUID 是这条重复的兜底 —— 落库时按它做幂等去重。
 type ClickEvent struct {
 	// ID 由数据库 identity 生成（顺序写，避免索引页分裂），仅读取时填充。
 	ID int64
+	// EventUID 由 Stream 消息 ID 派生（形如 "1712345678901-0"），用于幂等：
+	// 重投的同一批消息带着同一个 ID，唯一索引据此拒掉重复行。
+	// 历史行（000002 迁移之前）为 NULL，写入侧永远非空。
+	EventUID string
 	// LinkID 是所属短链。
 	LinkID uuid.UUID
 	// ShortCode 冗余存一份，便于排查时不必回表。
