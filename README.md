@@ -208,8 +208,10 @@ Browser ──┬─ /api/*         ─┐
 ```
 .
 ├── docker-compose.yml          # 生产形态：pg + redis + migrate + backend + worker + frontend
+│                               #   （另有 backup 服务，在 ops profile 下按需启动）
 ├── docker-compose.dev.yml      # 本地开发：只起 pg(5432) + redis(6379)；migrate 在 tools profile 下
 ├── deploy/nginx/nginx.conf     # 反代 + 短码正则 + SPA fallback
+├── deploy/backup/              # pg_dump 产物目录（*.dump 已被 .gitignore 忽略）
 ├── backend/
 │   ├── migrations/             # golang-migrate 迁移（up / down 严格互逆）
 │   ├── cmd/{api,worker,smoke}/ # 两个服务入口 + 端到端冒烟工具
@@ -371,6 +373,48 @@ docker compose logs backend | grep '"level":"ERROR"'
 | `rate_limit_native_increx` | 限流走的是 Redis 8.8+ 原生 `INCREX` 还是 Lua 回落实现 |
 | `rate_limit_disabled` | 限流应急开关是否被打开（`RATE_LIMIT_DISABLED=true`） |
 
+### 备份与恢复演练
+
+备份服务放在 compose 的 `ops` profile 里 —— **默认不启动**，需要时显式拉起：
+
+```bash
+docker compose --profile ops up -d backup
+```
+
+它用与服务端**同一个 tag** 的 `postgres:18.6-alpine`（`pg_dump` 主版本必须 ≥ 服务端，
+版本倒挂会直接报 `server version mismatch`），每 24 小时往 `./deploy/backup/` 写一个
+`ashen-YYYYmmdd-HHMMSS.dump`（`-Fc` 自定义格式，可用 `pg_restore` 选择性恢复），
+并删除 14 天前的旧备份。`pg_dump` 失败时不会傻等一天：打日志后 60 秒重试。
+
+**恢复演练（必须真的跑一次，否则等于没有备份）**：
+
+```bash
+# 1) 建一个临时库
+docker compose exec postgres createdb -U ashen restore_check
+
+# 2) 把最新的备份恢复进去
+#    /backup 只挂在 backup 服务上，所以借它的镜像与卷跑 pg_restore
+DUMP=$(ls -1t deploy/backup/ashen-*.dump | head -1 | xargs basename)
+docker compose run --rm --entrypoint pg_restore backup \
+  -h postgres -U ashen -d restore_check "/backup/$DUMP"
+
+# 3) 核对两个口径与主库一致
+docker compose exec postgres psql -U ashen -d ashen -tAc \
+  "select count(*) from links; select sum(base_count), sum(event_count) from link_click_totals;"
+docker compose exec postgres psql -U ashen -d restore_check -tAc \
+  "select count(*) from links; select sum(base_count), sum(event_count) from link_click_totals;"
+
+# 4) 删掉临时库
+docker compose exec postgres dropdb -U ashen restore_check
+```
+
+2026-09-18 实测：`links` 14 行、`click_events` 169 行、`sum(base_count)` 与
+`sum(event_count)` 都是 169，主库与恢复库完全一致；保留策略也实测过（造一个 2000 年的
+假备份 → 跑一次清理 → 旧文件被删、当天的留下）。
+
+⚠️ 备份文件在宿主机的 `./deploy/backup/`（已被 `.gitignore` 忽略）。生产环境请把该目录
+换成对象存储或异地卷 —— 和数据库放在同一块盘上的备份，在磁盘故障时一起没有。
+
 ## 五条踩过的坑
 
 这五条都是「设计稿上看不出来、只有真跑容器才暴露」的，写在这里省得别人再踩一遍。
@@ -512,6 +556,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑤**：列表口径 = 基线 + 待同步增量（M2-2） | 停掉 worker 后跳转 4 次：PG 基线仍 `0`、Redis 增量 `4`，而 `GET /api/links` 的 `click_count` = **4**，与详情 `total_clicks` 相等；恢复 worker 后基线刷成 `4`、增量键清空、列表仍为 `4`；把 Redis 停掉时列表仍 **200**（退回纯基线，不 5xx） | 本机 |
 | **容器级 ⑥**：补偿式计数（M3-1） | 停 worker 后跳转 10 次：`clicks:cnt:{code}` = `10`、`clicks:dirty` 含该码、PG 基线 `0`（增量没被「取走」）；启动 worker 后基线 `10`、明细 `10`，**计数键被删除**（不是留一个 0）且 dirty 清空；再压 100 次跳转 → 基线/明细都是 `100`；全库 `base_count <> event_count` 的链接数 = 0，`dropped_clicks` / `failed_clicks` 均为 0 | 本机 |
 | **容器级 ⑦**：缓存击穿防护（M3-2） | 用一个刚创建（缓存已被主动失效）的冷短码，`curl --parallel-immediate` 同时打 **20** 个请求 → 20 个 **302**；`/healthz` 的 `pg_fallbacks` 增量 = **1**（而不是 20）。单测侧：50 个 goroutine 并发 miss + 回源处设屏障，断言仓储只被调用 1 次 | 本机 |
+| **容器级 ⑧**：备份与恢复（M3-3） | `--profile ops` 起 backup → 产出 `ashen-20260918-154740.dump`；`pg_restore` 到临时库 `restore_check` 后与主库逐项一致（`links` 14、`click_events` 169、`sum(base_count)` = `sum(event_count)` = 169）；删临时库后 `pg_database` 里不再有它。保留策略实测：造一个 2000 年的假备份 → 清理后旧文件被删、当天的留下 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |

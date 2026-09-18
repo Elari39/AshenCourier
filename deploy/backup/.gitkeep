@@ -1,0 +1,4 @@
+# 备份产物的挂载点（compose 的 backup 服务把 ./deploy/backup 挂到容器的 /backup）。
+#
+# 这个 .gitkeep 只为让目录存在于仓库里；pg_dump 产出的 *.dump 已被 .gitignore 忽略
+# （根 .gitignore 的「本地数据 / 导出」一节），不会被提交。
