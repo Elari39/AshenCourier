@@ -179,6 +179,12 @@ func run() error {
 			Scope: "redirect", Limit: cfg.RateLimitRedirectPerMin, Window: time.Minute,
 			Dimension: httpx.RateLimitByIP,
 		},
+		// 统计单独一条规则：scope 不同 → Redis 键独立，不会与真实跳转互相吃配额；
+		// 维度取 IP+短码，看板轮询只消耗该短码自己的配额。
+		RateLimitStats: httpx.RateLimitRule{
+			Scope: "stats", Limit: cfg.RateLimitStatsPerMin, Window: time.Minute,
+			Dimension: httpx.RateLimitByIPAndCode,
+		},
 	})
 
 	srv := httpx.NewServer(httpx.ServerConfig{

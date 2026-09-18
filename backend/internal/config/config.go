@@ -85,6 +85,8 @@ type Config struct {
 	RateLimitLoginWindow time.Duration
 	// RateLimitRedirectPerMin 是跳转接口的每 IP 每分钟宽松配额。
 	RateLimitRedirectPerMin int
+	// RateLimitStatsPerMin 是统计接口的每 IP×短码 每分钟配额。
+	RateLimitStatsPerMin int
 }
 
 // Role 标识进程角色，决定哪些配置项是必需的。
@@ -129,6 +131,7 @@ func LoadFor(role Role) (*Config, error) {
 		RateLimitLoginPerWindow: 20,
 		RateLimitLoginWindow:    10 * time.Minute,
 		RateLimitRedirectPerMin: 600,
+		RateLimitStatsPerMin:    120,
 	}
 
 	var errs []error

@@ -33,10 +33,11 @@ type Options struct {
 	PageSize    int
 	MaxPageSize int
 
-	// 三条限流规则。
+	// 四条限流规则。
 	RateLimitCreate   httpx.RateLimitRule
 	RateLimitLogin    httpx.RateLimitRule
 	RateLimitRedirect httpx.RateLimitRule
+	RateLimitStats    httpx.RateLimitRule
 }
 
 // Router 装配全部路由并套上中间件链。
@@ -97,9 +98,13 @@ func Router(opts Options) http.Handler {
 	mux.Handle("DELETE /api/links/{code}", optionalUser(http.HandlerFunc(linkAPI.remove)))
 	mux.Handle("POST /api/links/{code}/claim", requireUser(http.HandlerFunc(linkAPI.claim)))
 
-	// ---- 统计（按 IP 做宽松限流，防刷）----
+	// ---- 统计（独立的宽松限流，防刷）----
+	// 必须用独立规则而不是复用 RateLimitRedirect：限流键是
+	// rl:<scope>:<ip>:<路径哈希>，scope 相同就意味着统计与真实跳转共享
+	// 同一条配额 —— 详情页轮询统计会把用户的短链跳转也拖到 429。
+	// 这里选 IP + 短码维度：看板刷得再勤，也只消耗该短码自己的配额。
 	mux.Handle("GET /api/links/{code}/stats",
-		limit(opts.RateLimitRedirect)(optionalUser(http.HandlerFunc(statsAPI.show))))
+		limit(opts.RateLimitStats)(optionalUser(http.HandlerFunc(statsAPI.show))))
 
 	// ---- 短码跳转：兜底模式，必须最后注册 ----
 	mux.Handle("/{code}", limit(opts.RateLimitRedirect)(http.HandlerFunc(redirectAPI.serve)))

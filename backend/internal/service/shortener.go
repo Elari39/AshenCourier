@@ -189,6 +189,10 @@ func (s *Shortener) Create(ctx context.Context, in CreateInput) (*CreateResult, 
 		if err := s.links.Create(ctx, base); err != nil {
 			return nil, err
 		}
+		// 冲掉可能存在的负缓存：短码在被创建前若被探测过（404 一次），
+		// link:v1:miss:<code> 里就存着「确认不存在」的断言；不清掉的话，
+		// 刚创建成功的短码在负缓存 TTL 内跳转仍是 404，与事实矛盾。
+		s.evict(ctx, base.ShortCode)
 		return s.createdResult(base, manageKey), nil
 	}
 
@@ -206,6 +210,9 @@ func (s *Shortener) Create(ctx context.Context, in CreateInput) (*CreateResult, 
 
 		err := s.links.Create(ctx, &link)
 		if err == nil {
+			// 理论上随机短码不会撞上旧负缓存，但 DEL 一次成本可忽略，
+			// 让「创建成功后缓存必然与库一致」成为无需分情况记忆的不变量。
+			s.evict(ctx, link.ShortCode)
 			return s.createdResult(&link, manageKey), nil
 		}
 		if _, ok := domain.AsConflict(err); !ok {
