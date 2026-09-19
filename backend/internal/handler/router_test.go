@@ -37,10 +37,13 @@ func newTestRouter(t *testing.T, links map[string]*domain.Link) http.Handler {
 		TrustProxy:  false,
 		PageSize:    20,
 		MaxPageSize: 100,
+
+		ClickPageSize:    20,
+		MaxClickPageSize: 100,
 	})
 }
 
-// TestRouterTable 用一张表钉住 README「API」一节的 12 条路由：
+// TestRouterTable 用一张表钉住 README「API」一节的 13 条路由：
 // 每条都要能被路由到（而不是 404），且鉴权层次符合文档 ——
 // 这正好挡住「改了路由忘了改文档」和「requireUser 写成 optionalAuth」两类回归。
 func TestRouterTable(t *testing.T) {
@@ -126,6 +129,11 @@ func TestRouterTable(t *testing.T) {
 			why:        "跳转兜底模式：命中的短码回 302",
 		},
 		{
+			name: "13 GET /api/links/{code}/clicks", method: http.MethodGet, path: "/api/links/" + code + "/clicks",
+			wantStatus: http.StatusNotFound,
+			why:        "点击明细与详情/统计同一套鉴权（无权限 404）",
+		},
+		{
 			name: "12b GET /login 不被当成短码", method: http.MethodGet, path: "/login",
 			wantStatus: http.StatusNotFound,
 			why:        "保留字在 handler 内再排一次（nginx 之外的第二道保险）",
@@ -164,6 +172,7 @@ func TestRouterMethodAwareness(t *testing.T) {
 		"/api/links",
 		"/api/links/m0smoke",
 		"/api/links/m0smoke/stats",
+		"/api/links/m0smoke/clicks",
 		"/api/links/m0smoke/claim",
 		"/m0smoke",
 	}

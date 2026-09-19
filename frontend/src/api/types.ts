@@ -78,6 +78,33 @@ export interface BrowserBucket {
   clicks: number
 }
 
+/** 一条点击明细。 */
+export interface ClickEvent {
+  id: number
+  occurred_at?: string
+  referer?: string
+  user_agent?: string
+  /**
+   * **掩码后**的网段，不是完整地址：IPv4 到 /24、IPv6 到 /64。
+   * 原始 IP 只留在库里（风控/排障直接查库），不经 API 外流。
+   */
+  ip?: string
+  country?: string
+  device?: string
+  browser?: string
+  os?: string
+}
+
+/** 点击明细列表响应（keyset 分页）。 */
+export interface ClickListResponse {
+  clicks: ClickEvent[]
+  /** 为空表示已到底。 */
+  next_cursor?: string
+  /** 本页实际生效的窗口天数与起点（与统计同口径）。 */
+  days?: number
+  since?: string
+}
+
 /** 统计聚合结果。 */
 export interface Stats {
   /** PG 基线 + Redis 待同步增量（全量、跨窗口）。 */

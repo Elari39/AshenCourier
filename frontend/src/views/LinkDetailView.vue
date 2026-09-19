@@ -9,7 +9,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { ApiError, linksApi } from '@/api/client'
-import type { Link, Stats } from '@/api/types'
+import type { ClickEvent, Link, Stats } from '@/api/types'
 import DistributionList from '@/components/DistributionList.vue'
 import StatCard from '@/components/StatCard.vue'
 import TrendChart from '@/components/TrendChart.vue'
@@ -23,11 +23,13 @@ import { useCopy } from '@/composables/useCopy'
 import { useToast } from '@/composables/useToast'
 import type { DistributionItem } from '@/types/ui'
 import {
+  describeClient,
   describeDevice,
   describeExpiry,
   describeReferer,
   describeStatus,
   formatDateTime,
+  formatDateTimeSeconds,
   formatNumber,
 } from '@/utils/format'
 
@@ -51,6 +53,14 @@ const loadError = ref('')
 
 const statsDays = ref(30)
 const loadingStats = ref(false)
+
+// 点击明细（keyset 分页：游标为空 = 已到底）
+const clicks = ref<ClickEvent[]>([])
+const clicksCursor = ref('')
+const loadingClicks = ref(false)
+const clicksError = ref('')
+/** 每页条数；与后端默认页大小一致，翻页只追加不替换。 */
+const CLICK_PAGE_SIZE = 20
 
 // 编辑表单
 const editOpen = ref(false)
@@ -144,6 +154,31 @@ async function loadStats(): Promise<void> {
   }
 }
 
+async function loadClicks(reset = true): Promise<void> {
+  if (!link.value) return
+
+  loadingClicks.value = true
+  clicksError.value = ''
+  try {
+    const page = await linksApi.clicks(
+      code.value,
+      {
+        limit: CLICK_PAGE_SIZE,
+        days: statsDays.value,
+        cursor: reset ? undefined : clicksCursor.value,
+      },
+      manageKey.value,
+    )
+    clicks.value = reset ? page.clicks : [...clicks.value, ...page.clicks]
+    clicksCursor.value = page.next_cursor ?? ''
+  } catch (cause) {
+    // 明细加载失败不影响页面其余部分：单独报错，统计与趋势照常显示
+    clicksError.value = cause instanceof ApiError ? cause.friendly : '点击明细加载失败'
+  } finally {
+    loadingClicks.value = false
+  }
+}
+
 async function saveEdit(): Promise<void> {
   if (!link.value) return
 
@@ -223,13 +258,16 @@ async function copyShortURL(): Promise<void> {
   }
 }
 
-// 切换统计窗口时只重拉统计，不动详情
-watch(statsDays, () => void loadStats())
+// 切换统计窗口时重拉统计与明细：两者共用同一个窗口，口径必须一致
+watch(statsDays, () => {
+  void loadStats()
+  void loadClicks()
+})
 
 onMounted(async () => {
   await loadLink()
   if (link.value) {
-    await loadStats()
+    await Promise.all([loadStats(), loadClicks()])
   }
 })
 </script>
@@ -377,6 +415,100 @@ onMounted(async () => {
             <DistributionList title="设备" :items="deviceItems" />
             <DistributionList title="浏览器" :items="browserItems" />
           </div>
+        </Card>
+
+        <!-- 点击明细：与统计同窗口，时间倒序，keyset 分页 -->
+        <Card class="mt-6 p-6 md:p-8">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p class="eyebrow">Recent clicks</p>
+              <p class="mt-2 text-[13px] text-muted">
+                最近 {{ stats?.days ?? statsDays }} 天，时间倒序；IP 只显示到网段（IPv4 /24、IPv6 /64）。
+              </p>
+            </div>
+            <span v-if="clicks.length" class="text-[13px] text-muted">
+              已加载 {{ formatNumber(clicks.length) }} 条
+            </span>
+          </div>
+
+          <Spinner v-if="loadingClicks && clicks.length === 0" :size="16" class="mt-6">
+            正在加载…
+          </Spinner>
+          <p v-else-if="clicksError" class="mt-6 text-[13px] text-error">{{ clicksError }}</p>
+
+          <EmptyState
+            v-else-if="clicks.length === 0"
+            class="mt-6"
+            title="这段时间还没有点击"
+            description="明细来自点击事件表，worker 每 2 秒回刷一次；刚发生的跳转可能还要几秒才出现。"
+          />
+
+          <template v-else>
+            <!-- 桌面端：表格 -->
+            <div class="mt-4 hidden overflow-hidden md:block">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>设备</th>
+                    <th>浏览器 / 系统</th>
+                    <th>来源</th>
+                    <th>IP 网段</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="click in clicks" :key="click.id">
+                    <td class="whitespace-nowrap font-mono text-[13px]">
+                      {{ formatDateTimeSeconds(click.occurred_at) }}
+                    </td>
+                    <td class="whitespace-nowrap">{{ describeDevice(click.device ?? 'unknown') }}</td>
+                    <td class="whitespace-nowrap text-[13px] text-muted">
+                      {{ describeClient(click.browser, click.os) }}
+                    </td>
+                    <td class="text-[13px]" :title="click.referer">
+                      {{ describeReferer(click.referer ?? '') }}
+                    </td>
+                    <td class="whitespace-nowrap font-mono text-[13px] text-muted">
+                      {{ click.ip || '—' }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- 窄屏：卡片堆叠（不横向滚动表格，与链接列表同一策略） -->
+            <ul class="mt-4 space-y-3 md:hidden">
+              <li v-for="click in clicks" :key="click.id" class="card-cream p-4">
+                <div class="flex items-start justify-between gap-3">
+                  <span class="font-mono text-[13px] text-ink">
+                    {{ formatDateTimeSeconds(click.occurred_at) }}
+                  </span>
+                  <span class="badge badge-quiet shrink-0">
+                    {{ describeDevice(click.device ?? 'unknown') }}
+                  </span>
+                </div>
+                <p class="mt-2 text-[13px] text-muted">
+                  {{ describeClient(click.browser, click.os) }}
+                </p>
+                <p class="mt-1 break-anywhere text-[13px] text-muted">
+                  来源：{{ describeReferer(click.referer ?? '') }}
+                </p>
+                <p class="mt-1 font-mono text-[12px] text-muted-soft">IP {{ click.ip || '—' }}</p>
+              </li>
+            </ul>
+
+            <div class="mt-5 flex items-center gap-3">
+              <Button
+                v-if="clicksCursor"
+                variant="secondary"
+                :loading="loadingClicks"
+                @click="loadClicks(false)"
+              >
+                加载更多
+              </Button>
+              <span v-else class="text-[13px] text-muted">已经到底了。</span>
+            </div>
+          </template>
         </Card>
 
         <p class="mt-6 text-[13px] text-muted">

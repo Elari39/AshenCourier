@@ -191,6 +191,10 @@ func run() error {
 		CORSOrigins: corsOrigins(cfg.PublicBaseURL),
 		PageSize:    cfg.LinkPageSize,
 		MaxPageSize: cfg.MaxLinkPageSize,
+		// 点击明细复用列表的分页配置：两者都是「一页 N 条」的表格，
+		// 分成两组配置只会让运维多记一个旋钮，实际也很少需要分别调。
+		ClickPageSize:    cfg.LinkPageSize,
+		MaxClickPageSize: cfg.MaxLinkPageSize,
 
 		RateLimitCreate: httpx.RateLimitRule{
 			Scope: "create", Limit: cfg.RateLimitCreatePerMin, Window: time.Minute,

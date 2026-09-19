@@ -34,6 +34,9 @@ type Options struct {
 	// PageSize / MaxPageSize 是链接列表的默认与最大页大小。
 	PageSize    int
 	MaxPageSize int
+	// ClickPageSize / MaxClickPageSize 是点击明细列表的默认与最大页大小。
+	ClickPageSize    int
+	MaxClickPageSize int
 
 	// 四条限流规则。
 	RateLimitCreate   httpx.RateLimitRule
@@ -56,6 +59,7 @@ type Options struct {
 //	PATCH  /api/links/{code}
 //	DELETE /api/links/{code}
 //	GET    /api/links/{code}/stats
+//	GET    /api/links/{code}/clicks
 //	POST   /api/links/{code}/claim
 //	GET    /{code}          ← 302 跳转，兜底模式
 //
@@ -71,6 +75,12 @@ func Router(opts Options) http.Handler {
 		deltas:      opts.DeltaBatch,
 	}
 	statsAPI := &statsHandler{shortener: opts.Shortener, stats: opts.Stats}
+	clickAPI := &clickHandler{
+		shortener: opts.Shortener,
+		stats:     opts.Stats,
+		pageSize:  opts.ClickPageSize,
+		maxSize:   opts.MaxClickPageSize,
+	}
 	redirectAPI := &redirectHandler{shortener: opts.Shortener, trustProxy: opts.TrustProxy}
 
 	requireUser := requireAuth(opts.Auth)
@@ -108,6 +118,12 @@ func Router(opts Options) http.Handler {
 	// 这里选 IP + 短码维度：看板刷得再勤，也只消耗该短码自己的配额。
 	mux.Handle("GET /api/links/{code}/stats",
 		limit(opts.RateLimitStats)(optionalUser(http.HandlerFunc(statsAPI.show))))
+
+	// 明细与统计共用同一条限流规则：两者都是详情页刷出来的读请求，
+	// 维度同为 IP + 短码 —— 翻页翻得再凶也只消耗该短码自己的配额，
+	// 不会波及真实跳转的配额（scope 不同 → Redis 键不同）。
+	mux.Handle("GET /api/links/{code}/clicks",
+		limit(opts.RateLimitStats)(optionalUser(http.HandlerFunc(clickAPI.list))))
 
 	// ---- 短码跳转：兜底模式 ----
 	// 显式限定 GET：不加方法前缀时 POST /abc、DELETE /abc 也会命中这里

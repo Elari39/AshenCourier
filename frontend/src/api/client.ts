@@ -10,6 +10,7 @@
 
 import { loadToken, notifyUnauthorized } from './session'
 import type {
+  ClickListResponse,
   CreateLinkPayload,
   CreateLinkResponse,
   HealthReport,
@@ -269,6 +270,23 @@ export const linksApi = {
   stats(code: string, days = 30, manageKey?: string | null, signal?: AbortSignal) {
     return request<Stats>(`/api/links/${encodeURIComponent(code)}/stats`, {
       query: { days },
+      manageKey,
+      signal,
+    })
+  },
+
+  /**
+   * 点击明细（keyset 分页）。
+   * device 取值与统计的设备分布一致：desktop / mobile / tablet / bot / unknown。
+   */
+  clicks(
+    code: string,
+    params: { limit?: number; cursor?: string; days?: number; device?: string },
+    manageKey?: string | null,
+    signal?: AbortSignal,
+  ) {
+    return request<ClickListResponse>(`/api/links/${encodeURIComponent(code)}/clicks`, {
+      query: { limit: params.limit, cursor: params.cursor, days: params.days, device: params.device },
       manageKey,
       signal,
     })

@@ -13,12 +13,31 @@ const DATE_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
   hour12: false,
 })
 
+// 明细列表专用：同一分钟里常有多条点击，只到分钟会看起来像重复行
+const DATE_TIME_SECONDS_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+})
+
 /** 把 ISO 时间格式化成 `2026/09/18 13:05`；空值返回占位符。 */
 export function formatDateTime(iso?: string | null, fallback = '—'): string {
   if (!iso) return fallback
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return fallback
   return DATE_TIME_FORMATTER.format(date)
+}
+
+/** 精确到秒的 `2026/09/18 13:05:42`，用于点击明细。 */
+export function formatDateTimeSeconds(iso?: string | null, fallback = '—'): string {
+  if (!iso) return fallback
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return fallback
+  return DATE_TIME_SECONDS_FORMATTER.format(date)
 }
 
 /** 把 ISO 日期格式化成 `09-18`，用于趋势图刻度。 */
@@ -115,6 +134,15 @@ export function describeDevice(device: string): string {
     default:
       return device
   }
+}
+
+/**
+ * 浏览器 / 系统的组合展示。
+ * 两边都是 unknown 时只显示一个「未知」——「未知 / 未知」既啰嗦又像出了错。
+ */
+export function describeClient(browser?: string, os?: string): string {
+  const parts = [browser, os].filter((part): part is string => Boolean(part) && part !== 'unknown')
+  return parts.length > 0 ? parts.join(' / ') : '未知'
 }
 
 /** 把日期字符串转成本地时区的 `YYYY-MM-DD`（趋势图 x 轴用）。 */

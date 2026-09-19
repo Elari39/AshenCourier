@@ -8,7 +8,7 @@
 
 ---
 
-## 0. 执行进度（2026-09-18 更新）
+## 0. 执行进度（2026-09-19 更新）
 
 > 本文件其余部分是**计划**；这一节记录**实际做到哪一步**。一个批次一个 commit，
 > 全部已推到 `origin/main`，CI（[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)）
@@ -27,11 +27,11 @@
 | **M3-2** | singleflight 防击穿 + `pg_fallbacks` | ✅ | `52d6a98` | 冷短码 20 个并发请求（`curl --parallel-immediate`）全部 302，`pg_fallbacks` 增量 = **1**；单测 50 goroutine 并发 miss 只回源 1 次 |
 | **M3-3** | 备份与恢复演练 | ✅ | `d134658` | dump → 恢复到临时库后与主库逐项一致（links 14 / events 169 / 两个口径 169）→ 删临时库；保留策略实测（2000 年的假备份被清理、当天的留下） |
 | **M4-1** | 链接标签（迁移 000003） | ✅ | `ff67663` | 归一化 `Ops`+`  ops  `+`Dev` → `ops,dev`；`?tag=ops` 命中 1 条、`?tag=DEV` 命中 2 条；11 个 / 33 字符标签 → 422；`EXPLAIN` 走 `links_tags_gin`；无头 Chrome 里输入 `ops` 列表 2→1 |
-| **M4-2** | 点击明细页（迁移 000004） | ⏳ 未开始 | — | — |
+| **M4-2** | 点击明细页（迁移 000004） | ✅ | 见下 | 跳 3 次 → `?limit=2` 两页读全（2+1，时间倒序、无重叠无缺口）；`device=mobile` 1 条 / `device=unknown` 0 条；坏 `limit`/`days`/`device`/`cursor` 都 422 且 `field` 正确，无凭据 404；库里 `172.20.0.1` → 响应 `172.20.0.0/24`（原始地址不在响应体里）；`EXPLAIN` 走 `click_events_link_time_id_idx` 且 **Index Only Scan 无 Sort**；无头 Chrome 首屏 20 行 + 「加载更多」→ 点一下 26 行、按钮变「已经到底了」 |
 | **M4-3** | 二维码 | ⏳ 未开始 | — | — |
 | **M5** | 四个大件（需 §15 拍板） | ⏸ 按计划推迟 | — | — |
 
-**与计划的偏离（5 条，逐条给理由）**
+**与计划的偏离（7 条，逐条给理由）**
 
 1. **删掉 `RestoreDelta`，而不是「保留给写库报错分支」**（§6 M3-1）。
    补偿式下 `TakeDelta` 只读不删，失败时值本来就在键里；此时再「按值归还」会让基线**翻倍**。
@@ -48,6 +48,13 @@
    本机网络下 `/docker-entrypoint.d/10-listen-on-ipv6-by-default.sh` 里的 `apk manifest nginx`
    会卡死，容器一直 unhealthy。我们的 `nginx.conf` 是整体替换的，那批脚本一个都不需要；
    CI 没有这个文件，走真实 entrypoint（也就是说 entrypoint 能跑通这件事仍由 CI 守着）。
+6. **迁移 000004 顺带删掉旧索引 `click_events_link_time_idx`**（§9.1 写的是「只加索引」）。
+   旧索引 `(link_id, occurred_at DESC)` 正是新索引 `(link_id, occurred_at DESC, id DESC)` 的**前缀**：
+   任何走旧索引的查询都能走新索引，留着只是让 `click_events` 这条最热的追加路径每次插入多维护
+   一棵 B-tree。down 里按原样重建，严格互逆 —— 已用 `pg_indexes` 核对迁移后的实际索引清单。
+7. **IP 掩码用 CIDR 前缀写法**（`203.0.113.0/24`、`2001:db8:1234:5678::/64`），而不是
+   §7 描述的「抹掉最后一段」那种 `203.0.113.x`。理由是语义不会读错：`.0` / 全零主机位容易被
+   当成一台真实主机，而 `/24`、`/64` 明确表示「这是一个网段」；IPv4 与 IPv6 的展示形状也统一。
 
 **顺带修掉的小问题**：`Input.vue` 之前把 `aria-label` 透传到外层 `<div>`，输入框本身没有可访问名
 （屏幕阅读器只念「编辑框」）。M4-1 的浏览器验收发现后改为：`class`/`style` 留给外层容器，

@@ -103,6 +103,13 @@ func (c *fakeClicks) Aggregate(context.Context, domain.StatsQuery) (*domain.Stat
 	return nil, nil
 }
 
+// ListByLink 只服务于 HTTP 明细接口，回刷路径上不该出现：
+// 真被走到就 panic（与别处「内嵌 nil 接口」的替身一个思路），
+// 免得将来有人在 worker 里顺手查明细还拿到一个空结果。
+func (c *fakeClicks) ListByLink(context.Context, domain.ClickListQuery) ([]domain.ClickEvent, domain.ClickCursor, error) {
+	panic("worker 不该调用 ClickRepository.ListByLink")
+}
+
 // fakeStream 模拟 Stream 消费；acked 按批次记录 XACK 的 ID。
 type fakeStream struct {
 	readResult  *domain.ReadResult

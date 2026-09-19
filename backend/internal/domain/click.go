@@ -71,6 +71,34 @@ type StatsAggregate struct {
 	Browsers []BucketCount
 }
 
+// ClickCursor 是点击明细的 keyset 游标：按 (occurred_at, id) 倒序翻页。
+//
+// 为什么必须带 ID：occurred_at 是毫秒精度，同一毫秒内的多条点击在时间上完全并列，
+// 只比较时间的游标会在翻页边界上漏行或重复。ID 是 identity 主键（单调递增），
+// 在时间相同时提供稳定的次序。
+type ClickCursor struct {
+	// OccurredAt 是上一页最后一条的发生时刻。
+	OccurredAt time.Time
+	// ID 是上一页最后一条的主键。
+	ID int64
+	// Valid 为 false 表示没有下一页（末页）。
+	Valid bool
+}
+
+// ClickListQuery 描述一次点击明细的分页查询条件。
+type ClickListQuery struct {
+	// LinkID 是目标短链。
+	LinkID uuid.UUID
+	// Since 是窗口起点（含）；零值表示不限时间。
+	Since time.Time
+	// Device 是设备筛选（与 internal/pkg/ua 的输出一致）；空串表示不限。
+	Device string
+	// Limit 是本次最多返回多少条。
+	Limit int
+	// Cursor 是上一页末尾的位置（Valid=false 表示第一页）。
+	Cursor ClickCursor
+}
+
 // StatsQuery 描述一次统计聚合的查询条件。
 type StatsQuery struct {
 	// LinkID 是目标短链。
@@ -155,4 +183,7 @@ type ClickRepository interface {
 	InsertBatch(ctx context.Context, events []ClickEvent) error
 	// Aggregate 执行窗口内的多维聚合。
 	Aggregate(ctx context.Context, q StatsQuery) (*StatsAggregate, error)
+	// ListByLink 按 (occurred_at, id) 倒序分页列出某短链的点击明细，
+	// 并返回下一页游标（末页 Valid=false）。
+	ListByLink(ctx context.Context, q ClickListQuery) ([]ClickEvent, ClickCursor, error)
 }

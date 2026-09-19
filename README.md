@@ -143,7 +143,7 @@ Browser ──┬─ /api/*         ─┐
 | --- | --- | --- |
 | `links` | 短链主体 | `short_code` 全局唯一；`status` 用 `smallint` 而非 PG enum（改状态机不用 `ALTER TYPE`）；`key_hash bytea` 存匿名管理密钥的 SHA-256；`tags text[]`（000003 起）配 GIN 索引做标签筛选 |
 | `users` | 账号 | `email` 存 `text` + `unique index (lower(email))` 做大小写不敏感唯一（不引入 `citext` 扩展，省掉一次 `CREATE EXTENSION`） |
-| `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入；`event_uid`（000002 起）取自 Stream 消息 ID，配合部分唯一索引做幂等去重 |
+| `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入；`event_uid`（000002 起）取自 Stream 消息 ID，配合部分唯一索引做幂等去重；`(link_id, occurred_at DESC, id DESC)`（000004 起）服务明细页的 keyset 翻页，旧的 `(link_id, occurred_at DESC)` 是被它覆盖的前缀索引，已删除 |
 | `link_click_totals` | 视图 | `links.click_count + count(click_events)`，用于人工对账 |
 
 ## API
@@ -174,6 +174,7 @@ Browser ──┬─ /api/*         ─┐
 | 10 | GET | `/api/links/{code}/stats?days=30` | JWT 或 Key | 统计聚合 |
 | 11 | POST | `/api/links/{code}/claim` | JWT + Key | 把匿名短链认领到账号下 |
 | 12 | GET | `/{code}` | — | **302 跳转**（不在 `/api` 下） |
+| 13 | GET | `/api/links/{code}/clicks?limit=20&cursor=&days=30&device=` | JWT 或 Key | 点击明细，`(occurred_at, id)` keyset 分页（**时间倒序**）；`device` 取 `desktop` / `mobile` / `tablet` / `bot` / `unknown`（与分布口径一致）。**IP 只回掩码网段**：IPv4 → `/24`、IPv6 → `/64` |
 
 **鉴权方式**
 
@@ -202,6 +203,33 @@ Browser ──┬─ /api/*         ─┐
 标记为 `omitzero` 的字段（`window_clicks` / `since` 等）在零值时不出现——
 `window_clicks` 为 0 就是「窗口内还没有明细落库」，前端按 `?? 0` 兜底。
 `frontend/src/api/types.ts` 里这些字段都是可选的，正是这个原因。
+
+**明细响应**（`/api/links/{code}/clicks`）
+
+```json
+{
+  "clicks": [
+    {
+      "id": 188,
+      "occurred_at": "2026-09-19T02:36:32Z",
+      "referer": "https://news.example/post/1",
+      "user_agent": "Mozilla/5.0 (iPhone; …) Safari",
+      "ip": "172.20.0.0/24",
+      "device": "mobile",
+      "browser": "Safari",
+      "os": "iOS"
+    }
+  ],
+  "next_cursor": "MjAyNi0wOS0xOVQwMjozNjoxMS4xNjI4MjJafDE4Nw",
+  "days": 30,
+  "since": "2026-08-21T00:00:00Z"
+}
+```
+
+`ip` 是**掩码后的网段**（IPv4 抹掉最后一段、IPv6 只留前 4 组），原始地址只留在
+`click_events.ip` 里供风控 / 排障直接查库 —— 明细页要定位到「哪个网段」就够了，
+而 API 响应会经浏览器缓存、截图、共享看板流转。`next_cursor` 为空表示已到底；
+游标是 `RFC3339Nano|id` 的 base64url，对前端不透明（结构随时可换而不破坏兼容）。
 
 ## 目录结构
 
@@ -544,7 +572,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | --- | --- | --- |
 | `gofmt -l .`（backend） | 无输出 | 本机 + CI `backend` |
 | `go vet ./...` | 通过 | 本机 + CI `backend` |
-| `go test ./...` | 通过（config / domain / httpx / base62 / shortcode / ua / validator / service / store.postgres / worker） | 本机 |
+| `go test ./...` | 通过（config / domain / httpx / base62 / ipmask / shortcode / ua / validator / service / store.postgres / worker） | 本机 |
 | `go test -race ./...` | 通过。⚠️ 本机需 `CGO_LDFLAGS=-static`：mingw-w64 8.1.0 的运行时 DLL 与 Go 1.27 的 race runtime 不匹配，裸跑会得到 `exit status 0xc0000139`（环境问题，不是代码问题） | 本机（带 `-static`）+ CI `backend`（ubuntu 原生） |
 | `pnpm typecheck` / `pnpm lint` / `pnpm build` | 通过（lint 0 error 0 warning） | 本机 + CI `frontend` |
 | `docker compose up -d --build` | 5 个容器全部 healthy（PG / Redis / backend / worker / frontend） | 本机 + CI `smoke` |
@@ -558,6 +586,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑦**：缓存击穿防护（M3-2） | 用一个刚创建（缓存已被主动失效）的冷短码，`curl --parallel-immediate` 同时打 **20** 个请求 → 20 个 **302**；`/healthz` 的 `pg_fallbacks` 增量 = **1**（而不是 20）。单测侧：50 个 goroutine 并发 miss + 回源处设屏障，断言仓储只被调用 1 次 | 本机 |
 | **容器级 ⑧**：备份与恢复（M3-3） | `--profile ops` 起 backup → 产出 `ashen-20260918-154740.dump`；`pg_restore` 到临时库 `restore_check` 后与主库逐项一致（`links` 14、`click_events` 169、`sum(base_count)` = `sum(event_count)` = 169）；删临时库后 `pg_database` 里不再有它。保留策略实测：造一个 2000 年的假备份 → 清理后旧文件被删、当天的留下 | 本机 |
 | **容器级 ⑨**：标签（M4-1） | 创建时传 `["Ops","  ops  ","Dev"]` → 返回 `["ops","dev"]`（归一化 + 去重）；`?tag=ops` 只命中该条，`?tag=DEV`（大写）也能命中（按小写比较）；11 个标签 / 33 字符标签都返回 422 `invalid_tags`；`EXPLAIN` 下 `tags @> ARRAY['ops']` 走 **`links_tags_gin`**（Bitmap Index Scan）。浏览器侧：无头 Chrome 在 `/dashboard` 输入 `ops` 后列表从 2 条变 1 条 | 本机 |
+| **容器级 ⑩**：点击明细页（M4-2） | 跳转 3 次（手机 / 桌面 / 爬虫 UA）→ `?limit=2` 拿到 2 行 + 游标，带游标翻到第 2 页拿到剩下的 1 行、`next_cursor` 为空；时间倒序且两页无重叠无缺口（26 行 = 首屏 20 + 「加载更多」6，逐行核对无重复）。IP 掩码：库里 `host(ip)` = `172.20.0.1`，响应里是 `172.20.0.0/24`，且响应体里搜不到原始地址。`device=mobile` 命中 1 条、`device=unknown` 命中 0 条（与设备分布口径一致）；`limit=0` / `days=abc` / `device=tv` / 坏游标都返回 422 且 `field` 正确；无凭据 404。`EXPLAIN` 下 `(occurred_at, id) < (…)` 被下推进 **`click_events_link_time_id_idx`** 的 Index Cond，且 Index Only Scan **不带 Sort 节点**（索引本身给出倒序）。浏览器侧：无头 Chrome 打开 `/links/{code}`，首屏 20 行 + 「加载更多」，点一下变 26 行、按钮换成「已经到底了」，两页拼接处无重复行 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |

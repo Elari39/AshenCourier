@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"ashen-courier/internal/domain"
+	"ashen-courier/internal/pkg/ipmask"
 	"ashen-courier/internal/service"
 )
 
@@ -126,6 +127,48 @@ type createLinkResponse struct {
 type linkListResponse struct {
 	Links      []linkDTO `json:"links"`
 	NextCursor string    `json:"next_cursor,omitempty"`
+}
+
+// clickDTO 是一条点击明细的对外表示。
+//
+// ip 是**掩码后**的网络前缀（203.0.113.0/24），不是原始地址：明细页是给人看的，
+// 网段足够定位问题，而原始 IP 留在库里供风控/排障直接查询，不必经 API 外流。
+type clickDTO struct {
+	ID         int64     `json:"id"`
+	OccurredAt time.Time `json:"occurred_at,omitzero"`
+	Referer    string    `json:"referer,omitempty"`
+	UserAgent  string    `json:"user_agent,omitempty"`
+	IP         string    `json:"ip,omitempty"`
+	Country    string    `json:"country,omitempty"`
+	Device     string    `json:"device,omitempty"`
+	Browser    string    `json:"browser,omitempty"`
+	OS         string    `json:"os,omitempty"`
+}
+
+// toClickDTO 把领域实体转成对外表示，并在这一步完成 IP 掩码。
+// 掩码放在 DTO 边界而不是 service/store：领域模型与数据库里始终是原始 IP，
+// 只有「对外」这一层才降级，将来加一个内部接口也不会被误掩码。
+func toClickDTO(e *domain.ClickEvent) clickDTO {
+	return clickDTO{
+		ID:         e.ID,
+		OccurredAt: e.OccurredAt,
+		Referer:    e.Referer,
+		UserAgent:  e.UserAgent,
+		IP:         ipmask.Mask(e.IP),
+		Country:    e.Country,
+		Device:     e.Device,
+		Browser:    e.Browser,
+		OS:         e.OS,
+	}
+}
+
+// clickListResponse 是点击明细列表响应。days / since 回显实际生效的窗口，
+// 免得前端自己算一遍（两边算出来的边界不一致时，条数对不上会很费解）。
+type clickListResponse struct {
+	Clicks     []clickDTO `json:"clicks"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+	Days       int        `json:"days,omitzero"`
+	Since      time.Time  `json:"since,omitzero"`
 }
 
 // statsResponse 是统计响应，字段名与 PLAN.md §7 的契约一致。
