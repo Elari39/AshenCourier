@@ -121,7 +121,7 @@ func run() error {
 	// ---- 领域仓储与 service ----
 	links := pg.Links()
 	cache := redis.NewCache(rdb)
-	shortener := service.NewShortener(links, cache, redis.NewRecorder(rdb), service.ShortenerConfig{
+	shortener := service.NewShortener(links, cache, redis.NewRecorder(rdb), pg.Domains(), service.ShortenerConfig{
 		BaseURL:     cfg.PublicBaseURL,
 		CacheTTL:    cfg.CacheTTL,
 		NegativeTTL: cfg.NegativeTTL,

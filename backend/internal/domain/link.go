@@ -74,6 +74,11 @@ type Link struct {
 	Title string
 	// OwnerID 为空表示匿名创建。
 	OwnerID *uuid.UUID
+	// DomainID 是所属自定义域名（M5-3）。
+	//
+	// **nil 不是「没设置」，而是一个明确语义：默认域名**（PUBLIC_BASE_URL 指向的那个）。
+	// 于是历史行不需要回填，读路径也不必为「老数据」单独开一条分支。
+	DomainID *uuid.UUID
 	// KeyHash 是匿名管理密钥的 SHA-256；被认领后清空。
 	KeyHash []byte
 	// PasswordHash 是访问口令的 bcrypt 摘要；空串表示不设口令。
@@ -196,8 +201,10 @@ type ClickCountWriter interface {
 
 // ExpiredLinkSweeper 扫描并失效已到期的短链，实现在 internal/store/postgres。
 type ExpiredLinkSweeper interface {
-	// ExpireDue 把已过期但仍为 active 的链接置为 disabled，返回被处理的短码。
-	ExpireDue(ctx context.Context, now time.Time, limit int) ([]string, error)
+	// ExpireDue 把已过期但仍为 active 的链接置为 disabled，返回被处理的短链引用。
+	// 带域是必需的：worker 紧接着要按「域 + 短码」失效缓存，只拿到短码就删不掉
+	// 挂在自定义域上的那条（见 LinkRef）。
+	ExpireDue(ctx context.Context, now time.Time, limit int) ([]LinkRef, error)
 }
 
 // LinkRepository 是短链仓储接口，实现在 internal/store/postgres。
@@ -205,7 +212,21 @@ type LinkRepository interface {
 	// Create 插入一条短链；短码唯一约束冲突时返回 *ConflictError。
 	Create(ctx context.Context, link *Link) error
 	// GetByCode 按短码精确查询（大小写敏感）；不存在返回 *NotFoundError。
+	//
+	// **不带域**：短码在当前模型里是全局唯一的，所以管理端（详情 / 修改 / 删除 / 认领）
+	// 只靠短码就能唯一定位。跳转与口令校验走 GetByCodeInDomain。
 	GetByCode(ctx context.Context, code string) (*Link, error)
+	// GetByCodeInDomain 在**指定域内**按短码精确查询；不存在返回 *NotFoundError。
+	//
+	// domainID 为 nil 表示默认域名（PUBLIC_BASE_URL 指向的那个）。
+	// 跳转路径必须用它：分域之后「同一个短码」在不同域下是两条不同的短链，
+	// 只按短码查会把 A 域的访问解析到 B 域的链接上 —— 那是把访问者送去错误目标，
+	// 比 404 严重得多。
+	//
+	// 实现里写成 `domain_id IS NOT DISTINCT FROM $2`：NULL 与 NULL 在这里必须算相等，
+	// 而 SQL 的 `=` 对 NULL 恒为 NULL（不是 true），写成 `= $2` 会让所有默认域名的
+	// 历史短链全部查不到。
+	GetByCodeInDomain(ctx context.Context, code string, domainID *uuid.UUID) (*Link, error)
 	// Update 按短码做部分更新，返回更新后的实体；不存在返回 *NotFoundError。
 	Update(ctx context.Context, code string, patch LinkPatch) (*Link, error)
 	// SoftDelete 把状态改为 deleted；不存在返回 *NotFoundError。
@@ -216,6 +237,7 @@ type LinkRepository interface {
 	Claim(ctx context.Context, code string, ownerID uuid.UUID) (*Link, error)
 	// AddClickCount 把 Redis 侧的计数增量累加进 PG 基线，返回累加后的值。
 	AddClickCount(ctx context.Context, code string, delta int64) (int64, error)
-	// ExpireDue 扫描并标记已过期但仍为 active 的链接，返回被处理的短码列表。
-	ExpireDue(ctx context.Context, now time.Time, limit int) ([]string, error)
+	// ExpireDue 扫描并标记已过期但仍为 active 的链接，返回被处理的短链引用
+	// （带所属域，见 LinkRef —— 调用方要按「域 + 短码」失效缓存）。
+	ExpireDue(ctx context.Context, now time.Time, limit int) ([]LinkRef, error)
 }

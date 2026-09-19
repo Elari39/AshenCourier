@@ -125,21 +125,21 @@ func TestVerifyPassword(t *testing.T) {
 		s := newShortenerForTest(repoFor(&domain.Link{
 			ShortCode: code, TargetURL: "https://example.com", Status: domain.LinkStatusActive,
 		}), newMemCache())
-		if err := s.VerifyPassword(t.Context(), code, ""); err != nil {
+		if err := s.VerifyPassword(t.Context(), "", code, ""); err != nil {
 			t.Fatalf("没设口令的链接无需解锁，实际 %v", err)
 		}
 	})
 
 	t.Run("口令正确", func(t *testing.T) {
 		s := newShortenerForTest(repoFor(locked()), newMemCache())
-		if err := s.VerifyPassword(t.Context(), code, plain); err != nil {
+		if err := s.VerifyPassword(t.Context(), "", code, plain); err != nil {
 			t.Fatalf("正确口令应当通过，实际 %v", err)
 		}
 	})
 
 	t.Run("口令错误：ErrUnauthorized", func(t *testing.T) {
 		s := newShortenerForTest(repoFor(locked()), newMemCache())
-		if err := s.VerifyPassword(t.Context(), code, "wrong-guess"); !errors.Is(err, domain.ErrUnauthorized) {
+		if err := s.VerifyPassword(t.Context(), "", code, "wrong-guess"); !errors.Is(err, domain.ErrUnauthorized) {
 			t.Fatalf("错误口令应当报 ErrUnauthorized，实际 %v", err)
 		}
 	})
@@ -148,7 +148,7 @@ func TestVerifyPassword(t *testing.T) {
 		deleted := locked()
 		deleted.Status = domain.LinkStatusDeleted
 		s := newShortenerForTest(repoFor(deleted), newMemCache())
-		if err := s.VerifyPassword(t.Context(), code, plain); !errors.Is(err, domain.ErrNotFound) {
+		if err := s.VerifyPassword(t.Context(), "", code, plain); !errors.Is(err, domain.ErrNotFound) {
 			t.Fatalf("已删除的链接应当报 ErrNotFound（不泄露存在性），实际 %v", err)
 		}
 	})
@@ -158,7 +158,7 @@ func TestVerifyPassword(t *testing.T) {
 		past := time.Now().Add(-time.Hour)
 		expired.ExpiresAt = &past
 		s := newShortenerForTest(repoFor(expired), newMemCache())
-		if err := s.VerifyPassword(t.Context(), code, plain); !errors.Is(err, domain.ErrGone) {
+		if err := s.VerifyPassword(t.Context(), "", code, plain); !errors.Is(err, domain.ErrGone) {
 			t.Fatalf("已过期的链接应当报 ErrGone，实际 %v", err)
 		}
 	})

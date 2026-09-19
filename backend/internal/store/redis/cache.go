@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"uuid"
 
 	"ashen-courier/internal/domain"
 )
@@ -44,17 +45,24 @@ type cachedLinkWire struct {
 	// PasswordProtected 只记「有没有口令」；摘要留在 PG 里，缓存里不放（见 domain.CachedLink）。
 	// 加字段是兼容变更（老条目解出来是 false）；禁的是改名。
 	PasswordProtected bool `json:"password_protected,omitzero"`
+	// DomainID 是所属自定义域名；空串表示默认域名（不用指针，省一层 nil 判断）。
+	// 同样是兼容变更：老条目没有这个字段，解出来是空串 = 默认域名，与事实一致。
+	DomainID string `json:"domain_id,omitzero"`
 }
 
 // Get 用一次 MGET 同时探测正负缓存。三种结果：
 //   - 命中正向：(*CachedLink, nil)
 //   - 命中负缓存：(nil, ErrCacheKnownMissing)，调用方直接 404
 //   - 都未命中：(nil, ErrCacheMiss)，调用方回源 PG
-func (c *Cache) Get(ctx context.Context, code string) (*domain.CachedLink, error) {
+//
+// domainID 参与键的构造：正负缓存都按「域 + 短码」定位（见 domain.LinkRef）。
+// 少传域的后果不是「慢一点」，而是**读到别的域的条目**或**把别的域的否定断言
+// 当成自己的** —— 后者会让短链在它自己的域上 404。
+func (c *Cache) Get(ctx context.Context, code string, domainID *uuid.UUID) (*domain.CachedLink, error) {
 	opCtx, cancel := c.client.opCtx(ctx)
 	defer cancel()
 
-	vals, err := c.client.rdb.MGet(opCtx, LinkKey(code), MissKey(code)).Result()
+	vals, err := c.client.rdb.MGet(opCtx, LinkKey(domainID, code), MissKey(domainID, code)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("store.redis: get link cache %q: %w", code, err)
 	}
@@ -80,7 +88,8 @@ func (c *Cache) Get(ctx context.Context, code string) (*domain.CachedLink, error
 	return nil, fmt.Errorf("store.redis: link %q: %w", code, domain.ErrCacheMiss)
 }
 
-// Put 写正向缓存。
+// Put 写正向缓存。键从 link.DomainID 取，与条目里带的域天然一致 ——
+// 这个函数没有 domainID 参数，所以不存在「键写 A 域、内容属于 B 域」的可能。
 func (c *Cache) Put(ctx context.Context, link *domain.CachedLink, ttl time.Duration) error {
 	payload, err := marshal(cachedLinkWire{
 		ID:        link.ID.String(),
@@ -91,6 +100,7 @@ func (c *Cache) Put(ctx context.Context, link *domain.CachedLink, ttl time.Durat
 		ExpiresAt: link.ExpiresAt,
 
 		PasswordProtected: link.PasswordProtected,
+		DomainID:          formatUUID(link.DomainID),
 	})
 	if err != nil {
 		return fmt.Errorf("store.redis: encode link cache %q: %w", link.ShortCode, err)
@@ -99,38 +109,38 @@ func (c *Cache) Put(ctx context.Context, link *domain.CachedLink, ttl time.Durat
 	opCtx, cancel := c.client.opCtx(ctx)
 	defer cancel()
 
-	if err := c.client.rdb.Set(opCtx, LinkKey(link.ShortCode), payload, ttl).Err(); err != nil {
+	if err := c.client.rdb.Set(opCtx, LinkKey(link.DomainID, link.ShortCode), payload, ttl).Err(); err != nil {
 		return fmt.Errorf("store.redis: set link cache %q: %w", link.ShortCode, err)
 	}
 	return nil
 }
 
-// PutMissing 写短码负缓存。
-func (c *Cache) PutMissing(ctx context.Context, code string, ttl time.Duration) error {
+// PutMissing 写负缓存：「该短码在**该域内**不存在」。
+func (c *Cache) PutMissing(ctx context.Context, code string, domainID *uuid.UUID, ttl time.Duration) error {
 	opCtx, cancel := c.client.opCtx(ctx)
 	defer cancel()
 
-	if err := c.client.rdb.Set(opCtx, MissKey(code), "1", ttl).Err(); err != nil {
+	if err := c.client.rdb.Set(opCtx, MissKey(domainID, code), "1", ttl).Err(); err != nil {
 		return fmt.Errorf("store.redis: set miss cache %q: %w", code, err)
 	}
 	return nil
 }
 
-// Evict 删除短码的正负缓存。
-func (c *Cache) Evict(ctx context.Context, codes ...string) error {
-	if len(codes) == 0 {
+// Evict 删除若干短链的正负缓存。
+func (c *Cache) Evict(ctx context.Context, refs ...domain.LinkRef) error {
+	if len(refs) == 0 {
 		return nil
 	}
-	keys := make([]string, 0, len(codes)*2)
-	for _, code := range codes {
-		keys = append(keys, LinkKey(code), MissKey(code))
+	keys := make([]string, 0, len(refs)*2)
+	for _, ref := range refs {
+		keys = append(keys, LinkKey(ref.DomainID, ref.Code), MissKey(ref.DomainID, ref.Code))
 	}
 
 	opCtx, cancel := c.client.opCtx(ctx)
 	defer cancel()
 
 	if err := c.client.rdb.Del(opCtx, keys...).Err(); err != nil {
-		return fmt.Errorf("store.redis: evict %d link caches: %w", len(codes), err)
+		return fmt.Errorf("store.redis: evict %d link caches: %w", len(refs), err)
 	}
 	return nil
 }
@@ -138,6 +148,10 @@ func (c *Cache) Evict(ctx context.Context, codes ...string) error {
 // toDomain 把线格式转成领域结构体。
 func (w cachedLinkWire) toDomain() (*domain.CachedLink, error) {
 	id, err := parseUUID(w.ID)
+	if err != nil {
+		return nil, err
+	}
+	domainID, err := parseOptionalUUID(w.DomainID)
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +164,7 @@ func (w cachedLinkWire) toDomain() (*domain.CachedLink, error) {
 		ExpiresAt: w.ExpiresAt,
 
 		PasswordProtected: w.PasswordProtected,
+		DomainID:          domainID,
 	}, nil
 }
 

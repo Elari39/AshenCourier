@@ -347,19 +347,21 @@ func (w *Worker) expireLoop(ctx context.Context) {
 
 // expireLinks 清理一轮过期短链：置为 disabled 后立刻失效缓存。
 func (w *Worker) expireLinks(ctx context.Context) error {
-	codes, err := w.sweeper.ExpireDue(ctx, time.Now().UTC(), w.cfg.ExpireBatch)
+	refs, err := w.sweeper.ExpireDue(ctx, time.Now().UTC(), w.cfg.ExpireBatch)
 	if err != nil {
 		return err
 	}
-	if len(codes) == 0 {
+	if len(refs) == 0 {
 		return nil
 	}
-	if err := w.cache.Evict(ctx, codes...); err != nil {
+	// 按「域 + 短码」失效（见 domain.LinkRef）：只按短码删不掉挂在自定义域上的条目，
+	// 那条短链会「已过期但仍在跳转」直到 TTL 过期。
+	if err := w.cache.Evict(ctx, refs...); err != nil {
 		// 缓存失效失败不算致命：缓存 TTL 最多 1 小时，且跳转时会二次校验状态
 		w.log.Warn("过期短链的缓存失效失败，将在 TTL 后自愈", "err", err)
 	}
-	w.expired.Add(int64(len(codes)))
-	w.log.Info("已把过期短链置为 disabled", "count", len(codes))
+	w.expired.Add(int64(len(refs)))
+	w.log.Info("已把过期短链置为 disabled", "count", len(refs))
 	return nil
 }
 

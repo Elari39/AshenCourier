@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 	"uuid"
@@ -28,6 +29,16 @@ type stubLinkRepo struct {
 }
 
 func (r *stubLinkRepo) GetByCode(ctx context.Context, code string) (*domain.Link, error) {
+	return r.getByCode(ctx, code)
+}
+
+// GetByCodeInDomain 直接委托给 getByCode。
+//
+// reason：这些用例刻意不装配域名仓储（newTestShortener 的 domains 传 nil），
+// 于是每个请求都落在默认域上，「在哪条域里查」对它们没有意义。
+// 委托出去同时也是一道提醒 —— 这个替身没有建模域过滤，
+// 真要在 handler 层测「跨域 404」，必须换一个会按 domainID 过滤的替身。
+func (r *stubLinkRepo) GetByCodeInDomain(ctx context.Context, code string, _ *uuid.UUID) (*domain.Link, error) {
 	return r.getByCode(ctx, code)
 }
 
@@ -59,7 +70,7 @@ type stubCache struct {
 	evicted int
 }
 
-func (c *stubCache) Get(_ context.Context, code string) (*domain.CachedLink, error) {
+func (c *stubCache) Get(_ context.Context, code string, _ *uuid.UUID) (*domain.CachedLink, error) {
 	c.misses++
 	return nil, fmt.Errorf("stub cache: %q: %w", code, domain.ErrCacheMiss)
 }
@@ -69,12 +80,12 @@ func (c *stubCache) Put(context.Context, *domain.CachedLink, time.Duration) erro
 	return nil
 }
 
-func (c *stubCache) PutMissing(context.Context, string, time.Duration) error {
+func (c *stubCache) PutMissing(context.Context, string, *uuid.UUID, time.Duration) error {
 	c.missing++
 	return nil
 }
 
-func (c *stubCache) Evict(context.Context, ...string) error {
+func (c *stubCache) Evict(context.Context, ...domain.LinkRef) error {
 	c.evicted++
 	return nil
 }
@@ -106,8 +117,11 @@ type stubUsers struct {
 }
 
 // newTestShortener 造一个只依赖仓储与空缓存的 Shortener。
+//
+// 域名仓储传 nil：路由用例关心的是鉴权与状态码，`domains == nil` 在 Shortener 里
+// 是受支持的形态（等价于「该部署没有自定义域名」，所有 Host 都走默认域）。
 func newTestShortener(repo domain.LinkRepository) *service.Shortener {
-	return service.NewShortener(repo, &stubCache{}, nil, service.ShortenerConfig{
+	return service.NewShortener(repo, &stubCache{}, nil, nil, service.ShortenerConfig{
 		BaseURL:     "https://s.example",
 		CacheTTL:    time.Minute,
 		NegativeTTL: time.Minute,
@@ -440,4 +454,40 @@ func withActor(r *http.Request, actor service.Actor) context.Context {
 		return withUserID(r.Context(), *actor.UserID)
 	}
 	return r.Context()
+}
+
+// TestCreateAcceptsDomainField 守住一个真实踩过的缺口。
+//
+// service 层支持「创建时指定自定义域名」，但 handler 的 createLinkRequest 里
+// 一度没有 domain 字段。由于解码器**拒绝未知字段**，带 domain 的请求会直接
+// 422 invalid_json —— 表面看像「参数写错了」，实际是这个能力从接口层根本到不了。
+//
+// 所以这里断言两件事：
+//   - 不能是 invalid_json（字段必须被接受）
+//   - 该 Shortener 没装配域名仓储（等价于「一个域名都没登记」），
+//     正确结果是 **字段级 422 invalid_domain**，而不是被静默忽略后创建成功
+func TestCreateAcceptsDomainField(t *testing.T) {
+	t.Parallel()
+
+	repo := &stubLinkRepo{getByCode: func(context.Context, string) (*domain.Link, error) {
+		return nil, domain.NotFound("link", "domfld1")
+	}}
+	h := &linkHandler{shortener: newTestShortener(repo)}
+
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/links",
+		strings.NewReader(`{"target_url":"https://example.com/a","custom_code":"domfld1","domain":"a.local"}`))
+	r.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.create(rr, r)
+
+	if got := errCode(t, rr); got == "invalid_json" {
+		t.Fatalf("domain 没有被 createLinkRequest 接受（请求体被当成未知字段拒了）：%s", rr.Body.String())
+	}
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("状态码 %d，期望 422（未登记域名是字段级校验错误）：%s", rr.Code, rr.Body.String())
+	}
+	if got := errCode(t, rr); got != "invalid_domain" {
+		t.Errorf("错误码 %q，期望 invalid_domain", got)
+	}
 }

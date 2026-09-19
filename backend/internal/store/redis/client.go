@@ -1,7 +1,7 @@
 // Package redis 封装本项目用到的四类 Redis 用法：缓存、计数增量、Stream、限流。
 //
 // 统一约定：
-//   - 所有键都带版本前缀（v1），方便将来换数据结构时平滑迁移
+//   - 所有键都带版本前缀（链接缓存是 v2，见 client.go 的常量块），方便换数据结构时平滑迁移
 //   - 所有调用都必须带 context；本包会为每次操作套上 op 超时，
 //     并用 context.WithTimeoutCause 记录「超时」这个原因，便于日志归因
 //   - Redis 故障不阻塞跳转：调用方拿到错误后自行降级（见 service 层）
@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 
 	goredis "github.com/redis/go-redis/v9"
 
@@ -34,14 +35,26 @@ var (
 
 // 键前缀与固定键。短码字符集是 [0-9A-Za-z_-]，不含 ':'，因此拼键无歧义。
 const (
-	// linkKeyPrefix 是短码正向缓存：link:v1:{code}
-	linkKeyPrefix = "link:v1:"
-	// missKeyPrefix 是短码负缓存：link:v1:miss:{code}
+	// linkKeyPrefix 是短码正向缓存：link:v2:{domainKey}:{code}
+	//
+	// v2 而不是 v1：键的**含义**变了（从「短码」变成「域 + 短码」），
+	// 这属于不兼容变更，必须换版本 —— 否则升级瞬间会读到按旧坐标写的条目，
+	// 表现为「短链一会儿能开一会儿不能开」。老键不迁移，交给 TTL 自然淘汰。
+	linkKeyPrefix = "link:v2:"
+	// missKeyPrefix 是短码负缓存：link:v2:miss:{domainKey}:{code}
+	//
+	// domainKey 必须进键：负缓存的含义是「该短码在**该域内**不存在」。
+	// 只按短码记会让跨域探测把「不属于这个域」误记成「不存在」，
+	// 于是短链在它自己的域上也会 404（详见 domain.LinkRef）。
 	//
 	// 注意：不用 PLAN.md 草案里的 "link:v1:-{code}"。短码字符集含 '-'，
 	// 那么短码 "-abc" 的正向键 link:v1:-abc 会与短码 "abc" 的负缓存键撞车。
 	// 由于短码不含 ':'，插一层 "miss:" 段即可彻底消除歧义。
-	missKeyPrefix = "link:v1:miss:"
+	missKeyPrefix = "link:v2:miss:"
+	// defaultDomainKey 是默认域名在缓存键里的占位符。
+	// 用 '-'（不在 UUID 字符集 '0-9a-f-' 的合法形态里，也不是任何短码前缀的歧义源）
+	// 而不是空串：空串会让键里出现连续的 ':'，读起来分不清是「两段」还是「漏了一段」。
+	defaultDomainKey = "-"
 	// clickCounterPrefix 是计数增量：clicks:cnt:{code}
 	clickCounterPrefix = "clicks:cnt:"
 	// dirtySetKey 是需要回刷计数的短码集合
@@ -156,11 +169,23 @@ func (c *Client) detectIncrex(ctx context.Context) bool {
 
 // 键构造器：集中在一处，避免各处手拼字符串写错前缀。
 
-// LinkKey 返回短码正向缓存键。
-func LinkKey(code string) string { return linkKeyPrefix + code }
+// domainKey 把「可空域 ID」编码成键里的一段；nil（默认域名）得到 "-"。
+func domainKey(domainID *uuid.UUID) string {
+	if domainID == nil {
+		return defaultDomainKey
+	}
+	return domainID.String()
+}
 
-// MissKey 返回短码负缓存键。
-func MissKey(code string) string { return missKeyPrefix + code }
+// LinkKey 返回正向缓存键：**域 + 短码**。
+func LinkKey(domainID *uuid.UUID, code string) string {
+	return linkKeyPrefix + domainKey(domainID) + ":" + code
+}
+
+// MissKey 返回负缓存键：**域 + 短码**。
+func MissKey(domainID *uuid.UUID, code string) string {
+	return missKeyPrefix + domainKey(domainID) + ":" + code
+}
 
 // ClickCounterKey 返回计数增量键。
 func ClickCounterKey(code string) string { return clickCounterPrefix + code }

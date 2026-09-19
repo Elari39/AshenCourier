@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+	"uuid"
 
 	"ashen-courier/internal/domain"
 )
@@ -148,34 +149,39 @@ func (s *fakeStream) Ack(_ context.Context, ids ...string) error {
 }
 
 // fakeSweeper 模拟过期扫描。
+//
+// 返回的是 LinkRef（域 + 短码）而不是光秃秃的短码：worker 要按它失效缓存，
+// 而缓存键是「域 + 短码」—— 只给短码就删不掉自定义域上的那条。
 type fakeSweeper struct {
-	codes []string
-	err   error
+	refs []domain.LinkRef
+	err  error
 }
 
-func (s *fakeSweeper) ExpireDue(context.Context, time.Time, int) ([]string, error) {
-	return s.codes, s.err
+func (s *fakeSweeper) ExpireDue(context.Context, time.Time, int) ([]domain.LinkRef, error) {
+	return s.refs, s.err
 }
 
 // fakeCache 只关心 Evict。
 type fakeCache struct {
-	evicted []string
+	evicted []domain.LinkRef
 	err     error
 }
 
-func (c *fakeCache) Get(context.Context, string) (*domain.CachedLink, error) {
+func (c *fakeCache) Get(context.Context, string, *uuid.UUID) (*domain.CachedLink, error) {
 	return nil, domain.ErrCacheMiss
 }
 
 func (c *fakeCache) Put(context.Context, *domain.CachedLink, time.Duration) error { return nil }
 
-func (c *fakeCache) PutMissing(context.Context, string, time.Duration) error { return nil }
+func (c *fakeCache) PutMissing(context.Context, string, *uuid.UUID, time.Duration) error {
+	return nil
+}
 
-func (c *fakeCache) Evict(_ context.Context, codes ...string) error {
+func (c *fakeCache) Evict(_ context.Context, refs ...domain.LinkRef) error {
 	if c.err != nil {
 		return c.err
 	}
-	c.evicted = append(c.evicted, codes...)
+	c.evicted = append(c.evicted, refs...)
 	return nil
 }
 
@@ -469,10 +475,18 @@ func TestClaimPendingPropagatesError(t *testing.T) {
 
 // TestExpireLinksEvictsCache：置为 disabled 之后必须顺手失效缓存，
 // 否则过期短链在缓存 TTL 内还能继续跳转。
+//
+// 一条挂在自定义域上、一条在默认域上：**域必须一路传下来**，
+// 否则自定义域那条的缓存条目删不掉（键是「域 + 短码」），
+// 表现为「已过期但仍在跳转」，而默认域那条的用例是绿的。
 func TestExpireLinksEvictsCache(t *testing.T) {
 	t.Parallel()
 
-	sweeper := &fakeSweeper{codes: []string{"a1234", "b1234"}}
+	dom := uuid.New()
+	sweeper := &fakeSweeper{refs: []domain.LinkRef{
+		{Code: "a1234", DomainID: &dom},
+		{Code: "b1234"},
+	}}
 	cache := &fakeCache{}
 	w := newTestWorker(newFakeCounter(), newFakeCounts(), &fakeClicks{}, &fakeStream{}, cache, sweeper)
 
@@ -480,7 +494,13 @@ func TestExpireLinksEvictsCache(t *testing.T) {
 		t.Fatalf("expireLinks 不应失败：%v", err)
 	}
 	if len(cache.evicted) != 2 {
-		t.Fatalf("应失效两个短码的缓存，实际 %v", cache.evicted)
+		t.Fatalf("应失效两个短链的缓存，实际 %v", cache.evicted)
+	}
+	if got := cache.evicted[0]; got.Code != "a1234" || got.DomainID == nil || *got.DomainID != dom {
+		t.Fatalf("第一条失效应当带着自定义域 %v，实际 %+v", dom, got)
+	}
+	if got := cache.evicted[1]; got.Code != "b1234" || got.DomainID != nil {
+		t.Fatalf("第二条失效应当落在默认域（nil），实际 %+v", got)
 	}
 	if got := w.Stats().Expired; got != 2 {
 		t.Fatalf("Expired = %d, want 2", got)

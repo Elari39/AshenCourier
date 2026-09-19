@@ -34,3 +34,27 @@ func parseUUID(raw string) (uuid.UUID, error) {
 	}
 	return u, nil
 }
+
+// formatUUID 把可空 UUID 编码成字符串；nil 得到空串（缓存线格式里空串 = 默认域名）。
+//
+// 传指针而不是值：`domain_id` 为 NULL 表示「默认域名」，这在分域模型里是一个
+// 有意义的状态，不是「缺失」。用零 UUID 去表示它会让 nil 与
+// uuid.Nil() 两种写法混在代码里，而它们在这里的含义并不相同。
+func formatUUID(u *uuid.UUID) string {
+	if u == nil {
+		return ""
+	}
+	return u.String()
+}
+
+// parseOptionalUUID 解析可选 UUID；空串得到 nil（= 默认域名）。
+func parseOptionalUUID(raw string) (*uuid.UUID, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	u, err := parseUUID(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}

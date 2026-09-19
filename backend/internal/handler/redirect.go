@@ -45,7 +45,8 @@ func (h *redirectHandler) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	link, err := h.shortener.Resolve(r.Context(), code)
+	// 带上 Host：同一个短码在不同域下是两条不同的短链，解析必须按域隔离
+	link, err := h.shortener.Resolve(r.Context(), r.Host, code)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrNotFound):
@@ -134,7 +135,8 @@ func (h *redirectHandler) unlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.shortener.VerifyPassword(r.Context(), code, r.PostFormValue("password"))
+	// 与 Resolve 用同一个 Host：否则可以从 A 域提交口令去解锁一条属于 B 域的短链
+	err := h.shortener.VerifyPassword(r.Context(), r.Host, code, r.PostFormValue("password"))
 	switch {
 	case err == nil:
 		h.setUnlockCookie(w, code)

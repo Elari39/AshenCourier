@@ -37,6 +37,7 @@ func (h *linkHandler) create(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:  req.ExpiresAt,
 		Tags:       req.Tags,
 		Password:   req.Password,
+		Domain:     req.Domain,
 		ClientIP:   httpx.ClientIP(r, h.trustProxy),
 	}
 	if id, authed := userIDFrom(r.Context()); authed {
@@ -95,7 +96,7 @@ func (h *linkHandler) list(w http.ResponseWriter, r *http.Request) {
 		link := &links[i]
 		// map 里没有该短码 = 没有待同步增量，按 0 处理（不写 map 的零值也一样）
 		link.ClickCount += deltas[link.ShortCode]
-		items = append(items, toLinkDTO(link, h.shortener.ShortURL(link.ShortCode)))
+		items = append(items, toLinkDTO(link, h.shortener.ShortURL(r.Context(), link)))
 	}
 	httpx.WriteJSON(w, r, http.StatusOK, linkListResponse{Links: items, NextCursor: nextCursor})
 }
@@ -130,7 +131,7 @@ func (h *linkHandler) get(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	httpx.WriteJSON(w, r, http.StatusOK, toLinkDTO(link, h.shortener.ShortURL(link.ShortCode)))
+	httpx.WriteJSON(w, r, http.StatusOK, toLinkDTO(link, h.shortener.ShortURL(r.Context(), link)))
 }
 
 // update 处理 PATCH /api/links/{code}。
@@ -155,7 +156,7 @@ func (h *linkHandler) update(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteDomainError(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, r, http.StatusOK, toLinkDTO(updated, h.shortener.ShortURL(updated.ShortCode)))
+	httpx.WriteJSON(w, r, http.StatusOK, toLinkDTO(updated, h.shortener.ShortURL(r.Context(), updated)))
 }
 
 // remove 处理 DELETE /api/links/{code}（软删除）。
@@ -201,7 +202,7 @@ func (h *linkHandler) claim(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteDomainError(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, r, http.StatusOK, toLinkDTO(claimed, h.shortener.ShortURL(claimed.ShortCode)))
+	httpx.WriteJSON(w, r, http.StatusOK, toLinkDTO(claimed, h.shortener.ShortURL(r.Context(), claimed)))
 }
 
 // loadAuthorized 取短链并做鉴权，link / stats 两个 handler 共用。

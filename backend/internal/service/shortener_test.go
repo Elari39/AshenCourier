@@ -26,21 +26,22 @@ type memCache struct {
 	mu       sync.Mutex
 	positive map[string]*domain.CachedLink
 	missing  map[string]struct{}
-	evicted  []string // 记录被 Evict 过的短码，供断言
+	evicted  []domain.LinkRef // 记录被 Evict 过的短链引用（域 + 短码），供断言
 }
 
 func newMemCache() *memCache {
 	return &memCache{positive: map[string]*domain.CachedLink{}, missing: map[string]struct{}{}}
 }
 
-func (c *memCache) Get(_ context.Context, code string) (*domain.CachedLink, error) {
+func (c *memCache) Get(_ context.Context, code string, domainID *uuid.UUID) (*domain.CachedLink, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if entry, ok := c.positive[code]; ok {
+	key := cacheKey(domainID, code)
+	if entry, ok := c.positive[key]; ok {
 		return entry, nil
 	}
-	if _, ok := c.missing[code]; ok {
+	if _, ok := c.missing[key]; ok {
 		return nil, fmt.Errorf("memcache: %q: %w", code, domain.ErrCacheKnownMissing)
 	}
 	return nil, fmt.Errorf("memcache: %q: %w", code, domain.ErrCacheMiss)
@@ -50,29 +51,44 @@ func (c *memCache) Put(_ context.Context, link *domain.CachedLink, _ time.Durati
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.positive[link.ShortCode] = link
-	delete(c.missing, link.ShortCode)
+	key := cacheKey(link.DomainID, link.ShortCode)
+	c.positive[key] = link
+	delete(c.missing, key)
 	return nil
 }
 
-func (c *memCache) PutMissing(_ context.Context, code string, _ time.Duration) error {
+func (c *memCache) PutMissing(_ context.Context, code string, domainID *uuid.UUID, _ time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.missing[code] = struct{}{}
+	c.missing[cacheKey(domainID, code)] = struct{}{}
 	return nil
 }
 
-func (c *memCache) Evict(_ context.Context, codes ...string) error {
+func (c *memCache) Evict(_ context.Context, refs ...domain.LinkRef) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	for _, code := range codes {
-		delete(c.positive, code)
-		delete(c.missing, code)
-		c.evicted = append(c.evicted, code)
+	for _, ref := range refs {
+		key := cacheKey(ref.DomainID, ref.Code)
+		delete(c.positive, key)
+		delete(c.missing, key)
+		// 记引用而不是内部键：用例要断言的是「失效的是哪条短链」，
+		// 而内部键的形态是替身的私事（含 \x00 分隔符，失败信息里很难读）
+		c.evicted = append(c.evicted, ref)
 	}
 	return nil
+}
+
+// cacheKey 是替身内部的键：**域 + 短码**，与 store/redis 的键构造保持一致。
+//
+// 刻意不复用 redis 包的 LinkKey：那会把「替身与实现共用同一段拼键逻辑」当成优点，
+// 而实际上两者本该独立 —— 共用的话，拼键改错时两边一起错，用例照样全绿。
+func cacheKey(domainID *uuid.UUID, code string) string {
+	if domainID == nil {
+		return "-\x00" + code
+	}
+	return domainID.String() + "\x00" + code
 }
 
 // linkRepoFake 按需返回错误，其余全部落进内存 map。
@@ -107,6 +123,21 @@ func (r *linkRepoFake) GetByCode(ctx context.Context, code string) (*domain.Link
 		return l, nil
 	}
 	return nil, domain.NotFound("link", code)
+}
+
+// GetByCodeInDomain 与真实仓储（postgres）同义：**域不匹配与不存在一样报 NotFound**。
+//
+// 这一点必须在替身里也成立，否则「从 A 域访问属于 B 域的短码」这类用例
+// 会在替身上被放行，而线上是 404 —— 用替身测出来的绿灯等于没有覆盖。
+func (r *linkRepoFake) GetByCodeInDomain(ctx context.Context, code string, domainID *uuid.UUID) (*domain.Link, error) {
+	if r.getByCodeF != nil {
+		return r.getByCodeF(ctx, code)
+	}
+	l, ok := r.links[code]
+	if !ok || !sameDomain(l.DomainID, domainID) {
+		return nil, domain.NotFound("link", code)
+	}
+	return l, nil
 }
 
 func (r *linkRepoFake) Update(_ context.Context, code string, patch domain.LinkPatch) (*domain.Link, error) {
@@ -158,7 +189,7 @@ func (r *linkRepoFake) AddClickCount(_ context.Context, code string, delta int64
 	return l.ClickCount, nil
 }
 
-func (r *linkRepoFake) ExpireDue(_ context.Context, _ time.Time, _ int) ([]string, error) {
+func (r *linkRepoFake) ExpireDue(_ context.Context, _ time.Time, _ int) ([]domain.LinkRef, error) {
 	return nil, nil
 }
 
@@ -170,9 +201,32 @@ func (r *recorderFake) Record(_ context.Context, _ domain.ClickRecord) error {
 	return nil
 }
 
-// newShortenerForTest 装配一套全内存的 Shortener。
+// domainRepoFake 是全内存的域名仓储。
+//
+// listErr 非空时模拟 PG 故障：用来验证「刷新快照失败要退回上一份」而不是
+// 退回「所有 Host 都是默认域」（后者会让自定义域上的短链集体 404）。
+type domainRepoFake struct {
+	domains []domain.Domain
+	listErr error
+	calls   atomic.Int64
+}
+
+func (r *domainRepoFake) ListAll(context.Context) ([]domain.Domain, error) {
+	r.calls.Add(1)
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	return r.domains, nil
+}
+
+// newShortenerForTest 装配一套全内存的 Shortener（不登记任何自定义域，等价于「只用默认域名」）。
 func newShortenerForTest(repo *linkRepoFake, cache *memCache) *Shortener {
-	return NewShortener(repo, cache, &recorderFake{}, ShortenerConfig{
+	return newShortenerWithDomainsForTest(repo, cache, &domainRepoFake{})
+}
+
+// newShortenerWithDomainsForTest 与上者相同，但可以注入已登记的域名。
+func newShortenerWithDomainsForTest(repo *linkRepoFake, cache *memCache, domains *domainRepoFake) *Shortener {
+	return NewShortener(repo, cache, &recorderFake{}, domains, ShortenerConfig{
 		BaseURL:     "https://sho.rt",
 		CacheTTL:    time.Hour,
 		NegativeTTL: time.Minute,
@@ -194,11 +248,13 @@ func TestCreateEvictsStaleNegativeCache(t *testing.T) {
 	const code = "mycode1"
 
 	// 前置条件：该短码已被探测过一次（Resolve 404 → 写入负缓存）
-	_, err := s.Resolve(ctx, code)
+	_, err := s.Resolve(ctx, "", code)
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("探测不存在的短码应返回 ErrNotFound，实际：%v", err)
 	}
-	if _, ok := cache.missing[code]; !ok {
+	// 前置条件：该短码已被探测过一次（Resolve 404 → 写入负缓存）。
+	// 键是「域 + 短码」，这里探的是默认域名，所以域部分是 nil。
+	if _, ok := cache.missing[cacheKey(nil, code)]; !ok {
 		t.Fatal("前置条件不成立：Resolve 404 后应写入负缓存")
 	}
 
@@ -211,7 +267,7 @@ func TestCreateEvictsStaleNegativeCache(t *testing.T) {
 	}
 
 	// 核心断言：创建成功后立刻跳转必须成功，而不是等负缓存 TTL 过期
-	link, err := s.Resolve(ctx, code)
+	link, err := s.Resolve(ctx, "", code)
 	if err != nil {
 		t.Fatalf("创建成功后 Resolve 仍失败（负缓存未被冲掉）：%v", err)
 	}
@@ -219,16 +275,17 @@ func TestCreateEvictsStaleNegativeCache(t *testing.T) {
 		t.Fatalf("Resolve 拿到错误的目标地址：%q", link.TargetURL)
 	}
 
-	// Evict 的调用记录里能看到该短码
+	// Evict 的调用记录里能看到该短码，且**默认域也显式带上** ——
+	// nil 在这里是有意义的值（默认域名），不是「没传」
 	found := false
-	for _, c := range cache.evicted {
-		if c == code {
+	for _, ref := range cache.evicted {
+		if ref.Code == code && ref.DomainID == nil {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("Create 后应 Evict 短码 %q，实际 Evict 记录：%v", code, cache.evicted)
+		t.Fatalf("Create 后应 Evict 短码 %q（默认域），实际 Evict 记录：%v", code, cache.evicted)
 	}
 }
 
@@ -249,13 +306,12 @@ func TestCreateAutoCodeAlsoEvicts(t *testing.T) {
 	if len(cache.evicted) == 0 {
 		t.Fatal("自动生成的短码创建成功后也应 Evict 一次缓存")
 	}
-	if cache.evicted[len(cache.evicted)-1] != result.Link.ShortCode {
-		t.Fatalf("Evict 的短码 %q 与创建的 %q 不一致",
-			cache.evicted[len(cache.evicted)-1], result.Link.ShortCode)
+	if last := cache.evicted[len(cache.evicted)-1]; last.Code != result.Link.ShortCode {
+		t.Fatalf("Evict 的短码 %q 与创建的 %q 不一致", last.Code, result.Link.ShortCode)
 	}
 
 	// 跳转立即可用
-	if _, err := s.Resolve(ctx, result.Link.ShortCode); err != nil {
+	if _, err := s.Resolve(ctx, "", result.Link.ShortCode); err != nil {
 		t.Fatalf("创建后立刻 Resolve 失败：%v", err)
 	}
 }
@@ -271,7 +327,7 @@ func TestCreateFailureDoesNotEvict(t *testing.T) {
 	ctx := t.Context()
 
 	const code = "mycode2"
-	if err := cache.PutMissing(ctx, code, time.Minute); err != nil {
+	if err := cache.PutMissing(ctx, code, nil, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 
@@ -295,7 +351,7 @@ func TestStopDrainsQueueBeforeReturning(t *testing.T) {
 	t.Parallel()
 
 	recorder := &recorderFake{}
-	s := NewShortener(newLinkRepoFake(), newMemCache(), recorder, ShortenerConfig{
+	s := NewShortener(newLinkRepoFake(), newMemCache(), recorder, nil, ShortenerConfig{
 		BaseURL:     "https://sho.rt",
 		CacheTTL:    time.Hour,
 		NegativeTTL: time.Minute,
@@ -395,7 +451,7 @@ func TestResolveSingleflightCollapsesConcurrentMisses(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range workers {
 		wg.Go(func() {
-			_, errs[i] = s.Resolve(context.Background(), code)
+			_, errs[i] = s.Resolve(context.Background(), "", code)
 		})
 	}
 
@@ -448,7 +504,7 @@ func TestResolveSingleflightSharesFailure(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range workers {
 		wg.Go(func() {
-			_, errs[i] = s.Resolve(context.Background(), code)
+			_, errs[i] = s.Resolve(context.Background(), "", code)
 		})
 	}
 
@@ -467,7 +523,7 @@ func TestResolveSingleflightSharesFailure(t *testing.T) {
 	}
 
 	// 负缓存必须已经写好：再打一次不该回源
-	if _, err := s.Resolve(t.Context(), code); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := s.Resolve(t.Context(), "", code); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("第二次请求错误 = %v，期望 ErrNotFound", err)
 	}
 	if got := calls.Load(); got != 1 {

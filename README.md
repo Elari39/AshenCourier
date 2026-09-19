@@ -103,7 +103,7 @@ Browser ──┬─ /api/*         ─┐
           └─ 其余（SPA 路由） │   ├─ /assets  → 本地静态资源（优先于短码正则）
                              │   └─ /        → index.html（history fallback）
                              ▼
-                        backend:8080 ──┬── PostgreSQL 18（links / users / click_events）
+                        backend:8080 ──┬── PostgreSQL 18（links / users / click_events / domains）
                                        └── Redis 8（缓存 / 计数增量 / Stream / 限流）
                                                       ▲
                                           worker 容器 ─┘（消费 Stream、回刷计数）
@@ -136,12 +136,13 @@ Browser ──┬─ /api/*         ─┐
 
 ### 数据模型
 
-三张表 + 一个视图，初始结构在 [`backend/migrations/000001_init.up.sql`](./backend/migrations/000001_init.up.sql)，
+四张表 + 一个视图，初始结构在 [`backend/migrations/000001_init.up.sql`](./backend/migrations/000001_init.up.sql)，
 后续迁移按编号递增（见 [`backend/migrations/`](./backend/migrations)）：
 
 | 对象 | 作用 | 关键约束 |
 | --- | --- | --- |
-| `links` | 短链主体 | `short_code` 全局唯一；`status` 用 `smallint` 而非 PG enum（改状态机不用 `ALTER TYPE`）；`key_hash bytea` 存匿名管理密钥的 SHA-256；`tags text[]`（000003 起）配 GIN 索引做标签筛选 |
+| `links` | 短链主体 | `short_code` **全局唯一**（短码生成与所有管理端接口都按它定位，分域不改这一点）；`domain_id uuid`（000006 起，可空）指向所属自定义域名，`NULL` = 默认域名（`PUBLIC_BASE_URL` 指向的那个）；`status` 用 `smallint` 而非 PG enum（改状态机不用 `ALTER TYPE`）；`key_hash bytea` 存匿名管理密钥的 SHA-256；`tags text[]`（000003 起）配 GIN 索引做标签筛选 |
+| `domains` | 自定义域名（000006 起） | `name` 唯一且**存归一化后的小写、无端口、无尾点**（`A.LOCAL:8080` 与 `a.local.` 是同一个域）；`is_active` 可关停而不删行（保留历史短链的归属）。**没有管理接口**：目前只能由运维写库登记，见「已知限制」 |
 | `users` | 账号 | `email` 存 `text` + `unique index (lower(email))` 做大小写不敏感唯一（不引入 `citext` 扩展，省掉一次 `CREATE EXTENSION`） |
 | `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入；`country` 由 worker 查 GeoIP 库文件后写入（未部署则恒为 NULL）；`event_uid`（000002 起）取自 Stream 消息 ID，配合部分唯一索引做幂等去重；`(link_id, occurred_at DESC, id DESC)`（000004 起）服务明细页的 keyset 翻页，旧的 `(link_id, occurred_at DESC)` 是被它覆盖的前缀索引，已删除 |
 | `link_click_totals` | 视图 | `links.click_count + count(click_events)`，用于人工对账 |
@@ -166,14 +167,14 @@ Browser ──┬─ /api/*         ─┐
 | 2 | POST | `/api/auth/register` | — | 注册，返回 user + token |
 | 3 | POST | `/api/auth/login` | — | 登录（限流 20 次 / 10 分钟 / IP） |
 | 4 | GET | `/api/auth/me` | JWT | 当前用户 |
-| 5 | POST | `/api/links` | 可选 JWT | 创建短链；匿名会返回一次性 `manage_key`（限流 10 次 / 分钟 / IP）。可选 `tags`（≤10 个、每个 ≤32 字符）与 `password`（≥8 位，只落 bcrypt 摘要） |
+| 5 | POST | `/api/links` | 可选 JWT | 创建短链；匿名会返回一次性 `manage_key`（限流 10 次 / 分钟 / IP）。可选 `tags`（≤10 个、每个 ≤32 字符）、`password`（≥8 位，只落 bcrypt 摘要）与 `domain`（**必须已在 `domains` 表登记**，否则 422 `invalid_domain`；不传 = 默认域名） |
 | 6 | GET | `/api/links` | JWT | 我的链接列表，游标分页 `?limit=20&cursor=&q=&tag=`（`tag` 按小写比较，走 GIN 索引） |
 | 7 | GET | `/api/links/{code}` | JWT 或 Key | 详情（无权限一律 404，不泄露资源是否存在） |
 | 8 | PATCH | `/api/links/{code}` | JWT 或 Key | 改 `target_url` / `title` / `tags` / `status` / `expires_at` / `password`（改后主动失效缓存）；`tags: []` 表示清空标签，`clear_password: true` 表示清除口令（`password` 传空串是 422） |
 | 9 | DELETE | `/api/links/{code}` | JWT 或 Key | 软删除（`status=3`）+ 删缓存 |
 | 10 | GET | `/api/links/{code}/stats?days=30` | JWT 或 Key | 统计聚合 |
 | 11 | POST | `/api/links/{code}/claim` | JWT + Key | 把匿名短链认领到账号下 |
-| 12 | GET | `/{code}` | — | **302 跳转**（不在 `/api` 下）；带口令且未解锁时改为 **200 口令页**（HTML，**不计点击**） |
+| 12 | GET | `/{code}` | — | **302 跳转**（不在 `/api` 下），**按请求的 `Host` 定位域**：未登记的主机名按默认域名处理。带口令且未解锁时改为 **200 口令页**（HTML，**不计点击**） |
 | 13 | GET | `/api/links/{code}/clicks?limit=20&cursor=&days=30&device=` | JWT 或 Key | 点击明细，`(occurred_at, id)` keyset 分页（**时间倒序**）；`device` 取 `desktop` / `mobile` / `tablet` / `bot` / `unknown`（与分布口径一致）。**IP 只回掩码网段**：IPv4 → `/24`、IPv6 → `/64` |
 | 14 | POST | `/{code}` | — | **口令校验**（表单 `password`）：正确 → **303** 回 `GET /{code}` 并下发解锁 cookie；错误 → **401** 重新渲染口令页。两者都**不计点击**（计点击的是随后那个 GET）。限流 20 次 / 10 分钟 / IP |
 
@@ -264,7 +265,7 @@ Browser ──┬─ /api/*         ─┐
 │       ├── handler/            # HTTP 处理器 + 路由装配
 │       ├── httpx/              # JSON 读写、统一错误体、中间件、限流中间件、http.Server
 │       ├── worker/             # Stream 消费 + 计数回刷 + 过期清理
-│       └── pkg/                # base62 / shortcode / ua / validator
+│       └── pkg/                # base62 / shortcode / hostname / ua / validator
 └── frontend/
     ├── e2e/                    # 浏览器级验收（无头 Chrome + CDP，零 npm 依赖）
     └── src/
@@ -690,7 +691,7 @@ MVP 有意不做的部分：
 | 口令的重置流程 / 提示语 | 没有邮箱找回，也没有 `hint`：口令只由所有者设置与清除（忘了就重新设一条） |
 | 团队 / 多租户 / 权限体系 | 只有「匿名」与「个人账号」两种身份 |
 | Prometheus / Grafana | 只暴露 `/healthz` + JSON 结构化日志 + 关键计数 |
-| 顶点域名分离（`link.xxx`） | 单域名用保留字黑名单隔离；分域时只需改 nginx |
+| 自定义域名的**管理接口 / UI** | 数据模型与解析路径已就绪（000006 的 `domains` 表 + `links.domain_id`，`Host` 归一化后按域定位，缓存键按域分开），但「登记一个域名」目前只能由运维写库、再在 nginx 加一个 `server_name` + 证书。做管理端要先回答「谁来验证域名归属」（DNS TXT / 文件校验），不是表结构问题 |
 
 欢迎提 Issue 讨论优先级。
 
@@ -724,14 +725,18 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑪**：二维码（M4-3） | 详情页把 `short_url` 画进 canvas（前端 `qrcode` 生成，无后端接口）。用 **jsQR 真的去扫**：页面 canvas 取回的 PNG 解码 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；点「下载二维码」落盘的 `ashencourier-{code}.png` 是 **1024×1024**，解码结果同样相等。配色为深墨 `#141413` + 暖奶油 `#faf9f5`（≈19:1，不用珊瑚色当前景），下载件用纯白底 | 本机 |
 | **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「六条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
-| **集成测试 ⑫**：store 层迁移与 SQL（N1 / 自动化缺口 16.3-1） | 带 `POSTGRES_TEST_DSN` 时 14 个用例全绿（迁移形状与索引清单 / links 往返 / Update 的三种语义 / 与权威 SQL 逐项比对的 keyset 两处 / `tags @> ARRAY[...]` 走 `links_tags_gin` / `event_uid` 幂等 / 聚合的 UTC 日界 / 计数累加 / 过期扫描）；不带 DSN 时 9 个集成用例全部 SKIP、整包仍绿。**变异验证**：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → 报 `42P10 no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → 报 `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` | 本机（PG 18.6 容器）+ CI `backend` |
+| **集成测试 ⑫**：store 层迁移与 SQL（N1 / 自动化缺口 16.3-1） | 带 `POSTGRES_TEST_DSN` 时 20 个用例全绿（迁移形状与索引清单 / links 往返 / Update 的三种语义 / 与权威 SQL 逐项比对的 keyset 两处 / `tags @> ARRAY[...]` 走 `links_tags_gin` / `event_uid` 幂等 / 聚合的 UTC 日界 / 计数累加 / 过期扫描）；不带 DSN 时 9 个集成用例全部 SKIP、整包仍绿。**变异验证**：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → 报 `42P10 no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → 报 `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` | 本机（PG 18.6 容器）+ CI `backend` |
 | **容器级 ⑬**：短链访问口令（M5-1 / N2） | 建带口令的短链 → `password_protected=True`；库里 `password_hash` 是 `$2a$12$…`（60 字符，且 `= 'smoke-pass-9f3a'` 为 `f`）。未解锁 `GET /{code}` = **200 + text/html** 且 `total_clicks` 仍 0；错误口令 = **401** 且 `total_clicks` 仍 0；正确口令 = **303 + Set-Cookie**（`HttpOnly` / `SameSite=Lax` / `Path=/`，http 下不带 `Secure`）；带 cookie 的 GET = **302**，`total_clicks` = **1**、`click_events` = **1**（解锁那次没被重复计）；`clear_password` 后立刻 302（缓存被主动失效）。迁移 000005 往返两轮：`down 1` 后列消失、`up` 后回来，无报错且之后新跳转仍 302。冒烟 **27 / 27**（三条口令用例逐条 ✓）。浏览器侧（无头 Chrome + CDP）：创建表单展开高级选项后有「访问口令」；详情页显示「受口令保护」徽章，编辑面板有「访问口令」输入与「清除口令」按钮；短链未解锁渲染口令页、输错显示「口令不对，请再试一次。」、输对**真的落到目标地址** | 本机（Docker + 无头 Chrome） |
 | **前端单测 ⑭**：纯函数（16.3-3） | `vitest run` **31 个用例全绿**（`format.ts` 24 个 / `tags.ts` 7 个），约 0.8s；同时把 `splitTags` 从两个组件里提到 `src/utils/tags.ts`（原来是一模一样的两份）。**变异验证**：把 `truncateMiddle` 的 `head + tail + 1` 退化成 `head + tail` → 边界用例红；把 `splitTags` 的 `length > 0` 改成 `length > 1` → 第一次**没被抓住**（用例里没有单字符标签），补上「`书` 这种单字符标签不能丢」后变红。时间断言用**不带时区后缀**的输入串，因此本机（Asia/Shanghai）与 CI（UTC）结果一致 | 本机 + CI `frontend` |
 | **容器级 ⑮**：浏览器级验收（16.3-2） | 无头 Chrome + CDP（**零 npm 依赖**，只用 Node 内置 fetch / WebSocket），**19 项全绿**：二维码 6 条（行内尺寸已清空 / 位图 320×320 / 画布真的画过：深墨 4.5 万 px + 暖奶油 5.7 万 px / 画布在容器内 / 显示宽 = 容器宽 − padding → `142.0 = 158 − 8 − 8` / 右边缘 309.5 < 文字列 342.5）、明细 6 条（接口只回 `/24` 网段、首屏 20 行、时间到秒、逐行与接口核对、页面文本无原始 IP、翻页 `20 + 6 = 26` 行且无重复）、口令 6 条（只回布尔不回摘要、未解锁不给 cookie、错口令留在口令页、对口令 303→落到目标 `/login`、`ac_unlock` 是 HttpOnly + `Path=/`、解锁恰好只多一条明细）、全程零 console 错误。**变异验证**：去掉 `canvas.style.width = ''` → **4 条版式断言全红而像素断言仍全绿**（见坑第 6 条）。顺序约束也实测过：**e2e 19/19 之后紧接 smoke 27/27**（两者都不会把对方的创建配额打满） | 本机（Docker + 无头 Chrome）+ CI `smoke` |
 | **单测/集成 ⑯**：GeoIP 解析（M5-2） | `internal/store/geoip` 与 `internal/worker` 的用例全绿：非法输入（空串 / 非 IP / 带端口 / 网段 / 主机名 / 坏 IPv6）一律空串、零值 Locator 与 nil 都安全、打开不存在的文件与非 mmdb 文件都报错；**带真库**（`GEOIP_TEST_DB` = 本机 GeoLite2-Country）时 `81.2.69.142` 解析出两位大写国家码、私网 `10.11.12.13` 为空、`::ffff:81.2.69.142` 与原生 IPv4 结果一致（`Unmap` 生效）。worker 侧断言国家码取自 `GeoLocator` 且**用原始 IP** 去查（不是掩码后的），未配置时留空不 panic。集成测试 `TestAggregateCountriesExcludesEmpty` 覆盖国家聚合 SQL：按点击数降序、**不含 `unknown` 桶**、无已知国家时是空切片（而非 nil）。**变异验证**：把国家 SQL 退回 `coalesce(nullif(country,''),'unknown')` → 结果多出 `{unknown 1}`，用例变红。降级日志也断言了级别：留空是 `INFO` 且不含 `WARN`，路径打不开是**恰好一条** `WARN` | 本机（真 PG 18.6 + 真 mmdb）|
 | **容器级 ⑰**：GeoIP 端到端与降级（M5-2） | worker 启动日志 `GeoIP 库文件已加载 /geoip/GeoLite2-Country.mmdb`。往 Stream 投两条**显式 ID + 公网 IP** 的点击（本机 curl 的客户端 IP 是 Docker 网关 `172.20.0.1`，私网段解析不出国家，所以必须直接投递）：`8.8.8.8` → 库里 `country=US`、`114.114.114.114` → `CN`；`GET /api/links/{code}/stats` 回 `countries=[{CN,1},{US,1}]`。降级实测两轮：`GEOIP_DB_PATH=/geoip/does-not-exist.mmdb` → worker 日志**恰好一条 WARN**、`8.8.8.8` 仍落库且 `country` 为 NULL、`/healthz` 200 `ok`；`GEOIP_DB_PATH` 留空 → 一条 INFO、零 WARN、行为相同 | 本机（Docker + 真 mmdb）|
+| **容器级 ⑱**：自定义域名分域解析（N6-1） | 跑完迁移 000006 后库内登记 `a.local`（此时 `domains` + `links.domain_id` 就位）→ 创建带 `domain=a.local` 的短链，`short_url` = `http://a.local/{code}`。`curl -H 'Host: a.local'` 得 **302**，而同一短码在默认 Host 上是 **404**；反向（默认域名的短链拿到 `a.local` 上）同样是 **404**；`Host: A.LOCAL:8080`（大写 + 端口）也能命中（归一化生效）。真 Redis 里键确实按域分开：`link:v2:{域 UUID}:{code}` 与 `link:v2:-:{code}`，跨域那条**没有**落在默认域前缀下。共 **24 / 24**。**变异验证**：把缓存键改回不分域 + `sameDomain` 改成恒 true → **8 / 24 红**，失败的正是要害 —— 「紧接着在 `a.local` 上访问该短码」变成 404（跨域探测写下的负缓存把正确域的访问挡死）、反向那条变成 302（串味，访问者被送到另一个域的目标）；还原后回到 24 / 24 | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
+
+**自定义域名的本机验收**不需要真域名与证书：`curl -H 'Host: a.local' localhost:8080/{code}` 就能走到后端，因为 nginx 的短码规则是按**路径**匹配的，`Host` 只影响后端把请求算到哪个域上。域名记录目前只能用一条
+`INSERT INTO domains (name) VALUES ('a.local')` 登记（没有管理接口，见「已知限制」）。真上线时除了登记域名，还要在 `deploy/nginx/nginx.conf` 里为该域名加 `server_name` 与证书 —— 那是配置工作，代码侧不用改。
 
 **责任划分**：容器级验收（起全栈 + 浏览器级验收 + 端到端冒烟）由 CI 的 `smoke` job 承担 ——
 每次推 `main` 与手动触发（`workflow_dispatch`）都会真跑一遍，失败时自动 dump 容器日志。

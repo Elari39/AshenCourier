@@ -382,8 +382,16 @@ func TestExpireDue(t *testing.T) {
 	past := now.Add(-time.Hour)
 	future := now.Add(time.Hour)
 
+	// 让「应被处理」的那条挂在自定义域上：这样才验证得到
+	// **返回的引用带着所属域**（worker 要按「域 + 短码」失效缓存，
+	// 返回空域会让自定义域上的过期短链在缓存 TTL 内继续跳转）。
+	dom := registerDomain(t, db, "expire-"+testSuffix(t)+".example", nil)
+
 	dueCode := testCode(t, "it-due")
-	createLink(t, db, dueCode, func(l *domain.Link) { l.ExpiresAt = &past })
+	createLink(t, db, dueCode, func(l *domain.Link) {
+		l.ExpiresAt = &past
+		l.DomainID = &dom.ID
+	})
 
 	disabledCode := testCode(t, "it-dis")
 	createLink(t, db, disabledCode, func(l *domain.Link) {
@@ -394,18 +402,30 @@ func TestExpireDue(t *testing.T) {
 	futureCode := testCode(t, "it-fut")
 	createLink(t, db, futureCode, func(l *domain.Link) { l.ExpiresAt = &future })
 
-	codes, err := links.ExpireDue(ctx, now, 100)
+	refs, err := links.ExpireDue(ctx, now, 100)
 	if err != nil {
 		t.Fatalf("扫描过期: %v", err)
 	}
-	if !slices.Contains(codes, dueCode) {
-		t.Errorf("已过期且 active 的短码应当被处理，实际返回 %v", codes)
+	hasCode := func(code string) bool {
+		return slices.ContainsFunc(refs, func(r domain.LinkRef) bool { return r.Code == code })
 	}
-	if slices.Contains(codes, disabledCode) {
-		t.Errorf("已经是 disabled 的不该被重复处理：%v", codes)
+	if !hasCode(dueCode) {
+		t.Errorf("已过期且 active 的短码应当被处理，实际返回 %v", refs)
 	}
-	if slices.Contains(codes, futureCode) {
-		t.Errorf("还没过期的不该被处理：%v", codes)
+	if hasCode(disabledCode) {
+		t.Errorf("已经是 disabled 的不该被重复处理：%v", refs)
+	}
+	if hasCode(futureCode) {
+		t.Errorf("还没过期的不该被处理：%v", refs)
+	}
+
+	// 返回的引用必须带上所属域，否则 worker 删不掉那条缓存
+	due := slices.IndexFunc(refs, func(r domain.LinkRef) bool { return r.Code == dueCode })
+	if due < 0 {
+		t.Fatalf("结果里应当有 %q：%v", dueCode, refs)
+	}
+	if refs[due].DomainID == nil || *refs[due].DomainID != dom.ID {
+		t.Errorf("过期引用的 DomainID = %v，期望 %v（域丢了就删不掉缓存）", refs[due].DomainID, dom.ID)
 	}
 
 	got, err := links.GetByCode(ctx, dueCode)

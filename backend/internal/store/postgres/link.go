@@ -27,7 +27,7 @@ type LinkStore struct {
 // "203.0.113.7/32"），而这一列存的始终是单个地址。click_events.ip 早就做了同样的
 // 处理（见 click.go 的 clickEventColumns），这里对齐它 —— 是集成测试第一次跑就发现的。
 const linkColumns = `id, short_code, target_url, title, owner_id, key_hash, password_hash, status,
-       click_count, expires_at, tags, coalesce(host(created_ip), ''), created_at, updated_at`
+       click_count, expires_at, tags, coalesce(host(created_ip), ''), created_at, updated_at, domain_id`
 
 // linkRow 是 links 表的一行。
 type linkRow struct {
@@ -46,6 +46,8 @@ type linkRow struct {
 	createdIP    string
 	createdAt    time.Time
 	updatedAt    time.Time
+	// domainID 为 NULL 表示默认域名（见 domain.Link.DomainID）。
+	domainID pgtype.UUID
 }
 
 // dest 返回交给 rows.Scan 的扫描目标，顺序与 linkColumns 完全一致。
@@ -53,6 +55,7 @@ func (r *linkRow) dest() []any {
 	return []any{
 		&r.id, &r.shortCode, &r.targetURL, &r.title, &r.ownerID, &r.keyHash, &r.passwordHash,
 		&r.status, &r.clickCount, &r.expiresAt, &r.tags, &r.createdIP, &r.createdAt, &r.updatedAt,
+		&r.domainID,
 	}
 }
 
@@ -75,6 +78,7 @@ func (r *linkRow) toDomain() *domain.Link {
 		CreatedIP:         r.createdIP,
 		CreatedAt:         r.createdAt,
 		UpdatedAt:         r.updatedAt,
+		DomainID:          uuidPtr(r.domainID),
 	}
 	if r.expiresAt.Valid {
 		t := r.expiresAt.Time
@@ -98,8 +102,8 @@ func tagsParam(tags []string) []string {
 func (s *LinkStore) Create(ctx context.Context, link *domain.Link) error {
 	const q = `
 INSERT INTO links (id, short_code, target_url, title, owner_id, key_hash, password_hash,
-                   status, click_count, expires_at, tags, created_ip, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, '')::inet, now(), now())
+                   status, click_count, expires_at, tags, created_ip, created_at, updated_at, domain_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, '')::inet, now(), now(), $13)
 RETURNING created_at, updated_at`
 
 	opCtx, cancel := s.db.opCtx(ctx)
@@ -118,6 +122,8 @@ RETURNING created_at, updated_at`
 		link.ExpiresAt,
 		tagsParam(link.Tags),
 		link.CreatedIP,
+		// nil = 默认域名（列可空，NULL 即语义本身）
+		uuidParam(link.DomainID),
 	).Scan(&link.CreatedAt, &link.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("store.postgres: create link %q: %w", link.ShortCode, mapWriteError(err, "short_code", link.ShortCode))
@@ -131,18 +137,36 @@ RETURNING created_at, updated_at`
 
 // GetByCode 按短码精确查询（大小写敏感）。软删除的行也会返回，
 // 由调用方（domain.Link.Redirectable）决定是 404 还是 410。
+//
+// 不带域：短码全局唯一，管理端靠它唯一定位。
 func (s *LinkStore) GetByCode(ctx context.Context, code string) (*domain.Link, error) {
-	q := `SELECT ` + linkColumns + ` FROM links WHERE short_code = $1`
+	const q = `SELECT ` + linkColumns + ` FROM links WHERE short_code = $1`
+	return s.queryLink(ctx, q, code)
+}
 
+// GetByCodeInDomain 在指定域内按短码查询；domainID 为 nil 表示默认域名。
+//
+// SQL 用 `IS NOT DISTINCT FROM` 而不是 `=`：默认域名的行 domain_id 是 NULL，
+// 而 `domain_id = NULL` 恒为 NULL（不是 true），写成等号会让所有历史短链
+// 在跳转路径上全部查不到 —— 这是本批最容易踩空的一处。
+func (s *LinkStore) GetByCodeInDomain(ctx context.Context, code string, domainID *uuid.UUID) (*domain.Link, error) {
+	const q = `SELECT ` + linkColumns + ` FROM links
+WHERE short_code = $1 AND domain_id IS NOT DISTINCT FROM $2`
+	return s.queryLink(ctx, q, code, uuidParam(domainID))
+}
+
+// queryLink 执行「查一行凭据 / 短链」的查询并转成领域实体。
+func (s *LinkStore) queryLink(ctx context.Context, q string, args ...any) (*domain.Link, error) {
 	opCtx, cancel := s.db.opCtx(ctx)
 	defer cancel()
 
 	var r linkRow
-	if err := s.db.pool.QueryRow(opCtx, q, code).Scan(r.dest()...); err != nil {
+	if err := s.db.pool.QueryRow(opCtx, q, args...).Scan(r.dest()...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			code, _ := args[0].(string)
 			return nil, domain.NotFound("link", code)
 		}
-		return nil, fmt.Errorf("store.postgres: get link %q: %w", code, storageError(err))
+		return nil, fmt.Errorf("store.postgres: get link: %w", storageError(err))
 	}
 	return r.toDomain(), nil
 }
@@ -326,9 +350,13 @@ RETURNING click_count`
 	return total, nil
 }
 
-// ExpireDue 把已过期但仍为 active 的链接批量置为 disabled，返回被处理的短码。
+// ExpireDue 把已过期但仍为 active 的链接批量置为 disabled，返回被处理的短链引用。
 // 一次只处理 limit 条，避免单条 SQL 长时间持锁。
-func (s *LinkStore) ExpireDue(ctx context.Context, now time.Time, limit int) ([]string, error) {
+//
+// 返回 LinkRef 而不是光秃秃的短码：调用方紧接着要做缓存失效，而缓存键是
+// 「域 + 短码」。只给短码的话，挂在自定义域上的过期短链的缓存条目就删不掉，
+// 表现为「已过期但仍在跳转」直到 TTL 过期。
+func (s *LinkStore) ExpireDue(ctx context.Context, now time.Time, limit int) ([]domain.LinkRef, error) {
 	const q = `
 UPDATE links SET status = $3, updated_at = now()
 WHERE short_code IN (
@@ -337,7 +365,7 @@ WHERE short_code IN (
     ORDER BY expires_at
     LIMIT $4
 )
-RETURNING short_code`
+RETURNING short_code, domain_id`
 
 	opCtx, cancel := s.db.opCtx(ctx)
 	defer cancel()
@@ -348,18 +376,21 @@ RETURNING short_code`
 	}
 	defer rows.Close()
 
-	var codes []string
+	var refs []domain.LinkRef
 	for rows.Next() {
-		var code string
-		if err := rows.Scan(&code); err != nil {
-			return nil, fmt.Errorf("store.postgres: scan expired code: %w", storageError(err))
+		var (
+			code     string
+			domainID pgtype.UUID
+		)
+		if err := rows.Scan(&code, &domainID); err != nil {
+			return nil, fmt.Errorf("store.postgres: scan expired link: %w", storageError(err))
 		}
-		codes = append(codes, code)
+		refs = append(refs, domain.LinkRef{Code: code, DomainID: uuidPtr(domainID)})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store.postgres: iterate expired codes: %w", storageError(err))
+		return nil, fmt.Errorf("store.postgres: iterate expired links: %w", storageError(err))
 	}
-	return codes, nil
+	return refs, nil
 }
 
 // escapeLike 转义 LIKE / ILIKE 的通配符，避免用户输入的 % 与 _ 变成通配。

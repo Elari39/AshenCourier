@@ -1,7 +1,9 @@
 package redis
 
 import (
+	"strings"
 	"testing"
+	"uuid"
 )
 
 // TestKeyConstruction 钉住键的构造。
@@ -10,24 +12,38 @@ import (
 // 同一个键 INCR，一旦某处改了前缀而另一次没改，症状是「点击计数永远回刷不到 PG」
 // —— 而两边的单测都还是绿的（各自自洽）。这里把字面量写死，改动必须是有意的。
 //
-// 另外守住负缓存键里的 "miss:" 分段：短码字符集含 '-'，早先用 link:v1:-{code}
-// 会让短码 "-abc" 的正向键与短码 "abc" 的负缓存键撞车。
+// 链接缓存为什么是 v2 且必须带域：v1 只按短码拼键，而分域之后
+// 「同一个短码」在不同域下是两条不同的短链，负缓存更会因此把「不属于这个域」
+// 误记成「不存在」——那是短链在自己域上 404 的成因（详见 domain.LinkRef）。
+//
+// 另外守住负缓存键里的 "miss:" 分段：短码字符集含 '-'，若把域与短码直接相接，
+// 短码 "a-b" 与「域 a、短码 b」会撞车。
 func TestKeyConstruction(t *testing.T) {
 	t.Parallel()
+
+	domA := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	domB := uuid.MustParse("22222222-2222-4222-8222-222222222222")
 
 	tests := []struct {
 		name string
 		got  string
 		want string
 	}{
-		{name: "正向缓存键", got: LinkKey("abc1234"), want: "link:v1:abc1234"},
-		{name: "负缓存键", got: MissKey("abc1234"), want: "link:v1:miss:abc1234"},
+		{name: "默认域的正向键", got: LinkKey(nil, "abc1234"), want: "link:v2:-:abc1234"},
+		{name: "默认域的负缓存键", got: MissKey(nil, "abc1234"), want: "link:v2:miss:-:abc1234"},
+		{
+			name: "自定义域的正向键",
+			got:  LinkKey(&domA, "abc1234"),
+			want: "link:v2:11111111-1111-4111-8111-111111111111:abc1234",
+		},
+		{
+			name: "自定义域的负缓存键",
+			got:  MissKey(&domA, "abc1234"),
+			want: "link:v2:miss:11111111-1111-4111-8111-111111111111:abc1234",
+		},
 		{name: "计数增量键", got: ClickCounterKey("abc1234"), want: "clicks:cnt:abc1234"},
 		{name: "dirty 集合键", got: dirtySetKey, want: "clicks:dirty"},
 		{name: "Stream 键", got: streamKey, want: "clicks:stream"},
-		// 短码含 '-' 时正负缓存键不能撞车
-		{name: "含连字符的正向键", got: LinkKey("-abc"), want: "link:v1:-abc"},
-		{name: "含连字符的负缓存键", got: MissKey("abc"), want: "link:v1:miss:abc"},
 	}
 
 	for _, tt := range tests {
@@ -40,8 +56,28 @@ func TestKeyConstruction(t *testing.T) {
 		})
 	}
 
-	if LinkKey("-abc") == MissKey("abc") {
+	// 1) 域必须真的参与拼键：同码不同域不能共用条目
+	if LinkKey(&domA, "abc1234") == LinkKey(&domB, "abc1234") {
+		t.Fatal("两个域下同一个短码的正向键撞车了：分域会读到别人的链接")
+	}
+	if MissKey(&domA, "abc1234") == MissKey(nil, "abc1234") {
+		t.Fatal("自定义域与默认域的负缓存键撞车了：跨域探测会污染负缓存")
+	}
+	if MissKey(nil, "abc1234") == MissKey(nil, "abc1235") {
+		t.Fatal("不同短码的负缓存键撞车了")
+	}
+
+	// 2) 短码含 '-' 时正负缓存键不能撞车
+	if LinkKey(nil, "-abc") == MissKey(nil, "abc") {
 		t.Fatal("短码 \"-abc\" 的正向键与 \"abc\" 的负缓存键撞车了")
+	}
+
+	// 3) 域与短码之间必须有分隔符，否则「域 + 短码」的拼接有歧义
+	if strings.Contains(defaultDomainKey, ":") {
+		t.Fatalf("默认域占位符 %q 不能含冒号：它会让键的分段产生歧义", defaultDomainKey)
+	}
+	if LinkKey(nil, "xabc") == LinkKey(nil, "abc") {
+		t.Fatal("不同短码的正向键撞车了")
 	}
 }
 

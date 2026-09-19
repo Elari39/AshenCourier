@@ -117,6 +117,9 @@ func (db *DB) Users() *UserStore { return &UserStore{db: db} }
 // Clicks 返回点击明细仓储。
 func (db *DB) Clicks() *ClickStore { return &ClickStore{db: db} }
 
+// Domains 返回自定义域名仓储。
+func (db *DB) Domains() *DomainStore { return &DomainStore{db: db} }
+
 // toPgUUID 把领域层 UUID 转成 pgx 参数。
 func toPgUUID(u uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: [16]byte(u), Valid: true}

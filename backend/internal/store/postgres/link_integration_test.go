@@ -21,7 +21,7 @@ func TestMigrationsApply(t *testing.T) {
 	db := testDB(t)
 	ctx := t.Context()
 
-	for _, table := range []string{"users", "links", "click_events"} {
+	for _, table := range []string{"users", "links", "click_events", "domains"} {
 		var exists bool
 		if err := db.pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", "public."+table).Scan(&exists); err != nil {
 			t.Fatalf("查询表 %s: %v", table, err)
@@ -29,6 +29,20 @@ func TestMigrationsApply(t *testing.T) {
 		if !exists {
 			t.Errorf("跑完全部迁移后应当存在表 %s", table)
 		}
+	}
+
+	// links.domain_id 必须是**可空**的：NULL 在分域模型里是「默认域名」这个明确语义，
+	// 不是「没设置」。一旦被改成 NOT NULL，历史行要么无法存在、要么被迫回填出一条
+	// 假的「默认域」记录 —— 两者都比现在糟。
+	var domainIDNullable bool
+	if err := db.pool.QueryRow(ctx, `
+SELECT is_nullable = 'YES'
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'links' AND column_name = 'domain_id'`).Scan(&domainIDNullable); err != nil {
+		t.Fatalf("查询 links.domain_id 的可空性: %v", err)
+	}
+	if !domainIDNullable {
+		t.Error("links.domain_id 必须可空：NULL = 默认域名（见 000006_domains.up.sql）")
 	}
 
 	var hasView bool

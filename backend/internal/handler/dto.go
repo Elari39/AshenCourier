@@ -93,6 +93,12 @@ type createLinkRequest struct {
 	ExpiresAt  *time.Time `json:"expires_at"`
 	// Password 是可选访问口令（明文，只在本次请求里存在）；留空表示不设口令。
 	Password string `json:"password"`
+	// Domain 是可选的自定义域名（纯主机名，大小写与端口都会被归一化）；
+	// 留空表示默认域名。只认已登记的域名，未登记报字段级 422。
+	//
+	// 不下发「可选域名列表」接口：域表是运维登记的配置，前端不做下拉，
+	// 由使用方按 README 里的登记方式自己填。
+	Domain string `json:"domain"`
 }
 
 // updateLinkRequest 是修改短链入参。指针字段区分「没传」与「传了零值」。
