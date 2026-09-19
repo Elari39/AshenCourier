@@ -31,6 +31,11 @@
 | **M4-2** | 点击明细页（迁移 000004） | ✅ | `c1ba02c` | 跳 3 次 → `?limit=2` 两页读全（2+1，时间倒序、无重叠无缺口）；`device=mobile` 1 条 / `device=unknown` 0 条；坏 `limit`/`days`/`device`/`cursor` 都 422 且 `field` 正确，无凭据 404；库里 `172.20.0.1` → 响应 `172.20.0.0/24`（原始地址不在响应体里）；`EXPLAIN` 走 `click_events_link_time_id_idx` 且 **Index Only Scan 无 Sort**；无头 Chrome 首屏 20 行 + 「加载更多」→ 点一下 26 行、按钮变「已经到底了」 |
 | **M4-3** | 二维码 | ✅ | `b5c9c18` | 前端 `qrcode` 画 canvas（无后端接口）：用 **jsQR 真扫**，页面 canvas 与下载的 1024×1024 PNG 都解码出 `http://localhost:8080/{code}`，与 `short_url` 逐字相等；配色深墨 + 暖奶油（≈19:1，非珊瑚）；无头 Chrome 里「下载二维码」按钮真的落盘 PNG |
 | **M5** | 四个大件（需 §15 拍板） | ⏸ 按计划推迟 | — | — |
+| **N1** | store 层迁移与 SQL 集成测试进 CI（§17.1，即自动化缺口 16.3-1） | ✅ | `da6731d` | 带 `POSTGRES_TEST_DSN` 时 **15** 个用例全绿（PG 18.6 容器）；不带 DSN 时 11 个集成用例 SKIP、4 个单测仍绿。变异验证两条都按预期变红：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → `42P10 there is no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` |
+| **N2** | 短链密码保护（§17.2，即 M5-1） | ✅ | `566aa2b` | 容器级 ①–⑥：未解锁 **200 密码页**且 `total_clicks` 0、错误口令 **401** 且仍 0、正确口令 **303 + `ac_unlock`**、带 cookie 的 GET **302** 且 `total_clicks`=**1**（不是 2）、`clear_password` 后立刻 302；库里只有 `$2a$12$…` 摘要（与明文比较为 `f`）。迁移 000005 往返两轮无报错；冒烟 **27 / 27**；无头 Chrome 里创建表单的口令输入、详情页「受口令保护」徽章、编辑面板的「清除口令」、口令页、输错提示、输对**真的落到目标地址**，逐条通过 |
+
+> ⚠️ N1 / N2 的验收全部在**本机**实测（真 PG 18.6 容器 + 无头 Chrome）。这两批**尚未推送**，
+> 所以 CI 的三个 job 还没跑过它们 —— 上表这两行的「实测验收」不含 CI 结论。
 
 **与计划的偏离（7 条，逐条给理由）**
 
@@ -636,7 +641,7 @@ docker compose exec postgres dropdb -U ashen restore_check
    超时，迁移与查询语句本身（含 M4-2 新加的 keyset 分页 SQL）靠容器级验收 + `EXPLAIN`
    人工守住。补法：CI 的 smoke job 里已经有真 PG，加一个 `POSTGRES_TEST_DSN` 门控的
    集成测试，把「keyset 两页无重叠无缺口」「`tags @> ARRAY[...]` 走 GIN」这类断言搬进自动。
-   → **已立项为 §17.1（N1）**，含 9 条断言清单与 CI 改法。实现时修正一处：不复用 smoke 的容器栈，
+   → **已实施（§17.1 / N1 / `da6731d`）**：11 个集成用例 + 9 条断言清单 + CI 改法。实现时修正一处：不复用 smoke 的容器栈，
    而是给 `backend` job 加 `services.postgres`（compose 的 postgres 刻意不映射宿主端口，宿主的 `go test` 够不到它）。
 2. **浏览器级验收不在 CI 里**：无头 Chrome + jsQR 那套脚本在 `.workbuddy/tmp/`（已
    gitignore，只在本机跑），所以「画布不溢出容器」这类版式断言**只有我在本地执行**。
@@ -651,8 +656,9 @@ docker compose exec postgres dropdb -U ashen restore_check
 
 ### 16.4 建议的下一步（已选定，2026-09-19）
 
-> **结论**：同时细化并实施 **M5-1 短链密码保护**（= §17.2 / N2）与 **16.3-1 store 集成测试**
-> （= §17.1 / N1），顺序 **N1 → N2**。完整规格见 **§17**。
+> **结论**：同时细化并实施 **M5-1 短链密码保护**（= §17.2 / N2 / `566aa2b`）与
+> **16.3-1 store 集成测试**（= §17.1 / N1 / `da6731d`），顺序 **N1 → N2** —— 两批均**已完成**，
+> 完整规格见 **§17**，剩下什么见 **§17.3**。
 > C 里的「先拍板 §15」不阻塞这两项 —— 第 3 条（GeoIP 数据源）只挡 M5-2。
 
 - **A. M5-1 短链密码保护** —— 唯一不需要先拍板、又有真实产品价值的大件。
@@ -773,6 +779,7 @@ gofmt -l .                       # 必须无输出
 `ON CONFLICT ... WHERE event_uid IS NOT NULL` 谓词 ⇒ 对应用例必须变红；改回 ⇒ 绿。
 
 **提交边界**：`test(store): 迁移与 SQL 集成测试，CI backend job 加 postgres service（16.3-1）`
+（**已落地**：`da6731d`）
 
 ---
 
@@ -938,6 +945,7 @@ cd backend ; go run ./cmd/smoke -base http://localhost:8080 -expect-spa     # �
 写死为 `true` ⇒ 本机 ⑤ 必红。
 
 **提交边界**：`feat(links): 短链密码保护（迁移 000005 + 密码页 + POST /{code} + HMAC cookie）（M5-1）`
+（**已落地**：`566aa2b`）
 
 ---
 
@@ -950,7 +958,9 @@ cd backend ; go run ./cmd/smoke -base http://localhost:8080 -expect-spa     # �
   都是纯函数，vitest 成本很低。
 - **M5 剩下的三件**：M5-2 GeoIP（**先拍 §15 第 3 条：数据源**）、M5-3 自定义域名（需真实域名与证书）、
   M5-4 多租户（计划里唯一建议「先别做」）。
-- **§15 的六个待拍板项**：只有第 3 条是硬前置，其余都已按默认实现。
+- **§15 的六个待拍板项**：只有第 3 条（GeoIP 数据源）是硬前置，其余都已按默认实现。
+- **还欠一次 CI 验证**：N1 / N2 只在本机验收过（含真 PG 与无头 Chrome），推送后要确认
+  `backend`（现在带 postgres service）与 `smoke` 两个 job 都是绿的。
 
 ---
 
