@@ -43,7 +43,7 @@
 - [本地开发](#本地开发)
 - [环境变量](#环境变量)
 - [部署与运维排查](#部署与运维排查)
-- [五条踩过的坑](#五条踩过的坑)
+- [六条踩过的坑](#六条踩过的坑)
 - [已知限制](#已知限制)
 - [验收记录](#验收记录)
 - [许可](#许可)
@@ -262,9 +262,11 @@ Browser ──┬─ /api/*         ─┐
 │       ├── worker/             # Stream 消费 + 计数回刷 + 过期清理
 │       └── pkg/                # base62 / shortcode / ua / validator
 └── frontend/
+    ├── e2e/                    # 浏览器级验收（无头 Chrome + CDP，零 npm 依赖）
     └── src/
         ├── api/                # fetch 封装 + 类型契约 + 会话存储
         ├── composables/        # useAuth / useToast / useCopy（不引 Pinia）
+        ├── utils/              # 纯函数（格式化、标签拆分），有 vitest 单测
         ├── views/              # Landing / Dashboard / LinkDetail / Login / Register / NotFound
         └── components/         # 业务组件 + ui/ 基础组件
 ```
@@ -308,8 +310,22 @@ go run ./cmd/smoke -base http://localhost:8080 -expect-spa
 go run ./cmd/smoke -base http://localhost:8080            # 直连后端时不要加（顶级路由本就是 404）
 
 cd frontend
-pnpm lint && pnpm build
+pnpm lint && pnpm test && pnpm build
+
+# 浏览器级验收（需要全栈已经跑起来）。它只用 Node 内置的 fetch 与 WebSocket 驱动
+# 无头 Chrome，不装任何 npm 包；默认连 http://localhost:8080
+node e2e/browser-check.mjs --base http://localhost:8080
 ```
+
+`frontend/e2e/` 断言的是**接口测不出来的那一类问题**：二维码画布有没有撑破容器、
+明细翻页后两页有没有重叠、口令页在真浏览器里会不会按 303 换成 GET 并带上 cookie。
+它只创建 1 条短链（创建接口是 10 次/分钟/IP 的硬配额），跑之前请先起全栈；详见
+[六条踩过的坑](#6-渲染库写的行内尺寸会盖过-tailwind-类) 第 6 条。
+
+| 变量 | 作用 |
+| --- | --- |
+| `CHROME_BIN` | 指定 Chrome 可执行文件（默认按平台猜常见位置；CI 用 runner 预装的 `/usr/bin/google-chrome`） |
+| `CHROME_FLAGS` | 追加启动参数，空格分隔（以 root 运行的容器里需要 `--no-sandbox`） |
 
 冒烟工具覆盖：健康检查 → **SPA 顶级路由** → 匿名创建 → 302 跳转 → 统计收敛
 （同时校验 Redis 计数与落库明细）→ 鉴权边界 → 修改后缓存失效 → 保留字与开放重定向防护
@@ -611,6 +627,12 @@ canvas.style.height = ''
 > 一般化的教训：**像素级断言不等于版式断言**。「图能解码」「接口 200」这类结论，
 > 和「页面对不对」是两件事 —— 前者可以全绿而后者的确歪了。
 
+这几条断言现在**固化进了仓库**（`frontend/e2e/detail-page.mjs`），并且做过变异验证：
+把 `canvas.style.width = ''` 这两行去掉后重跑，**4 条版式断言全红** ——
+画布显示宽从 142px 变成 320px、右边缘从 309.5 变成 487.5（越过了容器右边缘 318.5
+与文字列左边缘 342.5），而**像素断言依然全绿**。也就是说，它确实守着当初那个洞，
+而不是「跑了、绿了、什么也没守住」。
+
 ## 已知限制
 
 MVP 有意不做的部分：
@@ -659,12 +681,21 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | **集成测试 ⑫**：store 层迁移与 SQL（N1 / 自动化缺口 16.3-1） | 带 `POSTGRES_TEST_DSN` 时 14 个用例全绿（迁移形状与索引清单 / links 往返 / Update 的三种语义 / 与权威 SQL 逐项比对的 keyset 两处 / `tags @> ARRAY[...]` 走 `links_tags_gin` / `event_uid` 幂等 / 聚合的 UTC 日界 / 计数累加 / 过期扫描）；不带 DSN 时 9 个集成用例全部 SKIP、整包仍绿。**变异验证**：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → 报 `42P10 no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → 报 `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` | 本机（PG 18.6 容器）+ CI `backend` |
 | **容器级 ⑬**：短链访问口令（M5-1 / N2） | 建带口令的短链 → `password_protected=True`；库里 `password_hash` 是 `$2a$12$…`（60 字符，且 `= 'smoke-pass-9f3a'` 为 `f`）。未解锁 `GET /{code}` = **200 + text/html** 且 `total_clicks` 仍 0；错误口令 = **401** 且 `total_clicks` 仍 0；正确口令 = **303 + Set-Cookie**（`HttpOnly` / `SameSite=Lax` / `Path=/`，http 下不带 `Secure`）；带 cookie 的 GET = **302**，`total_clicks` = **1**、`click_events` = **1**（解锁那次没被重复计）；`clear_password` 后立刻 302（缓存被主动失效）。迁移 000005 往返两轮：`down 1` 后列消失、`up` 后回来，无报错且之后新跳转仍 302。冒烟 **27 / 27**（三条口令用例逐条 ✓）。浏览器侧（无头 Chrome + CDP）：创建表单展开高级选项后有「访问口令」；详情页显示「受口令保护」徽章，编辑面板有「访问口令」输入与「清除口令」按钮；短链未解锁渲染口令页、输错显示「口令不对，请再试一次。」、输对**真的落到目标地址** | 本机（Docker + 无头 Chrome） |
+| **前端单测 ⑭**：纯函数（16.3-3） | `vitest run` **31 个用例全绿**（`format.ts` 24 个 / `tags.ts` 7 个），约 0.8s；同时把 `splitTags` 从两个组件里提到 `src/utils/tags.ts`（原来是一模一样的两份）。**变异验证**：把 `truncateMiddle` 的 `head + tail + 1` 退化成 `head + tail` → 边界用例红；把 `splitTags` 的 `length > 0` 改成 `length > 1` → 第一次**没被抓住**（用例里没有单字符标签），补上「`书` 这种单字符标签不能丢」后变红。时间断言用**不带时区后缀**的输入串，因此本机（Asia/Shanghai）与 CI（UTC）结果一致 | 本机 + CI `frontend` |
+| **容器级 ⑮**：浏览器级验收（16.3-2） | 无头 Chrome + CDP（**零 npm 依赖**，只用 Node 内置 fetch / WebSocket），**19 项全绿**：二维码 6 条（行内尺寸已清空 / 位图 320×320 / 画布真的画过：深墨 4.5 万 px + 暖奶油 5.7 万 px / 画布在容器内 / 显示宽 = 容器宽 − padding → `142.0 = 158 − 8 − 8` / 右边缘 309.5 < 文字列 342.5）、明细 6 条（接口只回 `/24` 网段、首屏 20 行、时间到秒、逐行与接口核对、页面文本无原始 IP、翻页 `20 + 6 = 26` 行且无重复）、口令 6 条（只回布尔不回摘要、未解锁不给 cookie、错口令留在口令页、对口令 303→落到目标 `/login`、`ac_unlock` 是 HttpOnly + `Path=/`、解锁恰好只多一条明细）、全程零 console 错误。**变异验证**：去掉 `canvas.style.width = ''` → **4 条版式断言全红而像素断言仍全绿**（见坑第 6 条）。顺序约束也实测过：**e2e 19/19 之后紧接 smoke 27/27**（两者都不会把对方的创建配额打满） | 本机（Docker + 无头 Chrome）+ CI `smoke` |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 
-**责任划分**：容器级验收（起全栈 + 端到端冒烟）由 CI 的 `smoke` job 承担 —— 每次推 `main`
-与手动触发（`workflow_dispatch`）都会真跑一遍，失败时自动 dump 容器日志。PR 只跑 `backend`
-与 `frontend` 两个快 job（约 1 分钟），因为 `docker compose up -d --build` 要几分钟。
+**责任划分**：容器级验收（起全栈 + 浏览器级验收 + 端到端冒烟）由 CI 的 `smoke` job 承担 ——
+每次推 `main` 与手动触发（`workflow_dispatch`）都会真跑一遍，失败时自动 dump 容器日志。
+PR 只跑 `backend` 与 `frontend` 两个快 job（约 1 分钟），因为 `docker compose up -d --build`
+要几分钟。
+
+`frontend/e2e/` 这一步排在 `cmd/smoke` **之前**，不是随意的顺序：创建接口是
+10 次/分钟/IP 的硬配额（写死在 `config`，没有对应的环境变量），而 `cmd/smoke` 的最后一项
+检查会故意把这配额打满来断言 429。本套件只花掉 1 个配额，且自身耗时约一分钟
+（26 次跳转 + 等明细落库），所以 smoke 开始时限流窗口已经滚过 —— 顺序一旦颠倒，
+浏览器验收第一步就会拿到 429。
 
 最近的实测：[run 35424447615](https://github.com/Elari39/AshenCourier/actions/runs/35424447615)
 三个 job 全绿（`frontend` 41s / `backend` 54s / `smoke` 85s）。两个关键证据：`backend` 里

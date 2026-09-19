@@ -122,6 +122,12 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
+      # 浏览器级验收只用 Node 内置能力（fetch + WebSocket）打 CDP，
+      # 所以这里**不需要 pnpm install**，e2e 目录也不装任何 npm 包。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       # compose 强制要求三个必填口令（缺一个直接拒绝启动），这里从模板造一份
       - name: 造 .env
         run: |
@@ -145,6 +151,16 @@ jobs:
             sleep 5
           done
           docker compose ps
+
+      # ⚠️ 顺序不能颠倒：本步骤**必须**排在「端到端冒烟」之前。
+      #    原因：POST /api/links 是 10 次/分钟/IP 的硬配额（写死在 config，不可用环境变量调整），
+      #    而 cmd/smoke 的**最后一项检查**会故意把这配额打满（它要断言 429 + Retry-After）。
+      #    先跑 smoke 的话，这里的创建请求一上来就是 429。
+      #    本套件只花掉 1 个配额，而且它自己耗时约一分钟（26 次跳转 + 等明细落库），
+      #    所以 smoke 开始时窗口已经滚过 —— 实测「e2e 19/19 → 紧接 smoke 27/27」。
+      #    另外：万一本步骤提前失败，后续步骤不会执行，也就不会出现「级联失败」的误判。
+      - name: 浏览器级验收（无头 Chrome + CDP，零依赖）
+        run: node frontend/e2e/browser-check.mjs --base http://localhost:8080
 
       - name: 端到端冒烟（含 SPA 顶级路由断言）
         working-directory: backend
