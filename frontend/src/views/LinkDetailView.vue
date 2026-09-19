@@ -205,6 +205,15 @@ async function renderQR(): Promise<void> {
       errorCorrectionLevel: 'M',
       color: { dark: QR_DARK, light: QR_LIGHT },
     })
+
+    // ⚠️ 必须清掉 qrcode 写进来的行内尺寸。
+    // 它的 canvas 渲染器为了「像素对齐」会写 canvas.style.width/height = '320px'
+    // （见 qrcode/lib/renderer/canvas.js 的 clearCanvas），而行内样式**优先级高于
+    // 类选择器** —— 留着的话 Tailwind 的 h-full w-full 完全不生效，画布会以 320px
+    // 撑破 160px 的容器，压住右边的文字和下方的卡片。
+    // 画布的 width/height 属性（位图分辨率）保持不变，显示尺寸交给 CSS 类。
+    canvas.style.width = ''
+    canvas.style.height = ''
   } catch {
     qrError.value = '二维码生成失败'
   }

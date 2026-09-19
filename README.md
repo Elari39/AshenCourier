@@ -443,9 +443,10 @@ docker compose exec postgres dropdb -U ashen restore_check
 ⚠️ 备份文件在宿主机的 `./deploy/backup/`（已被 `.gitignore` 忽略）。生产环境请把该目录
 换成对象存储或异地卷 —— 和数据库放在同一块盘上的备份，在磁盘故障时一起没有。
 
-## 五条踩过的坑
+## 六条踩过的坑
 
-这五条都是「设计稿上看不出来、只有真跑容器才暴露」的，写在这里省得别人再踩一遍。
+这六条都是「设计稿上看不出来、只有真跑容器（或真在浏览器里看一眼）才暴露」的，
+写在这里省得别人再踩一遍。
 
 ### 1. 新增前端顶级路由，必须同步四处
 
@@ -545,6 +546,37 @@ proxy_pass http://$backend_upstream;
 刻意没有用 `upstream` 块 —— upstream 的 `server` 名同样只在启动时解析一次，
 要动态化得依赖 nginx 1.27.3+ 的 `server ... resolve` 参数，兼容性更差。
 
+### 6. 渲染库写的行内尺寸会盖过 Tailwind 类
+
+详情页的二维码用 `qrcode` 画在 canvas 上。它的 canvas 渲染器为了像素对齐，会把尺寸
+**写成行内样式**（`qrcode/lib/renderer/canvas.js` 的 `clearCanvas`：
+
+```js
+canvas.width = size
+canvas.height = size
+canvas.style.width = size + 'px'   // ← 这一行
+canvas.style.height = size + 'px'
+```
+
+）。于是 `class="h-full w-full"` 完全不生效 —— **行内样式优先级高于任何类选择器**，
+画布以 320px 撑破 160px 的容器，压住右边的文字和下方的卡片。
+
+修法是画完之后把行内尺寸清掉（位图分辨率保持不变，显示尺寸交回 CSS）：
+
+```ts
+await QRCode.toCanvas(canvas, url, { width: 320, /* … */ })
+canvas.style.width = ''
+canvas.style.height = ''
+```
+
+**更值得记的是它怎么被发现的**：当时的验收只解码了 `toDataURL()` 的像素 —— 那永远是
+320×320，解码必然成功，**版式坏了也照样全绿**。是有人在真浏览器里看了一眼才暴露的。
+所以现在这条验收多了三个版式断言：画布矩形必须落在容器矩形内、显示宽必须等于
+容器宽减去 padding、右边缘不得压到文字列。
+
+> 一般化的教训：**像素级断言不等于版式断言**。「图能解码」「接口 200」这类结论，
+> 和「页面对不对」是两件事 —— 前者可以全绿而后者的确歪了。
+
 ## 已知限制
 
 MVP 有意不做的部分：
@@ -588,6 +620,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑨**：标签（M4-1） | 创建时传 `["Ops","  ops  ","Dev"]` → 返回 `["ops","dev"]`（归一化 + 去重）；`?tag=ops` 只命中该条，`?tag=DEV`（大写）也能命中（按小写比较）；11 个标签 / 33 字符标签都返回 422 `invalid_tags`；`EXPLAIN` 下 `tags @> ARRAY['ops']` 走 **`links_tags_gin`**（Bitmap Index Scan）。浏览器侧：无头 Chrome 在 `/dashboard` 输入 `ops` 后列表从 2 条变 1 条 | 本机 |
 | **容器级 ⑩**：点击明细页（M4-2） | 跳转 3 次（手机 / 桌面 / 爬虫 UA）→ `?limit=2` 拿到 2 行 + 游标，带游标翻到第 2 页拿到剩下的 1 行、`next_cursor` 为空；时间倒序且两页无重叠无缺口（26 行 = 首屏 20 + 「加载更多」6，逐行核对无重复）。IP 掩码：库里 `host(ip)` = `172.20.0.1`，响应里是 `172.20.0.0/24`，且响应体里搜不到原始地址。`device=mobile` 命中 1 条、`device=unknown` 命中 0 条（与设备分布口径一致）；`limit=0` / `days=abc` / `device=tv` / 坏游标都返回 422 且 `field` 正确；无凭据 404。`EXPLAIN` 下 `(occurred_at, id) < (…)` 被下推进 **`click_events_link_time_id_idx`** 的 Index Cond，且 Index Only Scan **不带 Sort 节点**（索引本身给出倒序）。浏览器侧：无头 Chrome 打开 `/links/{code}`，首屏 20 行 + 「加载更多」，点一下变 26 行、按钮换成「已经到底了」，两页拼接处无重复行 | 本机 |
 | **容器级 ⑪**：二维码（M4-3） | 详情页把 `short_url` 画进 canvas（前端 `qrcode` 生成，无后端接口）。用 **jsQR 真的去扫**：页面 canvas 取回的 PNG 解码 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；点「下载二维码」落盘的 `ashencourier-{code}.png` 是 **1024×1024**，解码结果同样相等。配色为深墨 `#141413` + 暖奶油 `#faf9f5`（≈19:1，不用珊瑚色当前景），下载件用纯白底 | 本机 |
+| **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「六条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
