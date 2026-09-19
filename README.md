@@ -666,6 +666,12 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 与手动触发（`workflow_dispatch`）都会真跑一遍，失败时自动 dump 容器日志。PR 只跑 `backend`
 与 `frontend` 两个快 job（约 1 分钟），因为 `docker compose up -d --build` 要几分钟。
 
+最近的实测：[run 35424447615](https://github.com/Elari39/AshenCourier/actions/runs/35424447615)
+三个 job 全绿（`frontend` 41s / `backend` 54s / `smoke` 85s）。两个关键证据：`backend` 里
+`internal/store/postgres` 耗时 **1.271s**（未设置 `POSTGRES_TEST_DSN` 时集成测试会整体跳过，
+那时只有零点几秒 —— 所以它是真的连上了 service 容器里的 PG）；`smoke` 输出
+**27 项检查，0 项失败**，含三条口令用例。
+
 **CI 自身也实测过「会红」**（不是只看过绿灯）：故意破坏一个文件的 gofmt → `backend` job 红并列出
 文件名；故意改错冒烟工具的期望值 → `smoke` job 红、日志里能看到断言失败与容器日志。配置见
 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)。

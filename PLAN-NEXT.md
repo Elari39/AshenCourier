@@ -34,8 +34,10 @@
 | **N1** | store 层迁移与 SQL 集成测试进 CI（§17.1，即自动化缺口 16.3-1） | ✅ | `da6731d` | 带 `POSTGRES_TEST_DSN` 时 **15** 个用例全绿（PG 18.6 容器）；不带 DSN 时 11 个集成用例 SKIP、4 个单测仍绿。变异验证两条都按预期变红：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → `42P10 there is no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` |
 | **N2** | 短链密码保护（§17.2，即 M5-1） | ✅ | `566aa2b` | 容器级 ①–⑥：未解锁 **200 密码页**且 `total_clicks` 0、错误口令 **401** 且仍 0、正确口令 **303 + `ac_unlock`**、带 cookie 的 GET **302** 且 `total_clicks`=**1**（不是 2）、`clear_password` 后立刻 302；库里只有 `$2a$12$…` 摘要（与明文比较为 `f`）。迁移 000005 往返两轮无报错；冒烟 **27 / 27**；无头 Chrome 里创建表单的口令输入、详情页「受口令保护」徽章、编辑面板的「清除口令」、口令页、输错提示、输对**真的落到目标地址**，逐条通过 |
 
-> ⚠️ N1 / N2 的验收全部在**本机**实测（真 PG 18.6 容器 + 无头 Chrome）。这两批**尚未推送**，
-> 所以 CI 的三个 job 还没跑过它们 —— 上表这两行的「实测验收」不含 CI 结论。
+> ✅ N1 / N2 已于 2026-09-19 推送，CI 三个 job 全绿（run `35424447615`）：
+> `backend` 54s —— 含真 PG service 上的 store 集成测试（`internal/store/postgres` **1.271s**，
+> 跳过的话只有零点几秒，所以是真的跑了）；`frontend` 41s；`smoke` 85s —— **27 / 27**，
+> 三条口令用例逐条 ✓。上表两行里除 CI 结论外的数字都是本机实测（真 PG 18.6 容器 + 无头 Chrome）。
 
 **与计划的偏离（7 条，逐条给理由）**
 
@@ -959,8 +961,8 @@ cd backend ; go run ./cmd/smoke -base http://localhost:8080 -expect-spa     # �
 - **M5 剩下的三件**：M5-2 GeoIP（**先拍 §15 第 3 条：数据源**）、M5-3 自定义域名（需真实域名与证书）、
   M5-4 多租户（计划里唯一建议「先别做」）。
 - **§15 的六个待拍板项**：只有第 3 条（GeoIP 数据源）是硬前置，其余都已按默认实现。
-- **还欠一次 CI 验证**：N1 / N2 只在本机验收过（含真 PG 与无头 Chrome），推送后要确认
-  `backend`（现在带 postgres service）与 `smoke` 两个 job 都是绿的。
+- ~~还欠一次 CI 验证~~：已完成 —— run `35424447615` 三个 job 全绿，`backend` 里
+  `internal/store/postgres` 跑了 **1.271s**（真 PG，不是跳过），`smoke` **27 / 27**。
 
 ---
 
