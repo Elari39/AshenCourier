@@ -33,6 +33,7 @@ import {
   formatDateTimeSeconds,
   formatNumber,
 } from '@/utils/format'
+import { splitTags } from '@/utils/tags'
 
 const route = useRoute()
 const router = useRouter()
@@ -127,14 +128,6 @@ const browserItems = computed<DistributionItem[]>(() =>
 const canClaim = computed(
   () => isAuthenticated.value && link.value?.anonymous === true && manageKey.value !== null,
 )
-
-/** 把逗号分隔的输入拆成标签数组（中文逗号也认）；空输入返回空数组 = 清空标签。 */
-function splitTags(raw: string): string[] {
-  return raw
-    .split(/[,，]/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-}
 
 async function loadLink(): Promise<void> {
   loading.value = true

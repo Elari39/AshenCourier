@@ -12,6 +12,7 @@ import type { Link } from '@/api/types'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
 import { useAuth } from '@/composables/useAuth'
+import { splitTags } from '@/utils/tags'
 
 const emit = defineEmits<{
   (event: 'created', payload: { link: Link; manageKey?: string }): void
@@ -39,14 +40,6 @@ function toISODateTime(local: string): string | undefined {
   const date = new Date(local)
   if (Number.isNaN(date.getTime())) return undefined
   return date.toISOString()
-}
-
-/** 把逗号分隔的输入拆成标签数组（中文逗号也认）。 */
-function splitTags(raw: string): string[] {
-  return raw
-    .split(/[,，]/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
 }
 
 function reset(): void {
@@ -84,11 +77,14 @@ async function submit(): Promise<void> {
   fieldErrors.value = {}
 
   try {
+    // 只拆一次：原来在同一个对象里调了两遍（条件与取值各一次），
+    // 虽然结果一样，但读起来像两套规则
+    const parsedTags = splitTags(tags.value)
     const payload = {
       target_url: targetURL.value.trim(),
       ...(customCode.value.trim() ? { custom_code: customCode.value.trim() } : {}),
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
-      ...(splitTags(tags.value).length > 0 ? { tags: splitTags(tags.value) } : {}),
+      ...(parsedTags.length > 0 ? { tags: parsedTags } : {}),
       ...(toISODateTime(expiresAt.value) ? { expires_at: toISODateTime(expiresAt.value) } : {}),
       // 口令只在填了的时候才发：空串会被后端当成「非法口令」而不是「不设口令」
       ...(password.value ? { password: password.value } : {}),

@@ -2,7 +2,9 @@ import { fileURLToPath, URL } from 'node:url'
 
 import tailwindcss from '@tailwindcss/vite'
 import vue from '@vitejs/plugin-vue'
-import { defineConfig } from 'vite'
+// 用 vitest 的 defineConfig：它在 Vite 配置上多一个 `test` 字段，
+// 于是别名（@ → src）只有一处定义，测试与构建不会各配一份。
+import { defineConfig } from 'vitest/config'
 
 /**
  * 前端顶级路由白名单。
@@ -51,5 +53,13 @@ export default defineConfig({
     sourcemap: false,
     // 手写 SVG 图表 + 少量页面，产物很小；设个阈值提醒别无意间引重依赖
     chunkSizeWarningLimit: 600,
+  },
+
+  test: {
+    // 只跑纯函数单测，环境用 node：不引 jsdom / @vue/test-utils。
+    // 组件的正确性（渲染、交互、版式）交给 e2e/ 下那套真浏览器脚本断言 ——
+    // 「图能解码、接口 200」不等于「页面对不对」，见 README 六条踩过的坑第 6 条。
+    environment: 'node',
+    include: ['src/**/*.test.ts'],
   },
 })

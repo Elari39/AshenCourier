@@ -12,6 +12,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --port 4173",
     "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"src/**/*.{ts,vue,css}\" \"*.{ts,json}\"",
@@ -36,6 +38,7 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.70.0",
     "vite": "^8.3.0",
+    "vitest": "^5.0.1",
     "vue-tsc": "^3.3.11"
   }
 }
