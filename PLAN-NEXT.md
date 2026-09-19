@@ -132,7 +132,7 @@ M4 剩下的两个批次会继续用它做 UI 验收。
 | **M2** | 口径可信 | 明细可能重复（at-least-once）、仪表盘滞后 | 1 天 | M1（CI 守住） |
 | **M3** | 韧性 | 崩溃少计、缓存击穿、没有备份 | 1–1.5 天 | M2（迁移编号接续） |
 | **M4** | 产品功能（小件） | 标签、点击明细页、二维码 | 2–3 天 | M2 |
-| **M5** | 大件（先拍板） | 密码保护、GeoIP、自定义域名、多租户 | 按需 | §9 拍板 |
+| **M5** | 大件（先拍板） | 密码保护、GeoIP、自定义域名、多租户 | 按需 | §9 拍板；**M5-1 已细化并立项为下一批次 N2（§17.2）** |
 
 ---
 
@@ -451,6 +451,9 @@ docker compose exec postgres dropdb -U ashen restore_check
 
 ### M5-1 短链密码保护
 
+> **已细化为 §17.2（下一批次 N2）**：迁移 SQL、状态码语义、cookie 属性、缓存策略、限流规则、
+> 验收命令与测试清单都在那里。本节保留原始设计意图，不改写。
+
 - 迁移 `000005_links_password`：`ALTER TABLE links ADD COLUMN password_hash text NOT NULL DEFAULT ''`
 - 哈希：bcrypt cost 12（`service/auth.go` 的 `BcryptCost`），与匿名管理密钥的 SHA-256 **明确区分**（前者抗爆破，后者是高熵随机数）
 - 跳转：`GET /{code}` 命中带密码的链接 → 渲染密码页（扩展 `handler/html.go`，沿用 DESIGN.md token）；`POST /{code}` 校验 → 下发 HttpOnly + SameSite=Lax + Secure 的短期签名 cookie（`HMAC-SHA256(code|exp)`，密钥从 `JWT_SECRET` 派生而非直接共用）；校验通过后 302
@@ -492,7 +495,7 @@ docker compose exec postgres dropdb -U ashen restore_check
 | `000002_click_event_uid` | `event_uid` + partial unique index | M2-1 | 加可空列 + 新索引，不破坏 |
 | `000003_links_tags` | `tags text[]` + GIN | M4-1 | 不破坏 |
 | `000004_click_events_page_index` | `(link_id, occurred_at DESC, id DESC)` | M4-2 | 不破坏（只加索引） |
-| `000005_links_password` | `password_hash` | M5-1 | 不破坏 |
+| `000005_links_password` | `password_hash` | **N2**（§17.2） | 不破坏：`NOT NULL DEFAULT ''` 加列，无索引；down 严格互逆 |
 | `000006_domains` | `domains` + `links.domain_id` | M5-3 | 加可空列，历史行落默认域名 |
 | `000007_orgs` | `orgs`/`memberships`/`links.org_id` | M5-4 | **破坏性**：需要回填 + 双写窗口 |
 
@@ -505,10 +508,12 @@ docker compose exec postgres dropdb -U ashen restore_check
 | `linkDTO.click_count` 语义改为「基线 + 待同步增量」 | 语义（字段名不变） | M2-2；README 口径说明要改 |
 | `linkDTO.tags` | 新增字段 | M4-1；`types.ts` 同步 |
 | `GET /api/links/{code}/clicks` | 新接口 | M4-2 |
-| `POST /{code}` | 新方法 | M5-1 |
-| `linkDTO.password_protected bool` | 新增字段 | M5-1 |
+| `POST /{code}` | 新方法 | **N2**（§17.2）；成功 303 → `/{code}`，失败 401 |
+| `linkDTO.password_protected bool` | 新增字段 | **N2**（§17.2）；`types.ts` 同步 |
+| `GET /{code}` 命中带口令且未解锁时返回 200 密码页 | 语义（不再是 302） | **N2**（§17.2）；冒烟与 README 同步 |
 | `/healthz` 的 `pg_fallbacks`（可选） | 新增字段 | M3-2 |
 | 无新环境变量（除可选的 `POSTGRES_TEST_DSN` 供 store 集成测试） | — | — |
+| `POSTGRES_TEST_DSN` | 新增（**仅测试**，不是运行时配置） | **N1**（§17.1）；未设置时集成测试整体跳过 |
 
 ---
 
@@ -536,7 +541,9 @@ docker compose exec postgres dropdb -U ashen restore_check
 | M2 | `count(*) = count(distinct event_uid)`；重复投递不改明细条数；列表 `click_count` 与详情 `total_clicks` 相等 |
 | M3 | 注入 `AddClickCount` 失败后增量仍在；50 并发 miss 只回源 1 次；备份能恢复到临时库并核对两个口径 |
 | M4 | 标签筛选走 GIN；明细分页可翻页且 IP 已掩码；扫码能打开 |
-| M5 | 每项自己的验收（见 §8 各小节） |
+| M5 | 每项自己的验收（见 §8 各小节）；**M5-1 见 §17.2** |
+| **N1** | `POSTGRES_TEST_DSN` 下集成测试全绿；不带 DSN 时整包跳过且不红；CI `backend` job 含 postgres service |
+| **N2** | 密码页不计点击；错误口令 401 不计点击；正确口令 303 → 带 cookie 的 GET 302 且计数恰好 +1；库里只有 bcrypt 摘要 |
 
 ---
 
@@ -621,7 +628,7 @@ docker compose exec postgres dropdb -U ashen restore_check
 | --- | --- | --- |
 | M4-3 **方案 B**：后端 `GET /api/links/{code}/qr.svg`（`skip2/go-qrcode`） | 只做了方案 A（前端 `qrcode` 画 canvas + 下载 1024×1024 PNG，零后端改动） | 需要「邮件 / 印刷品里直接引用一个图片 URL」时 |
 | **`/metrics` 零依赖文本端点** | 未做（§13 明确列为不做） | 要做必须①仅内网可达②把 `metrics` 加进 `pkg/shortcode/reserved.go` |
-| **`POSTGRES_TEST_DSN` 的 store 集成测试** | 未做（详见 16.3 第 1 条） | 越早越好 —— 迁移与 SQL 目前只有人工验收守着 |
+| **`POSTGRES_TEST_DSN` 的 store 集成测试** | **已立项为 §17.1（下一批次 N1）** | 越早越好 —— 迁移与 SQL 目前只有人工验收守着 |
 
 ### 16.3 三条自动化缺口（实施中的判断，不是原计划内容）
 
@@ -629,6 +636,8 @@ docker compose exec postgres dropdb -U ashen restore_check
    超时，迁移与查询语句本身（含 M4-2 新加的 keyset 分页 SQL）靠容器级验收 + `EXPLAIN`
    人工守住。补法：CI 的 smoke job 里已经有真 PG，加一个 `POSTGRES_TEST_DSN` 门控的
    集成测试，把「keyset 两页无重叠无缺口」「`tags @> ARRAY[...]` 走 GIN」这类断言搬进自动。
+   → **已立项为 §17.1（N1）**，含 9 条断言清单与 CI 改法。实现时修正一处：不复用 smoke 的容器栈，
+   而是给 `backend` job 加 `services.postgres`（compose 的 postgres 刻意不映射宿主端口，宿主的 `go test` 够不到它）。
 2. **浏览器级验收不在 CI 里**：无头 Chrome + jsQR 那套脚本在 `.workbuddy/tmp/`（已
    gitignore，只在本机跑），所以「画布不溢出容器」这类版式断言**只有我在本地执行**。
    代价刚付过一次：二维码画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 类），
@@ -640,7 +649,11 @@ docker compose exec postgres dropdb -U ashen restore_check
    `splitTags`、`describeClient`、`formatDateTimeSeconds`、`truncateMiddle` 都是纯函数，
    测起来成本很低。
 
-### 16.4 建议的下一步（挑一个即可开工）
+### 16.4 建议的下一步（已选定，2026-09-19）
+
+> **结论**：同时细化并实施 **M5-1 短链密码保护**（= §17.2 / N2）与 **16.3-1 store 集成测试**
+> （= §17.1 / N1），顺序 **N1 → N2**。完整规格见 **§17**。
+> C 里的「先拍板 §15」不阻塞这两项 —— 第 3 条（GeoIP 数据源）只挡 M5-2。
 
 - **A. M5-1 短链密码保护** —— 唯一不需要先拍板、又有真实产品价值的大件。
   落点：迁移 `000005` + 密码页（扩展 `handler/html.go`）+ `POST /{code}` + HMAC cookie
@@ -653,8 +666,280 @@ docker compose exec postgres dropdb -U ashen restore_check
 | 想了解 | 看哪 |
 | --- | --- |
 | 已完成到哪一步（12 个批次 + 实测验收 + commit） | §0 |
+| **下一批次 N1 / N2 的完整规格（落点 / SQL / 验收 / commit 边界）** | **§17** |
 | M5 各批次的落点、契约、验收标准 | §8 |
 | 明确不做的事及理由 | §13 |
 | 需要拍板的六个点与当前状态 | §15 |
 | 迁移与契约变更台账（含未实施的 000005–000007） | §9 |
 | 实测验收记录（①–⑪）、设计取舍与踩过的坑 | `README.md` 的「验收记录」「已知限制」「六条踩过的坑」 |
+
+---
+
+## 17. 下一批次规格（N1 / N2）
+
+> 本节把 §16.4 的「方向」升级为「可执行规格」：**不改写** §8 与 §16.3 的原始记录，只补足落点文件、
+> SQL、状态码语义、验收命令与提交边界。
+> 两个批次各自独立可回滚 —— N2 只复用 N1 的测试脚手架，不依赖 N1 的代码。
+> 顺序：**N1 → N2**。理由：N1 给 N2 的迁移 000005 提供自动回归网，且不依赖任何未拍板项。
+
+### 17.1 批次 N1：store 层迁移与 SQL 集成测试进 CI（自动化缺口 16.3-1）
+
+**问题**：`internal/store/postgres` 目前只测了错误归类与 `opCtx` 超时；迁移文件本身、以及
+M4-1/M4-2 新加的 SQL（`tags @> ARRAY[...]`、`(occurred_at, id) < (...)` 的 keyset）至今
+只靠容器级验收与人工 `EXPLAIN` 守着。本批次把这类断言搬进自动。
+
+#### 17.1.1 落点
+
+| 文件 | 动作 | 内容 |
+| --- | --- | --- |
+| `backend/internal/store/postgres/integration_test.go` | 新建 | `TestMain` + DSN 门控 + 建库护栏 + 迁移执行器 |
+| `backend/internal/store/postgres/link_integration_test.go` | 新建 | links 表与列表查询 |
+| `backend/internal/store/postgres/click_integration_test.go` | 新建 | click_events 与聚合查询 |
+| `.github/workflows/ci.yml` | 修改 | `backend` job 加 `services.postgres` + `POSTGRES_TEST_DSN` |
+| `README.md` | 修改 | 环境变量表补 `POSTGRES_TEST_DSN`；「本地开发」补怎么在本机跑 |
+
+#### 17.1.2 脚手架（四个硬约束）
+
+1. **门控**：`POSTGRES_TEST_DSN` 为空 ⇒ 每个集成测试 `t.Skip("未设置 POSTGRES_TEST_DSN")`。
+   **不**在 `TestMain` 里直接失败 —— 否则所有不关心它的开发者与 PR 都会平白变红。
+2. **建库护栏**：连接前解析 DSN，**要求库名以 `_test` 结尾**，否则 `t.Fatal`。因为下一步是破坏性的。
+3. **破坏性准备**：`DROP SCHEMA public CASCADE` + `CREATE SCHEMA public`，然后按文件名排序执行
+   `backend/migrations/*.up.sql`（路径用 `filepath.Join("..", "..", "migrations")`；`go test` 的 cwd
+   就是包目录）。这一步**顺带把迁移文件本身纳入了回归**，正是 16.3-1 想要的。
+4. **隔离与并行**：连接池 `MaxConns: 8`；用例之间靠数据隔离（每个用例自己生成 owner uuid 与短码），
+   因此可以继续 `t.Parallel()` —— 不需要 `TRUNCATE` 这种会互相打架的清理。
+
+#### 17.1.3 断言清单（本节即验收标准）
+
+| # | 用例 | 断言 |
+| --- | --- | --- |
+| 1 | `TestMigrationsApply` | 全部 up 文件按序成功；`links` / `click_events` / 视图 `link_click_totals` 存在；`click_events_event_uid_key`（partial unique）、`links_tags_gin`、`click_events_link_time_id_idx` 存在；**旧索引 `click_events_link_time_idx` 已不在**（守住 §0 偏离第 6 条） |
+| 2 | `TestLinkRoundTrip` | `Create` → `GetByCode` 往返一致（tags / created_ip / expires_at / status）；不存在 ⇒ `*domain.NotFoundError` |
+| 3 | `TestLinkUpdateSemantics` | 只传 title 时其它列不动；`ClearExpires` 置 NULL；`Tags` 传空切片 = 清空、`nil` = 不动 |
+| 4 | `TestListByOwnerKeysetPagination` | 同一 owner 造 5 条 → `limit=2` 翻三页：**无重叠、无缺口**、时间倒序、末页游标 `Valid=false` |
+| 5 | `TestListByOwnerTagFilterUsesGinIndex` | 造 200 条（含 `tags=['ops']` 与不含）→ `ANALYZE links` → 过滤只命中含标签的行；`SET LOCAL enable_seqscan = off` 后 `EXPLAIN` 文本里出现 `links_tags_gin` |
+| 6 | `TestInsertBatchDedupByEventUID` | 同一批（含相同 `event_uid`）插两次 ⇒ 条数不变；`event_uid` 为空串的行**不去重**（插两行）；不同 uid 正常插入 |
+| 7 | `TestListByLinkKeysetPagination` | 造 12 条明细，**其中 3 条 `occurred_at` 完全相同**（正是迁移 000004 要修的洞）→ `limit=5` 翻三页无重叠无缺口、时间倒序；`Device` 过滤含 `unknown` 桶口径；`Since` 过滤生效 |
+| 8 | `TestAggregateDayBoundaryIsUTC` | 一条 23:30Z、一条次日 00:30Z ⇒ `Daily` 恰好 2 天（守住 `AT TIME ZONE 'UTC'`）；空 device 归 `unknown` |
+| 9 | `TestAddClickCountAndExpireDue` | `AddClickCount` 累加并返回总值、不存在 ⇒ `*NotFoundError`；`ExpireDue` 只动「active 且已过期」、`limit` 生效、返回短码列表 |
+
+> 第 5 条是全批次唯一的「计划形状」断言。用 200 行 + `ANALYZE` 消除计划器在十行小表上选 seqscan 的抖动，
+> 让它成为**确定性断言**而不是偶发红 —— 人工验收（§0 容器级 ⑨）当时是 `SET enable_seqscan=off` 直接看的，
+> 自动化必须把样本量补上才算复现。
+
+#### 17.1.4 CI 改动（只动 `backend` job）
+
+```yaml
+    services:
+      postgres:
+        image: postgres:18.6-alpine            # 与服务端同 tag
+        env:
+          POSTGRES_USER: ashen
+          POSTGRES_PASSWORD: ashen
+          POSTGRES_DB: ashen_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ashen -d ashen_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      POSTGRES_TEST_DSN: postgres://ashen:ashen@localhost:5432/ashen_test?sslmode=disable
+```
+
+- 服务容器**不占** PR 关键路径：`backend` job 仍是一分钟量级（PG 冷启动约 5s）。
+- `smoke` job 不动（它本来就有真容器栈）。
+- **为什么不用 compose 的 postgres**：它刻意不映射宿主端口（`docker-compose.yml` 只 `expose`），
+  宿主机上的 `go test` 够不到它；而 Actions 的 `services:` 天生带健康检查与端口映射。
+
+#### 17.1.5 验收（提交前必须实测并留档）
+
+```powershell
+cd F:/WorkSpace/Coding/Go/AshenCourier
+docker compose -f docker-compose.dev.yml up -d postgres
+docker compose -f docker-compose.dev.yml exec postgres createdb -U ashen ashen_test   # 首次
+cd backend
+$env:POSTGRES_TEST_DSN = 'postgres://ashen:ashen@localhost:5432/ashen_test?sslmode=disable'
+go test -race -count=1 ./internal/store/postgres/ -v
+Remove-Item Env:POSTGRES_TEST_DSN
+go test -race -count=1 ./...     # 不带 DSN：集成测试必须整体跳过且全绿
+go vet ./...
+gofmt -l .                       # 必须无输出
+```
+
+**变异验证（防假绿）**：临时把迁移 000004 的索引名改错、或删掉 `InsertBatch` 的
+`ON CONFLICT ... WHERE event_uid IS NOT NULL` 谓词 ⇒ 对应用例必须变红；改回 ⇒ 绿。
+
+**提交边界**：`test(store): 迁移与 SQL 集成测试，CI backend job 加 postgres service（16.3-1）`
+
+---
+
+### 17.2 批次 N2：短链密码保护（M5-1 的落地版）
+
+§8 的 M5-1 给了设计意图；本节补的是**会写进代码的那些决定**：迁移 SQL、状态码、cookie 属性、
+缓存策略、限流规则、验收命令与测试清单。
+
+#### 17.2.1 落点
+
+| 文件 | 动作 |
+| --- | --- |
+| `backend/migrations/000005_links_password.{up,down}.sql` | 新建 |
+| `backend/internal/domain/link.go`、`domain/cache.go` | 修改（字段 + 不变量） |
+| `backend/internal/store/postgres/link.go` | 修改（列清单四处同步 + Update 的 COALESCE） |
+| `backend/internal/store/redis/cache.go` | 修改（线格式加一个布尔） |
+| `backend/internal/service/unlock.go`（新）、`service/linkpassword.go`（新）、`service/shortener.go` | 签发/校验 + 口令哈希 + `VerifyPassword` |
+| `backend/internal/handler/{html,redirect,router,dto,link}.go` | 密码页 + `POST /{code}` + 契约字段 |
+| `backend/internal/config/config.go`、`backend/cmd/api/main.go` | 解锁 TTL（内置默认）+ 装配 |
+| `backend/cmd/smoke/main.go` | 三条新用例（24 → 27） |
+| `frontend/src/api/types.ts`、`components/ShortenForm.vue`、`views/LinkDetailView.vue` | 契约 + 创建表单 + 徽章/设置清除 |
+| `README.md` | API 表 + 已知限制 + 验收记录 |
+
+#### 17.2.2 迁移 000005
+
+```sql
+-- up
+ALTER TABLE links ADD COLUMN password_hash text NOT NULL DEFAULT '';
+COMMENT ON COLUMN links.password_hash IS
+    '访问口令的 bcrypt 摘要（cost 12）；空串 = 不设口令。跳转路径只读缓存里的「有没有口令」布尔，摘要只在 POST /{code} 上校验一次';
+
+-- down（严格互逆）
+ALTER TABLE links DROP COLUMN password_hash;
+```
+
+不加索引（没有按口令查询的场景）。`NOT NULL DEFAULT ''` 与 `tags` 同一个理由：可空会让每个查询都要
+写 `coalesce`，而 `COALESCE($n, password_hash)` 这种「不动就保持原值」的更新语义在 NULL 下会变得微妙。
+
+#### 17.2.3 契约与配置变更
+
+| 变更 | 类型 | 说明 |
+| --- | --- | --- |
+| `POST /{code}` | 新方法 | 表单体 `password`；成功 303 → `/{code}`，失败 401 |
+| `GET /{code}` | 语义扩展 | 命中带口令且未解锁的链接 ⇒ **200 + 密码页**（不再是 302） |
+| `linkDTO.password_protected bool` | 新增字段 | `json:"password_protected,omitzero"`（沿用 `dto.go` 的 bool 规则）；**永不输出 hash** |
+| 创建/修改入参 `password` / `clear_password` | 新增字段 | 创建时可选；PATCH 可设置或清除 |
+| `POSTGRES_TEST_DSN` | 新增（**仅测试**） | 未设置时集成测试整体跳过；不是运行时配置 |
+| 环境变量 | **零新增** | 解锁 TTL 是内置默认值（`DefaultLinkUnlockTTL = 30m`），与缓存 TTL 等同类 |
+
+#### 17.2.4 关键语义（照此实现，不要再自行发挥）
+
+```text
+GET /{code}
+  ├ 形态/保留字校验（不变）→ Resolve（缓存优先，miss 才回源）
+  ├ Redirectable 失败 → 404 / 410（不变；**先于**口令闸门 —— 死链永不显示口令页）
+  ├ 无口令 或 解锁 cookie 有效 → 302 + 记一次点击（不变）
+  └ 有口令 且 cookie 无效/缺失 → 200 密码页（no-store + noindex，**不计点击**）
+
+POST /{code}               ← 新增；nginx 的短码 location 不限方法，无需改 nginx
+  ├ 形态/保留字校验 → VerifyPassword（库读 + Redirectable + bcrypt 比对）
+  ├ 口令错误 → 401 + 重新渲染密码页（**不计点击**）
+  └ 口令正确 → Set-Cookie + 303 See Other → Location: /{code}（**不计点击**）
+                          └ 浏览器随后 GET → 302，这一次才是「真正的跳转」，只记 1 次
+```
+
+- **为什么是 303 而不是 302**：POST 返回 302 时浏览器可能用 POST 重放 `Location`；303 明确「换个 GET 去取」。
+  于是「解锁」天然不计点击，计点击的是随后那个 GET —— 一次解锁恰好 +1，不是 +2。
+- **Cookie**：名 `ac_unlock`，值 = 签名凭据（**code 装进签名体内**），`Path=/`、`HttpOnly`、
+  `SameSite=Lax`、`MaxAge = TTL`，`Secure` **仅当 `PUBLIC_BASE_URL` 是 https** —— 写死 `Secure`
+  会让 `http://localhost:8080` 与局域网 IP 永远解锁不了。
+- **密钥域分离**：解锁凭据的 HMAC 子密钥由 `JWT_SECRET` 派生（`HMAC-SHA256(secret, "ashen-courier/link-unlock/v1")`），
+  不直接共用 —— 同一条密钥签两类凭据会互相放大泄露面。比较用 `hmac.Equal`（常数时间）。
+- **缓存里不放摘要**：`CachedLink` 只多一个 `PasswordProtected bool`。跳转路径只需要「有没有口令」，
+  而 Redis 转储泄露不该 enable 离线爆破；比对只在被限流的 `POST /{code}` 上做一次库读。
+- **不升 `link:v1:` 缓存键版本**：上线顺序是「先迁移、后发版」，发版那一刻库里不存在任何带口令的行，
+  旧缓存条目解出 `PasswordProtected=false` **恰好是正确的**（不存在漏判窗口）；而线格式只是加字段，
+  不是改名，注解里禁止的是后者。
+- **限流**：scope `unlock`、维度 `ByIP`、20 次 / 10 分钟（复用 login 的取值）。scope 不同 ⇒
+  Redis 键与 login / redirect 完全隔离，不会互相吃配额。
+- **不加 CSRF token**：这个 POST 不改变任何服务端状态、不依赖会话（只证明「知道口令」），
+  CSRF 的收益仅仅是「帮受害者解锁一条链接」。理由写进代码注释，免得后人当成漏项。
+- **口令强度**：复用 `ValidatePassword`（8–72 字节）与 `BcryptCost = 12`，不另造第二套规则；
+  72 是 bcrypt 的截断上限，必须显式拒绝。
+
+#### 17.2.5 边界情况
+
+| 场景 | 期望 |
+| --- | --- |
+| 有口令 + 已删除 / 停用 / 过期 | 仍是 404 / 410（Redirectable 先于口令闸门） |
+| Redis 挂 | 回源 PG（既有降级路径），口令页照常 |
+| `POST /{code}` 遇到无口令链接 | 303 → GET → 302，正常计一次点击 |
+| 畸形 / 截断 / 篡改 cookie | 静默视为未解锁（不报错页、不 500） |
+| 超长请求体 | `http.MaxBytesReader`（表单很小，1 KiB 足够）→ 413 |
+| 口令错误 ×N | `unlock` scope 429 + `Retry-After`；`RATE_LIMIT_DISABLED` 对它同样生效 |
+| 限流器故障 | 沿用既有降级：放行 + warn |
+| 详情接口 | 只有 `password_protected` 布尔，绝不输出 hash |
+| `password` 与 `clear_password` 同时传 | 422 `invalid_password`（比照 `expires_at` / `clear_expires`） |
+| `password` 传空串 | 422（清除请用 `clear_password`），避免「空串表示清除」与「不传表示不动」的歧义 |
+
+#### 17.2.6 验收（可执行）
+
+```powershell
+cd F:/WorkSpace/Coding/Go/AshenCourier
+docker compose up -d --build ; docker compose ps      # 5 个 healthy，migrate 到 000005
+
+# ① 建带口令的短链 + 摘要确实落库（只有摘要、没有明文）
+$c = curl.exe -s -XPOST localhost:8080/api/links -H 'content-type: application/json' -d '{"target_url":"https://example.com/locked","password":"smoke-pass-9f3a"}' | ConvertFrom-Json
+$code = $c.link.short_code ; $key = $c.manage_key
+$c.link.password_protected                            # True
+docker compose exec postgres psql -U ashen -d ashen -c "select left(password_hash,7), length(password_hash), password_hash = 'smoke-pass-9f3a' from links where short_code='$code'"
+#   期望 bcrypt cost 12 前缀 / 长度 60 / 与明文比较为 f
+
+# ② 未解锁：200 密码页、不是跳转、不计点击
+curl.exe -si "localhost:8080/$code" | Select-Object -First 3
+curl.exe -s -H "X-Manage-Key: $key" "localhost:8080/api/links/$code/stats?days=1" | ConvertFrom-Json | Select-Object total_clicks
+#   期望 200 + text/html；total_clicks = 0（注意：用 stats 的 total_clicks，不是详情 click_count）
+
+# ③ 错误口令 → 401，计数仍 0
+curl.exe -si -XPOST "localhost:8080/$code" -d 'password=wrong-guess' | Select-Object -First 1
+
+# ④ 正确口令 → 303 + Set-Cookie（HttpOnly / SameSite=Lax / Path=/）
+curl.exe -si -XPOST "localhost:8080/$code" -d 'password=smoke-pass-9f3a' | Select-Object -First 6
+
+# ⑤ 带 cookie 的 GET → 302，且计数恰好 +1
+curl.exe -si -b "ac_unlock=<上一步的值>" "localhost:8080/$code" | Select-Object -First 3
+curl.exe -s -H "X-Manage-Key: $key" "localhost:8080/api/links/$code/stats?days=1" | ConvertFrom-Json | Select-Object total_clicks
+docker compose exec postgres psql -U ashen -d ashen -c "select count(*) from click_events where short_code='$code'"
+
+# ⑥ 清除口令后立刻可跳转（证明 Update 主动失效了缓存）
+curl.exe -s -XPATCH -H "X-Manage-Key: $key" -H 'content-type: application/json' -d '{"clear_password":true}' "localhost:8080/api/links/$code" | Out-Null
+curl.exe -si "localhost:8080/$code" | Select-Object -First 1        # 302
+
+# ⑦ 迁移往返：down 1 / up 各两次无报错，之后新跳转仍正常
+
+# ⑧ 端到端冒烟（含三条新用例）
+cd backend ; go run ./cmd/smoke -base http://localhost:8080 -expect-spa     # 期望 27/27
+```
+
+浏览器侧（无头 Chrome，沿用 `.workbuddy/tmp/browser-check.mjs`）：创建表单填口令 → 详情页出现
+「受口令保护」徽章 → 打开短链看到口令页 → 输错一次看到错误提示 → 输对跳转。
+
+#### 17.2.7 测试清单与变异验证
+
+| 文件 | 用例 |
+| --- | --- |
+| `service/unlock_test.go`（新） | 签发/校验往返；过期、换 code、篡改签名、空串/畸形 token ⇒ `ErrUnauthorized`；**换一个 secret 签的 token 必须不通过** |
+| `service/linkpassword_test.go`（新） | 摘要前缀是 bcrypt cost 12 且 ≠ 明文；比对正/误；7 字节与 73 字节都 422 |
+| `service/shortener_test.go`（改） | Create 带口令 ⇒ `HasPassword()`；Update 设置/清除；`VerifyPassword` 四条分支（无口令/正确/错误/已删除） |
+| `handler/password_test.go`（新） | 未解锁 GET ⇒ 200 + HTML + 无 `Set-Cookie`；错误口令 ⇒ 401；正确 ⇒ 303 + cookie 属性齐全；`SecureCookies=false` 时不带 `Secure` |
+| `handler/link_test.go`、`handler/router_test.go`（改） | `buildPatch` 的两条 422；路由表 12 → 13 条（新增 `POST /{code}`） |
+| `store/redis`（改） | 线格式往返带 `password_protected`；**旧线格式（没有该字段）解出来是 false** |
+| 17.1 的集成测试（改） | `password_hash` 的 Create/Update 往返与清除 |
+
+**变异验证**：删掉口令闸门 ⇒ 冒烟 ① 必红；把 401 与 303 写反 ⇒ ③ 必红；把 cookie 的 `Secure`
+写死为 `true` ⇒ 本机 ⑤ 必红。
+
+**提交边界**：`feat(links): 短链密码保护（迁移 000005 + 密码页 + POST /{code} + HMAC cookie）（M5-1）`
+
+---
+
+### 17.3 做完这两个批次之后还剩什么
+
+- **16.3-2 浏览器级验收进 CI**：无头 Chrome + jsQR 那套脚本仍在 `.workbuddy/tmp/`（未入库），
+  「画布不溢出容器」这类版式断言只有人在本机看。补法：把版式断言固化成随仓库入库的可重复脚本，
+  或在 CI 里引 Playwright / Puppeteer（约 +1–2 分钟）。
+- **16.3-3 前端零单测**：`splitTags`、`describeClient`、`formatDateTimeSeconds`、`truncateMiddle`
+  都是纯函数，vitest 成本很低。
+- **M5 剩下的三件**：M5-2 GeoIP（**先拍 §15 第 3 条：数据源**）、M5-3 自定义域名（需真实域名与证书）、
+  M5-4 多租户（计划里唯一建议「先别做」）。
+- **§15 的六个待拍板项**：只有第 3 条是硬前置，其余都已按默认实现。
+
+---
+
+
