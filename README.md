@@ -553,7 +553,7 @@ MVP 有意不做的部分：
 | --- | --- |
 | 自动抓取目标页标题 | 会引入 SSRF 风险，标题由用户手填 |
 | GeoIP / 国家维度统计 | 需要 mmdb 库；`click_events.country` 字段已预留，恒为 NULL |
-| 短链密码、二维码、A/B 分流 | P1 扩展点，数据模型已预留 |
+| 短链密码保护、A/B 分流 | P1 扩展点，数据模型已预留（二维码已在详情页提供：前端 `qrcode` 生成，无需后端接口） |
 | 团队 / 多租户 / 权限体系 | 只有「匿名」与「个人账号」两种身份 |
 | Prometheus / Grafana | 只暴露 `/healthz` + JSON 结构化日志 + 关键计数 |
 | 顶点域名分离（`link.xxx`） | 单域名用保留字黑名单隔离；分域时只需改 nginx |
@@ -587,6 +587,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑧**：备份与恢复（M3-3） | `--profile ops` 起 backup → 产出 `ashen-20260918-154740.dump`；`pg_restore` 到临时库 `restore_check` 后与主库逐项一致（`links` 14、`click_events` 169、`sum(base_count)` = `sum(event_count)` = 169）；删临时库后 `pg_database` 里不再有它。保留策略实测：造一个 2000 年的假备份 → 清理后旧文件被删、当天的留下 | 本机 |
 | **容器级 ⑨**：标签（M4-1） | 创建时传 `["Ops","  ops  ","Dev"]` → 返回 `["ops","dev"]`（归一化 + 去重）；`?tag=ops` 只命中该条，`?tag=DEV`（大写）也能命中（按小写比较）；11 个标签 / 33 字符标签都返回 422 `invalid_tags`；`EXPLAIN` 下 `tags @> ARRAY['ops']` 走 **`links_tags_gin`**（Bitmap Index Scan）。浏览器侧：无头 Chrome 在 `/dashboard` 输入 `ops` 后列表从 2 条变 1 条 | 本机 |
 | **容器级 ⑩**：点击明细页（M4-2） | 跳转 3 次（手机 / 桌面 / 爬虫 UA）→ `?limit=2` 拿到 2 行 + 游标，带游标翻到第 2 页拿到剩下的 1 行、`next_cursor` 为空；时间倒序且两页无重叠无缺口（26 行 = 首屏 20 + 「加载更多」6，逐行核对无重复）。IP 掩码：库里 `host(ip)` = `172.20.0.1`，响应里是 `172.20.0.0/24`，且响应体里搜不到原始地址。`device=mobile` 命中 1 条、`device=unknown` 命中 0 条（与设备分布口径一致）；`limit=0` / `days=abc` / `device=tv` / 坏游标都返回 422 且 `field` 正确；无凭据 404。`EXPLAIN` 下 `(occurred_at, id) < (…)` 被下推进 **`click_events_link_time_id_idx`** 的 Index Cond，且 Index Only Scan **不带 Sort 节点**（索引本身给出倒序）。浏览器侧：无头 Chrome 打开 `/links/{code}`，首屏 20 行 + 「加载更多」，点一下变 26 行、按钮换成「已经到底了」，两页拼接处无重复行 | 本机 |
+| **容器级 ⑪**：二维码（M4-3） | 详情页把 `short_url` 画进 canvas（前端 `qrcode` 生成，无后端接口）。用 **jsQR 真的去扫**：页面 canvas 取回的 PNG 解码 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；点「下载二维码」落盘的 `ashencourier-{code}.png` 是 **1024×1024**，解码结果同样相等。配色为深墨 `#141413` + 暖奶油 `#faf9f5`（≈19:1，不用珊瑚色当前景），下载件用纯白底 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |

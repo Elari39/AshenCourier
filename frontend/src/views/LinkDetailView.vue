@@ -5,8 +5,9 @@
  * 鉴权：登录用户用自己的账号，匿名创建者用 localStorage 里的 manage_key。
  * 后端对「无权限」和「不存在」都回 404，所以这里只需要处理一种失败态。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
+import QRCode from 'qrcode'
 
 import { ApiError, linksApi } from '@/api/client'
 import type { ClickEvent, Link, Stats } from '@/api/types'
@@ -61,6 +62,16 @@ const loadingClicks = ref(false)
 const clicksError = ref('')
 /** 每页条数；与后端默认页大小一致，翻页只追加不替换。 */
 const CLICK_PAGE_SIZE = 20
+
+// 二维码配色：深墨前景 + 暖奶油底（≈19:1 对比度）。
+// 刻意不用珊瑚色（--color-primary）：它是强调色，与奶油底的对比度不足以让
+// 扫码器在弱光/贴纸场景下稳定识别 —— 二维码只有「能扫出来」这一个功能。
+const QR_DARK = '#141413' // --color-ink
+const QR_LIGHT = '#faf9f5' // --color-canvas
+
+const qrCanvas = ref<HTMLCanvasElement | null>(null)
+const downloadingQR = ref(false)
+const qrError = ref('')
 
 // 编辑表单
 const editOpen = ref(false)
@@ -179,6 +190,53 @@ async function loadClicks(reset = true): Promise<void> {
   }
 }
 
+async function renderQR(): Promise<void> {
+  // canvas 在 v-else-if="link" 里，要等这次 link 赋值渲染完才存在
+  await nextTick()
+  const canvas = qrCanvas.value
+  if (!canvas || !link.value) return
+
+  qrError.value = ''
+  try {
+    // 320px 画到 160px 的显示尺寸上：高 DPI 屏与截图放大都不糊
+    await QRCode.toCanvas(canvas, link.value.short_url, {
+      width: 320,
+      margin: 1,
+      errorCorrectionLevel: 'M',
+      color: { dark: QR_DARK, light: QR_LIGHT },
+    })
+  } catch {
+    qrError.value = '二维码生成失败'
+  }
+}
+
+/** 下载 1024×1024 的 PNG。 */
+async function downloadQR(): Promise<void> {
+  if (!link.value) return
+
+  downloadingQR.value = true
+  try {
+    // 下载件用纯白底而不是屏幕上的暖奶油底：它多半会被打印、复印或贴到别处，
+    // 白底在那些场景下的对比度更稳（屏幕上的奶油底只是为了和 DESIGN.md 的面板一致）。
+    const dataURL = await QRCode.toDataURL(link.value.short_url, {
+      width: 1024,
+      margin: 2,
+      errorCorrectionLevel: 'M',
+      color: { dark: QR_DARK, light: '#ffffff' },
+    })
+
+    const anchor = document.createElement('a')
+    anchor.href = dataURL
+    anchor.download = `ashencourier-${link.value.short_code}.png`
+    anchor.click()
+    toast.success('二维码已下载（1024×1024 PNG）')
+  } catch {
+    toast.error('二维码生成失败，请稍后重试')
+  } finally {
+    downloadingQR.value = false
+  }
+}
+
 async function saveEdit(): Promise<void> {
   if (!link.value) return
 
@@ -267,7 +325,7 @@ watch(statsDays, () => {
 onMounted(async () => {
   await loadLink()
   if (link.value) {
-    await Promise.all([loadStats(), loadClicks()])
+    await Promise.all([loadStats(), loadClicks(), renderQR()])
   }
 })
 </script>
@@ -320,6 +378,38 @@ onMounted(async () => {
             <Button variant="danger" :loading="deleting" @click="handleDelete">删除</Button>
           </div>
         </div>
+
+        <!-- 二维码：扫码打开（深墨前景 + 暖奶油底，对比度 ≈19:1） -->
+        <Card class="mt-8 p-6 md:p-8">
+          <div class="flex flex-col gap-6 sm:flex-row sm:items-center">
+            <div
+              class="h-40 w-40 shrink-0 rounded-lg border border-hairline bg-canvas p-2"
+            >
+              <canvas
+                ref="qrCanvas"
+                class="h-full w-full"
+                aria-label="短链二维码"
+                role="img"
+              />
+            </div>
+
+            <div class="min-w-0">
+              <p class="eyebrow">QR code</p>
+              <p class="mt-2 text-[14px] leading-[1.55] text-body">
+                扫码即可打开这条短链。下载的 PNG 是 1024×1024、纯白底，可直接打印或贴进海报。
+              </p>
+              <p class="mt-3 break-anywhere font-mono text-[13px] text-muted">
+                {{ link.short_url }}
+              </p>
+              <p v-if="qrError" class="mt-3 text-[13px] text-error">{{ qrError }}</p>
+              <div class="mt-4">
+                <Button variant="secondary" :loading="downloadingQR" @click="downloadQR">
+                  下载二维码
+                </Button>
+              </div>
+            </div>
+          </div>
+        </Card>
 
         <!-- 认领提示（珊瑚 callout：全站少数几个允许珊瑚满铺的位置） -->
         <div v-if="canClaim" class="card-coral mt-8 flex flex-col items-start justify-between gap-5 md:flex-row md:items-center">

@@ -20,12 +20,14 @@
   "dependencies": {
     "@fontsource/cormorant-garamond": "^5.3.0",
     "@fontsource/inter": "^5.3.0",
+    "qrcode": "^1.5.4",
     "vue": "^3.5.42",
     "vue-router": "^5.3.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.1",
+    "@types/qrcode": "^1.5.6",
     "@vitejs/plugin-vue": "^6.0.9",
     "eslint": "^10.10.0",
     "eslint-plugin-vue": "^10.11.0",
