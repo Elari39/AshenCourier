@@ -33,6 +33,10 @@
 | **M5** | 四个大件（需 §15 拍板） | ⏸ 按计划推迟 | — | — |
 | **N1** | store 层迁移与 SQL 集成测试进 CI（§17.1，即自动化缺口 16.3-1） | ✅ | `da6731d` | 带 `POSTGRES_TEST_DSN` 时 **15** 个用例全绿（PG 18.6 容器）；不带 DSN 时 11 个集成用例 SKIP、4 个单测仍绿。变异验证两条都按预期变红：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → `42P10 there is no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` |
 | **N2** | 短链密码保护（§17.2，即 M5-1） | ✅ | `566aa2b` | 容器级 ①–⑥：未解锁 **200 密码页**且 `total_clicks` 0、错误口令 **401** 且仍 0、正确口令 **303 + `ac_unlock`**、带 cookie 的 GET **302** 且 `total_clicks`=**1**（不是 2）、`clear_password` 后立刻 302；库里只有 `$2a$12$…` 摘要（与明文比较为 `f`）。迁移 000005 往返两轮无报错；冒烟 **27 / 27**；无头 Chrome 里创建表单的口令输入、详情页「受口令保护」徽章、编辑面板的「清除口令」、口令页、输错提示、输对**真的落到目标地址**，逐条通过 |
+| **N3** | 前端纯函数单测（vitest）+ 消掉 `splitTags` 重复（16.3-3） | ✅ | `9071d62` | `vitest run` **31 个用例全绿**（`format.ts` 24 / `tags.ts` 7，约 0.4s）；`splitTags` 从 `ShortenForm.vue` 与 `LinkDetailView.vue` 提到 `src/utils/tags.ts`（原先是逐字相同的两份）；CI 的 `frontend` job 补一行 `pnpm test`。变异验证两条：`truncateMiddle` 的 `head + tail + 1` 退化成 `head + tail` → 红；`tags` 的 `filter(length > 0)` 改成 `> 1` → **第一次没抓住**（用例里没有一个单字符标签），补一条后才红 |
+| **N4** | 浏览器级验收入库并进 CI（16.3-2） | ✅ | `0464754` | 固化为 `frontend/e2e/`（4 个文件，**零 npm 依赖**：只用 Node 内置 `fetch` / `WebSocket` 直连 CDP）**19 项全绿**；挂进 CI 的 `smoke` job 并**排在 `cmd/smoke` 之前**（创建接口是 10 次/分/IP 的硬配额，而 smoke 的最后一项会故意打满它）—— 本机实测这个顺序：e2e **19/19** → 紧接 smoke **27/27**。变异验证：去掉二维码的行内尺寸清理 → **4 条版式断言全红、而像素断言仍全绿**，正是第 6 条坑的复现 |
+| **N5** | M5-2 GeoIP 国家维度（数据源见偏离第 9 条） | ✅ | `021277c` | 新增 `internal/store/geoip`（`Resolver` + `OpenOrDefault` + 无库时 noop 降级）、config 的 `GEOIP_DB_PATH`、worker 填 `country`、统计多一个 `countries` 分布 + 前端复用 `DistributionList`。容器级：投两条公网 IP 的点击 → `8.8.8.8` = **US**、`114.114.114.114` = **CN**，走完 Stream → mmdb → PG → 统计全链路；两条降级路径（留空 = 一条 `INFO` / 文件打不开 = 一条 `WARN`）都只 warn、照常落库为 NULL、`/healthz` 仍 200。集成测试新增 `TestAggregateCountriesExcludesEmpty`（变异：去掉「排除空国家」谓词 → 结果多出 `{unknown 1}` 桶，红）。**零迁移**（`click_events.country` 000001 就有） |
+| **N6-1** | 自定义域名：数据模型 + 按域缓存键 + `Host` 定位（M5-3 前半） | ✅ | `0456154` | 迁移 `000006`（`domains` 表 + `links.domain_id` 可空）；新增 `internal/pkg/hostname`（去端口 / 去尾点 / 转小写）；跳转按 `Host` 定位域，缓存键升到 `link:v2:{域}:{code}`（域为 `-` = 默认域名）。容器级 **24/24**：跨域双向 404 隔离、`Host: A.LOCAL:8080` 也命中、真 Redis 里键确实分域。变异验证（缓存键不分域 + `sameDomain` 恒 true）→ **8/24 红**，还原后回到 24/24。**没动** `links.short_code` 的全局唯一约束 —— 那是 N6-2，见 §18 |
 
 > ✅ N1 / N2 已于 2026-09-19 推送，CI 三个 job 全绿（run `35424447615`）：
 > `backend` 54s —— 含真 PG service 上的 store 集成测试（`internal/store/postgres` **1.271s**，
@@ -63,6 +67,27 @@
 7. **IP 掩码用 CIDR 前缀写法**（`203.0.113.0/24`、`2001:db8:1234:5678::/64`），而不是
    §7 描述的「抹掉最后一段」那种 `203.0.113.x`。理由是语义不会读错：`.0` / 全零主机位容易被
    当成一台真实主机，而 `/24`、`/64` 明确表示「这是一个网段」；IPv4 与 IPv6 的展示形状也统一。
+
+8. **`geoip` 放在 `internal/store/geoip` 而不是计划里的 `internal/pkg/geoip`**（§8 M5-2）。
+   仓库自己的分层是「`internal/pkg/` = 零第三方依赖的纯工具」（「`domain` 不 import 第三方」是同一条约束的
+   延伸），而这个包带着 `oschwald/maxminddb-golang/v2`；按「外部数据源的实现放 `store/`」的惯例挪了过去，
+   顺带把两个入口（api 内嵌 worker / 独立 worker）的降级逻辑收成一处 `OpenOrDefault`。
+9. **N5 的容器级验收用的是本机已有的 `GeoLite2-Country.mmdb`，不是计划里写的 DB-IP Lite**。
+   `download.db-ip.com` 的直连在本机被拒（Python `urlopen` 403；curl 带浏览器 UA 同样被拒），
+   而两种库**格式与字段一致**（都是 MaxMind DB、都读 `country.iso_code`），所以解码路径的验证价值不变。
+   因此 README 的署名段同时写明两种数据源的要求，且仓库**不附带**任何 mmdb（`.gitignore` 挡住）。
+10. **N6-1 修掉一处计划里没有的缺陷：跨域探测会污染负缓存**（§8 M5-3 只写了「缓存键升级」）。
+    「短码全局唯一」的模型下有一条隐蔽路径：在 A 域访问一个属于 B 域的短码 → 回源查不到 →
+    `PutMissing` 写下 `link:v1:miss:{code}`；此后**在 B 域的正常访问会命中这条负缓存而 404** ——
+    负缓存不按域分，等于让「探错域名」变成一次拒绝服务。修法是键升级时**把域编进键**
+    （`link:v2:{域}:{code}`），而不是只把 `v1` 改成 `v2`；`Evict` 的入参也从 `code` 变成
+    `LinkRef{Code, DomainID}` —— 不知道域就删不掉正确的条目（worker 的 `ExpireDue` 跟着改成返回 `[]LinkRef`）。
+    做法：先用一条**红测试**把这个路径钉住（`TestCrossDomainProbeDoesNotPoisonNegativeCache`），再改实现。
+11. **`createLinkRequest` 原本没有 `domain` 字段**（N6-1 实施中发现）。
+    service 层的 `CreateInput.Domain` 一直在，但 HTTP 入参结构体里没有这个成员；而解码器**拒绝未知字段**
+    （README 的 API 说明里写着这条），所以带 `domain` 的请求会直接 422 `invalid_json` —— 看起来像
+    「参数名写错了」，实际是这个能力从接口层根本到不了。补字段 + 接线，并加 `TestCreateAcceptsDomainField`
+    断言「不能是 `invalid_json`，且未登记域名是字段级 422 `invalid_domain`」，而不是被静默忽略后创建成功。
 
 **顺带修掉的小问题**：`Input.vue` 之前把 `aria-label` 透传到外层 `<div>`，输入框本身没有可访问名
 （屏幕阅读器只念「编辑框」）。M4-1 的浏览器验收发现后改为：`class`/`style` 留给外层容器，
@@ -479,6 +504,13 @@ docker compose exec postgres dropdb -U ashen restore_check
 
 ### M5-3 自定义域名 / 分域
 
+> **实施状态**：代码侧前半已完成 —— **N6-1 / `0456154`**（数据模型 + `Host` 定位 + 按域缓存键），
+> 结果与实测见 §0 的表。后半（短码唯一约束改成按域）是 **§18 的待拍板项**。
+> 本节以下保留**原始设计意图**不改写；其中一处实施时改了：缓存键的域那一段用的是
+> **域 ID（UUID）而不是 `host`**（`link:v2:{域 UUID}:{code}`，默认域名是 `-`）——
+> 用 host 会让「同一个域的多种写法」（大小写、带端口、尾点）各自留一份缓存条目，
+> 而域名改名还要整体失效缓存；域 ID 没有这些问题，且 `Host` 的归一化仍然要做（用于查域）。
+
 - README 说「分域只需改 nginx」，实际还差数据模型：`domains(id, domain, owner_id, verified_at)` + `links.domain_id`
 - 缓存键升级 `link:v2:{host}:{code}`（正好用上键里的 `v1` 版本位；这也是为什么当初坚持给所有键带版本前缀）
 - nginx：多 `server_name` + 证书（certbot/ACME）；`PUBLIC_BASE_URL` 退化为「默认域名」，`short_url` 按链接所属域名拼
@@ -502,9 +534,10 @@ docker compose exec postgres dropdb -U ashen restore_check
 | `000002_click_event_uid` | `event_uid` + partial unique index | M2-1 | 加可空列 + 新索引，不破坏 |
 | `000003_links_tags` | `tags text[]` + GIN | M4-1 | 不破坏 |
 | `000004_click_events_page_index` | `(link_id, occurred_at DESC, id DESC)` | M4-2 | 不破坏（只加索引） |
-| `000005_links_password` | `password_hash` | **N2**（§17.2） | 不破坏：`NOT NULL DEFAULT ''` 加列，无索引；down 严格互逆 |
-| `000006_domains` | `domains` + `links.domain_id` | M5-3 | 加可空列，历史行落默认域名 |
-| `000007_orgs` | `orgs`/`memberships`/`links.org_id` | M5-4 | **破坏性**：需要回填 + 双写窗口 |
+| `000005_links_password` | `password_hash` | **N2**（§17.2）✅ | 不破坏：`NOT NULL DEFAULT ''` 加列，无索引；down 严格互逆（已实测往返两轮） |
+| `000006_domains` | `domains` + `links.domain_id` | **N6-1**（§0）✅ | 不破坏：加可空列，历史行自动落默认域名；down 严格互逆（已实测 down/up） |
+| `000007_links_domain_short_code` | 唯一约束从 `short_code` 放宽到 `(domain_id, short_code) NULLS NOT DISTINCT` | **N6-2**（§18，**待拍板**） | 写入侧不破坏（放宽约束）；但**管理端按短码定位的语义会破**（§18.2），所以它不是「加个索引」那么简单。⚠️ down 有个真实的坑：从按域唯一退回全局唯一时，若库里已存在跨域同码的行，`ADD CONSTRAINT ... UNIQUE (short_code)` 会直接失败 —— down 必须先检测并报错，而不是静默半途 |
+| `000008_orgs` | `orgs`/`memberships`/`links.org_id` | M5-4 | **破坏性**：需要回填 + 双写窗口 |
 
 **约定**：up/down 严格互逆；上线顺序永远是「先迁移、后发版」；`click_events` 是大表 —— 加列在 PG18 不重写表，但**建索引要考虑并发**：如果将来数据量大到需要 `CREATE INDEX CONCURRENTLY`，必须先实测 golang-migrate 的 postgres 驱动是否把单个迁移文件包在事务里（它在事务里会直接报错）；被包住的话就把该迁移拆成独立文件并确认驱动的行为，或把建索引挪出迁移（手工步骤 + README 记录）。
 
@@ -521,6 +554,13 @@ docker compose exec postgres dropdb -U ashen restore_check
 | `/healthz` 的 `pg_fallbacks`（可选） | 新增字段 | M3-2 |
 | 无新环境变量（除可选的 `POSTGRES_TEST_DSN` 供 store 集成测试） | — | — |
 | `POSTGRES_TEST_DSN` | 新增（**仅测试**，不是运行时配置） | **N1**（§17.1）；未设置时集成测试整体跳过 |
+| `POST /api/links` 入参 `domain` | 新增字段 | **N6-1**；必须已在 `domains` 表登记，否则 422 `invalid_domain`；不传 = 默认域名 |
+| `GET /{code}` 按请求 `Host` 定位域 | 语义 | **N6-1**；未登记的主机名按默认域名处理（不是 404） |
+| `linkDTO.domain` + `short_url` 按所属域拼 | 新增字段 + 语义 | **N6-1**；`types.ts` 同步 |
+| 缓存键 `link:v1:{code}` → `link:v2:{域}:{code}` | **键格式（跨进程契约）** | **N6-1**；api 写、worker 失效都要带域（`Evict` 收 `LinkRef`）。旧 `link:v1:*` 条目按 TTL 自愈，不发版清理 —— 但**跳转路径不再读它们**，所以上线后第一批请求会全部回源一次 |
+| 统计响应 `countries` | 新增字段 | **N5**；`types.ts` 同步；未部署库文件时是空数组（前端整块隐藏） |
+| `GEOIP_DB_PATH` | 新增环境变量 | **N5**；留空 = 一条 `INFO`，文件打不开 = 一条 `WARN`，两者都降级为 country 全空 |
+| `GEOIP_TEST_DB` | 新增（**仅测试**） | **N5**；未设置时唯一会真查库的用例 SKIP |
 
 ---
 
@@ -603,7 +643,10 @@ docker compose exec postgres dropdb -U ashen restore_check
 2. **`/metrics` 要不要做**：默认先不做；要做必须①只在内网可达②把 `metrics` 加进保留字表（理由见 §10）
    → 当前状态：未做。
 3. **GeoIP 用哪份数据**：GeoLite2（需账号 + 署名）还是 DB-IP Lite（CC-BY）？
-   → 当前状态：**未定**，这是 M5-2 唯一的前置条件（代码侧只差 mmdb + 解析）。
+   → 当前状态：**已实现（N5 / `021277c`），两条路都支持** —— 代码只认「MaxMind DB 格式 + `country.iso_code`」，
+   两个库的格式与字段一致，所以这从来不是非此即彼的选择。README 的署名段**同时**写明两种数据源的要求
+   （DB-IP 走 CC BY 4.0 需署名；GeoLite2 按其许可同样需署名），仓库不附带任何 mmdb。
+   本机验收实际用的是 `GeoLite2-Country.mmdb`（偏离第 9 条：DB-IP 直连被拒）。
 4. **短码回收**：默认不回收（见 §13），若你要回收，我按 partial unique index 方案做并补迁移与测试
    → 当前状态：未做（不回收）。
 5. **明细页的 IP**：默认只返回掩码；若你要完整 IP（排障场景），我加一个「仅所有者可见」的开关并写进 README 的数据可见性说明
@@ -622,12 +665,12 @@ docker compose exec postgres dropdb -U ashen restore_check
 
 ### 16.1 M5 的开工前置条件（内容与验收见 §8）
 
-| 批次 | 迁移 | 前置条件 |
-| --- | --- | --- |
-| **M5-1 密码保护** | `000005_links_password` | **无** —— 四个大件里唯一可以立刻开工的 |
-| **M5-2 GeoIP** | 无（`click_events.country` 已预留） | **必须先定数据源**（§15 第 3 条） |
-| **M5-3 自定义域名** | `000006_domains` | 需要真实域名与证书（certbot / ACME） |
-| **M5-4 多租户** | `000007_orgs`（**破坏性**，需回填 + 双写窗口） | 计划里唯一建议「先别做」（§8 结论），等真实多人协作需求 |
+| 批次 | 迁移 | 前置条件 | 状态（2026-09-19 夜） |
+| --- | --- | --- | --- |
+| **M5-1 密码保护** | `000005_links_password` | **无** —— 四个大件里唯一可以立刻开工的 | ✅ **N2 / `566aa2b`** |
+| **M5-2 GeoIP** | 无（`click_events.country` 已预留） | 数据源（§15 第 3 条） | ✅ **N5 / `021277c`** —— 两种库皆可，不是非此即彼 |
+| **M5-3 自定义域名** | `000006_domains` | 真上线需要域名与证书（certbot / ACME），但**本机验收不需要**：`curl -H 'Host: a.local'` 即可 | 代码侧前半 ✅ **N6-1 / `0456154`**；后半（短码唯一约束按域）**待拍板 §18** |
+| **M5-4 多租户** | `000008_orgs`（**破坏性**，需回填 + 双写窗口） | 计划里唯一建议「先别做」（§8 结论），等真实多人协作需求 | ⏸ 不做 |
 
 ### 16.2 计划里标注「可选 / 有需要再做」的
 
@@ -652,9 +695,20 @@ docker compose exec postgres dropdb -U ashen restore_check
    是有人在真浏览器里看了一眼才暴露的（见 README「六条踩过的坑」第 6 条）。
    补法：把 Playwright / Puppeteer 引进 CI（约 +1–2 分钟），或至少把版式断言固化成
    随仓库入库的可重复脚本。
+   → **已实施（N4 / `0464754`）**：选了后一条 —— `frontend/e2e/` 入库（`cdp.mjs` / `harness.mjs` /
+   `detail-page.mjs` / `password-gate.mjs` / `browser-check.mjs`），**零 npm 依赖**（Node 内置 `fetch` +
+   `WebSocket` 直连 CDP，自己探 `CHROME_BIN`），CI 里用 runner 自带的 `google-chrome`，挂在 `smoke` job 上。
+   没引 Playwright 是因为它要下浏览器（约 +1–2 分钟）而这里要守的是「版式没歪」这种几何断言，
+   用不着它的选择器与追踪能力。踩到的坑：Chrome 的临时 profile 有几千个文件，
+   本机沙箱的批量删除守卫会把整个进程带走（连汇总都来不及打印）—— 改成不删、交系统临时目录回收。
 3. **前端零单测**：只有 typecheck / lint / build 三道门，没有 vitest 用例。
    `splitTags`、`describeClient`、`formatDateTimeSeconds`、`truncateMiddle` 都是纯函数，
    测起来成本很低。
+   → **已实施（N3 / `9071d62`）**：vitest 接进 `frontend`，31 个用例；顺带把在这两个组件里
+   **逐字重复**的 `splitTags` 提到 `src/utils/tags.ts`（行为逐字保持，只在 `ShortenForm.vue` 里
+   把一次 `splitTags(tags.value)` 复用成局部变量，避免一次提交里调两遍）。
+   有价值的一处：变异验证**第一次是失败的** —— 把 `tags` 的 `filter(length > 0)` 改成 `> 1`，
+   用例全绿，因为我的用例里没有一个单字符标签。这说明「写了测试」与「测试能抓住这个改动」是两件事。
 
 ### 16.4 建议的下一步（已选定，2026-09-19）
 
@@ -674,11 +728,13 @@ docker compose exec postgres dropdb -U ashen restore_check
 | 想了解 | 看哪 |
 | --- | --- |
 | 已完成到哪一步（12 个批次 + 实测验收 + commit） | §0 |
-| **下一批次 N1 / N2 的完整规格（落点 / SQL / 验收 / commit 边界）** | **§17** |
+| **N1 / N2 的完整规格（落点 / SQL / 验收 / commit 边界）** | §17（两个批次均已落地） |
+| **N3–N6-1 的批次记录（含 11 条偏离）** | **§0** |
+| **N6-2（短码唯一约束按域）的决策点 —— 待拍板** | **§18** |
 | M5 各批次的落点、契约、验收标准 | §8 |
 | 明确不做的事及理由 | §13 |
 | 需要拍板的六个点与当前状态 | §15 |
-| 迁移与契约变更台账（含未实施的 000005–000007） | §9 |
+| 迁移与契约变更台账（000002–000006 已实施；000007–000008 未实施） | §9 |
 | 实测验收记录（①–⑪）、设计取舍与踩过的坑 | `README.md` 的「验收记录」「已知限制」「六条踩过的坑」 |
 
 ---
@@ -951,19 +1007,102 @@ cd backend ; go run ./cmd/smoke -base http://localhost:8080 -expect-spa     # �
 
 ---
 
-### 17.3 做完这两个批次之后还剩什么
+### 17.3 这三个批次做完之后还剩什么（2026-09-19 夜 更新）
 
-- **16.3-2 浏览器级验收进 CI**：无头 Chrome + jsQR 那套脚本仍在 `.workbuddy/tmp/`（未入库），
-  「画布不溢出容器」这类版式断言只有人在本机看。补法：把版式断言固化成随仓库入库的可重复脚本，
-  或在 CI 里引 Playwright / Puppeteer（约 +1–2 分钟）。
-- **16.3-3 前端零单测**：`splitTags`、`describeClient`、`formatDateTimeSeconds`、`truncateMiddle`
-  都是纯函数，vitest 成本很低。
-- **M5 剩下的三件**：M5-2 GeoIP（**先拍 §15 第 3 条：数据源**）、M5-3 自定义域名（需真实域名与证书）、
-  M5-4 多租户（计划里唯一建议「先别做」）。
-- **§15 的六个待拍板项**：只有第 3 条（GeoIP 数据源）是硬前置，其余都已按默认实现。
+N1 / N2 已完成（`da6731d` / `566aa2b`），16.3 的三条缺口也全部补齐：
+
+- ~~**16.3-2 浏览器级验收进 CI**~~ → **已完成（N4 / `0464754`）**：`frontend/e2e/` 入库并挂上 `smoke` job，
+  19 项（含二维码的 4 条版式断言）每次推 main 都真跑。**代价说清楚**：挂 `smoke` 意味着 PR 不跑浏览器验收
+  —— 这是「`docker compose up -d --build` 要几分钟」的必然结果，不是漏项。
+- ~~**16.3-3 前端零单测**~~ → **已完成（N3 / `9071d62`）**：vitest 31 个用例进 CI。
+- **M5 只剩两件**：
+  - **M5-2 GeoIP** → **已完成（N5 / `021277c`）**，数据源按 `DB-IP Lite` / `GeoLite2` 二者皆可（偏离第 9 条）。
+  - **M5-3 自定义域名** → **代码侧完成前半（N6-1 / `0456154`）**：数据模型 + `Host` 定位 + 按域缓存键都就位；
+    后半「短码唯一约束改成按域」是 **§18 的待拍板项**。真上线另需在 nginx 加 `server_name` 与证书（配置工作，不改代码）。
+  - **M5-4 多租户** → 仍是计划里唯一建议「先别做」的大件（§8 结论），等真实多人协作需求。
+- **§15 的六个待拍板项**：现在只剩第 3 条（GeoIP 数据源）在事实上被定成了「两种库都支持」，
+  其余五条都已按默认实现且写进 README。
 - ~~还欠一次 CI 验证~~：已完成 —— run `35424447615` 三个 job 全绿，`backend` 里
   `internal/store/postgres` 跑了 **1.271s**（真 PG，不是跳过），`smoke` **27 / 27**。
+  ⚠️ **但 N3–N6-1 这四个批次还没有经过一次 CI 验证**（都只在本机跑过门禁）——
+  推上去之后要确认三件事：`frontend` job 的 `pnpm test` 能过（新增了 vitest 依赖）、
+  `smoke` job 里 `frontend/e2e/` 真能在 runner 自带的 Chrome 上跑起来（本机用 `CHROME_BIN` 探测）、
+  以及 `backend` job 的集成测试在加了 `000006` 之后仍全绿。
 
 ---
 
+---
 
+## 18. N6-2 的决策点：短码唯一约束要不要改成按域（**待拍板**）
+
+**N6-1 已经完成的部分**：`domains` 表、`links.domain_id`、`Host` 归一化与按域定位、
+按域分开的缓存键、`short_url` 按所属域拼。**唯一没动的是 `links.short_code` 的全局唯一约束** ——
+也就是说，现在**同一个短码在两个域下不能共存**（第二条会被 `ConflictError` 挡掉）。
+
+### 18.1 要改的话，改的是什么
+
+```sql
+-- 000007（示意，尚未实施）
+ALTER TABLE links DROP CONSTRAINT links_short_code_key;
+CREATE UNIQUE INDEX links_domain_short_code_key
+    ON links (domain_id, short_code) NULLS NOT DISTINCT;   -- ⚠️ 这四个字不能省
+```
+
+**`NULLS NOT DISTINCT` 不能省，这不是风格问题**（本机 PG 18 实测）：
+
+| 写法 | 插两条 `(NULL, 'sale')` | 结果 |
+| --- | --- | --- |
+| `UNIQUE (domain_id, short_code)` | 两条**都插进去了** | 默认域名（`domain_id IS NULL`）下可以出现**任意多个同码短链** —— 比不改还糟 |
+| `UNIQUE NULLS NOT DISTINCT (domain_id, short_code)` | 第二条被拒：`duplicate key value violates unique constraint` | 默认域名也真的按域唯一 |
+
+原因是 SQL 的唯一约束把每个 NULL 视作互不相等，而**默认域名的行恰好全是 NULL** ——
+也就是说不加那四个字，这次迁移保护的恰好是「自定义域名」，放过的是「默认域名」，
+而默认域名是绝大多数短链所在的地方。
+
+### 18.2 真正的代价不在 SQL，在管理端
+
+现在**所有管理端接口都按短码定位**（README 的 API 表）：
+
+| 接口 / 键 | 定位方式 |
+| --- | --- |
+| `GET` / `PATCH` / `DELETE` `/api/links/{code}` | 短码 |
+| `GET /api/links/{code}/stats` | 短码 |
+| `GET /api/links/{code}/clicks` | 短码 |
+| `POST /api/links/{code}/claim` | 短码 |
+| `clicks:cnt:{code}`（待同步增量） | 短码 |
+
+短码一旦只在域内唯一，`/api/links/{code}` 就**有歧义**（同码两条，返回哪条？）。三条出路：
+
+1. 给这些接口加 `?domain=`（默认域可省略）；
+2. 路径改成 `/api/domains/{domain}/links/{code}`；
+3. 让管理端仍按全局唯一定位 —— 但那等于要求短码事实上全局唯一，也就是**不做这件事**。
+
+无论 1 还是 2，都是**破坏性 API 变更**：`frontend/src/api/` 全部要跟着改，
+`cmd/smoke` 与 `frontend/e2e/` 里每一处 URL 也要改，`TestCreateAcceptsDomainField` 这类用例的前提会变。
+
+### 18.3 三个选项
+
+| 选项 | 得到什么 | 付出什么 |
+| --- | --- | --- |
+| **A. 不做（我的建议）** | 零风险。当前语义已经在**三处**写死并注释：`LinkRepository.GetByCode` 的注释、README 的 `links` 数据模型行、N6-1 的验收断言（跨域双向 404） | 「`a.com/sale` 与 `b.com/sale` 指向不同目标」这个能力没有 |
+| **B. 做，管理端加 `?domain=`** | 路径形状不变，默认域可省略 ⇒ 老 URL 不破 | 「有时必须传、有时不用」；参数漏传会静默落到默认域（而结果看起来是成功的）；12 处调用点 + 前端 + 冒烟 + 浏览器验收都要动 |
+| **C. 做，路径改成 `/api/domains/{domain}/links/{code}`** | 语义最干净（资源层级与数据模型一致） | 所有管理端 URL 都变；默认域名在路径里怎么表达需要额外约定（`/api/links/{code}` 与 `/api/domains/_/links/{code}` 并存？） |
+
+**我建议 A**，理由不是「改动大」而是**收益不成立**：
+「同一个短码在两个域下指向不同目标」听起来像个需求，但它真正的场景通常是
+「同一个目标页在多个域下各有一个短码」—— 那个用两个短码就能表达，不需要共享同一个 code。
+而共享 code 会带来一条**长期的语义负担**：管理端、计数键、缓存的「短码」到底指哪一条，
+此后每一处都要停下来想一想。这也正是 N6-1 把 `GetByCode` 与 `GetByCodeInDomain`
+**拆成两个方法**的原因（管理端按短码、跳转必须按域）—— 做了 N6-2 之后，这两个方法的区别就没有意义了。
+
+### 18.4 如果你要 B 或 C，我的实施边界
+
+单开一批（`N6-2`），边界如下：
+
+- 迁移 `000007`：`UNIQUE NULLS NOT DISTINCT (domain_id, short_code)`（PG 15+ 特性，本项目 PG 18 实测可用）
+- 短码生成的冲突重试改成「**域内**冲突才重试」；**保留字校验不变** —— 保留字是跨域的，
+  `api` 在任何域下都不能当短码（否则 `a.com/api` 与 `b.com/api` 会一个 404 一个跳转）
+- 管理端所有按短码定位的调用点改成 `(域, 短码)` 二元组（`Update` / `SoftDelete` / `Claim` / `Stats` / 明细）
+- 验收：「同 code 在两个域下各建一条 → 各自跳自己的目标；管理端按 `?domain=` 分别拿到两条」，
+  并且**补一条反向断言**：同一个域内重复短码仍然必须被拒（否则这次迁移就白做了）
+- 变异验证：把 `NULLS NOT DISTINCT` 去掉 → 「默认域名下同码被拒」这条断言必须变红
