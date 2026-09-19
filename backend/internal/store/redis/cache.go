@@ -41,6 +41,9 @@ type cachedLinkWire struct {
 	Title     string     `json:"title,omitempty"`
 	Status    int16      `json:"status"`
 	ExpiresAt *time.Time `json:"expires_at,omitzero"`
+	// PasswordProtected 只记「有没有口令」；摘要留在 PG 里，缓存里不放（见 domain.CachedLink）。
+	// 加字段是兼容变更（老条目解出来是 false）；禁的是改名。
+	PasswordProtected bool `json:"password_protected,omitzero"`
 }
 
 // Get 用一次 MGET 同时探测正负缓存。三种结果：
@@ -86,6 +89,8 @@ func (c *Cache) Put(ctx context.Context, link *domain.CachedLink, ttl time.Durat
 		Title:     link.Title,
 		Status:    int16(link.Status),
 		ExpiresAt: link.ExpiresAt,
+
+		PasswordProtected: link.PasswordProtected,
 	})
 	if err != nil {
 		return fmt.Errorf("store.redis: encode link cache %q: %w", link.ShortCode, err)
@@ -143,6 +148,8 @@ func (w cachedLinkWire) toDomain() (*domain.CachedLink, error) {
 		Title:     w.Title,
 		Status:    domain.LinkStatus(w.Status),
 		ExpiresAt: w.ExpiresAt,
+
+		PasswordProtected: w.PasswordProtected,
 	}, nil
 }
 

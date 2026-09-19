@@ -146,6 +146,9 @@ type CreateInput struct {
 	ExpiresAt *time.Time
 	// Tags 是可选标签（会在服务层校验并统一小写）。
 	Tags []string
+	// Password 是可选访问口令**明文**：服务层校验强度后只把 bcrypt 摘要落库。
+	// 明文只活在本函数内，不落日志、不进缓存、不回响应。
+	Password string
 	// OwnerID 非空表示登录用户创建。
 	OwnerID *uuid.UUID
 	// ClientIP 记录创建者 IP，用于风控排查。
@@ -203,6 +206,11 @@ func (s *Shortener) Create(ctx context.Context, in CreateInput) (*CreateResult, 
 		return nil, err
 	}
 
+	passwordHash, err := normalizeLinkPassword(in.Password)
+	if err != nil {
+		return nil, err
+	}
+
 	var manageKey string
 	var keyHash []byte
 	if in.OwnerID == nil {
@@ -217,10 +225,12 @@ func (s *Shortener) Create(ctx context.Context, in CreateInput) (*CreateResult, 
 		Title:     title,
 		OwnerID:   in.OwnerID,
 		KeyHash:   keyHash,
-		Status:    domain.LinkStatusActive,
-		ExpiresAt: expiresAt,
-		Tags:      tags,
-		CreatedIP: in.ClientIP,
+
+		PasswordHash: passwordHash,
+		Status:       domain.LinkStatusActive,
+		ExpiresAt:    expiresAt,
+		Tags:         tags,
+		CreatedIP:    in.ClientIP,
 	}
 
 	code := strings.TrimSpace(in.CustomCode)
@@ -346,6 +356,31 @@ func (s *Shortener) resolveFromDB(ctx context.Context, code string) (*domain.Lin
 	return link, nil
 }
 
+// VerifyPassword 校验某条短链的访问口令（只给 POST /{code} 用）。
+//
+// 与跳转路径刻意不同：这里走**库读**而不是缓存 —— 缓存里只存「有没有口令」的布尔，
+// 摘要始终留在 PG（Redis 转储泄露不该 enable 离线爆破）。代价是每次解锁多一次库读，
+// 而这条路径有按 IP 的限流兜着，本来也不是热路径。
+//
+// 返回值：不存在/已删除 → domain.ErrNotFound；已停用/已过期 → domain.ErrGone；
+// 口令不对 → domain.ErrUnauthorized；**没设口令 → nil**（无需解锁）。
+func (s *Shortener) VerifyPassword(ctx context.Context, code, plain string) error {
+	link, err := s.links.GetByCode(ctx, code)
+	if err != nil {
+		return err
+	}
+	if err := link.Redirectable(time.Now()); err != nil {
+		return err
+	}
+	if !link.HasPassword() {
+		return nil
+	}
+	if !CheckLinkPassword(link.PasswordHash, plain) {
+		return fmt.Errorf("service.shortener: unlock %q: %w", code, domain.ErrUnauthorized)
+	}
+	return nil
+}
+
 // Get 读取短链详情（管理端使用，不校验权限，由调用方先做鉴权）。
 func (s *Shortener) Get(ctx context.Context, code string) (*domain.Link, error) {
 	return s.links.GetByCode(ctx, code)
@@ -414,6 +449,14 @@ func (s *Shortener) Update(ctx context.Context, code string, patch domain.LinkPa
 			tags = []string{}
 		}
 		patch.Tags = &tags
+	}
+	if patch.PasswordHash != nil {
+		// 空串 = 清除口令；非空则校验强度并摘要化。明文到此为止。
+		hash, err := normalizeLinkPassword(*patch.PasswordHash)
+		if err != nil {
+			return nil, err
+		}
+		patch.PasswordHash = new(hash)
 	}
 
 	link, err := s.links.Update(ctx, code, patch)
@@ -508,6 +551,8 @@ func (s *Shortener) putCache(ctx context.Context, link *domain.Link) {
 		Title:     link.Title,
 		Status:    link.Status,
 		ExpiresAt: link.ExpiresAt,
+		// 缓存里只带「有没有口令」这一个布尔，摘要不出库（见 domain.CachedLink）
+		PasswordProtected: link.HasPassword(),
 	}
 	if err := s.cache.Put(ctx, entry, ttl); err != nil {
 		slog.Warn("回填短码缓存失败", "code", link.ShortCode, "err", err)
@@ -573,7 +618,8 @@ func (s *Shortener) drain(ctx context.Context) {
 }
 
 // cachedToLink 把缓存条目转成只含跳转所需字段的 Link。
-// 注意 OwnerID / KeyHash 一定是空 —— 缓存里本来就没有它们。
+// 注意 OwnerID / KeyHash / PasswordHash 一定是空 —— 缓存里本来就没有它们；
+// 口令只以 PasswordProtected 这一个布尔的形式出现在跳转路径上。
 func cachedToLink(entry *domain.CachedLink) *domain.Link {
 	return &domain.Link{
 		ID:        entry.ID,
@@ -582,6 +628,8 @@ func cachedToLink(entry *domain.CachedLink) *domain.Link {
 		Title:     entry.Title,
 		Status:    entry.Status,
 		ExpiresAt: entry.ExpiresAt,
+
+		PasswordProtected: entry.PasswordProtected,
 	}
 }
 

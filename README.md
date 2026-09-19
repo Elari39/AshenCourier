@@ -166,15 +166,23 @@ Browser ──┬─ /api/*         ─┐
 | 2 | POST | `/api/auth/register` | — | 注册，返回 user + token |
 | 3 | POST | `/api/auth/login` | — | 登录（限流 20 次 / 10 分钟 / IP） |
 | 4 | GET | `/api/auth/me` | JWT | 当前用户 |
-| 5 | POST | `/api/links` | 可选 JWT | 创建短链；匿名会返回一次性 `manage_key`（限流 10 次 / 分钟 / IP）。可选 `tags`（≤10 个、每个 ≤32 字符） |
+| 5 | POST | `/api/links` | 可选 JWT | 创建短链；匿名会返回一次性 `manage_key`（限流 10 次 / 分钟 / IP）。可选 `tags`（≤10 个、每个 ≤32 字符）与 `password`（≥8 位，只落 bcrypt 摘要） |
 | 6 | GET | `/api/links` | JWT | 我的链接列表，游标分页 `?limit=20&cursor=&q=&tag=`（`tag` 按小写比较，走 GIN 索引） |
 | 7 | GET | `/api/links/{code}` | JWT 或 Key | 详情（无权限一律 404，不泄露资源是否存在） |
-| 8 | PATCH | `/api/links/{code}` | JWT 或 Key | 改 `target_url` / `title` / `tags` / `status` / `expires_at`（改后主动失效缓存）；`tags: []` 表示清空标签 |
+| 8 | PATCH | `/api/links/{code}` | JWT 或 Key | 改 `target_url` / `title` / `tags` / `status` / `expires_at` / `password`（改后主动失效缓存）；`tags: []` 表示清空标签，`clear_password: true` 表示清除口令（`password` 传空串是 422） |
 | 9 | DELETE | `/api/links/{code}` | JWT 或 Key | 软删除（`status=3`）+ 删缓存 |
 | 10 | GET | `/api/links/{code}/stats?days=30` | JWT 或 Key | 统计聚合 |
 | 11 | POST | `/api/links/{code}/claim` | JWT + Key | 把匿名短链认领到账号下 |
-| 12 | GET | `/{code}` | — | **302 跳转**（不在 `/api` 下） |
+| 12 | GET | `/{code}` | — | **302 跳转**（不在 `/api` 下）；带口令且未解锁时改为 **200 口令页**（HTML，**不计点击**） |
 | 13 | GET | `/api/links/{code}/clicks?limit=20&cursor=&days=30&device=` | JWT 或 Key | 点击明细，`(occurred_at, id)` keyset 分页（**时间倒序**）；`device` 取 `desktop` / `mobile` / `tablet` / `bot` / `unknown`（与分布口径一致）。**IP 只回掩码网段**：IPv4 → `/24`、IPv6 → `/64` |
+| 14 | POST | `/{code}` | — | **口令校验**（表单 `password`）：正确 → **303** 回 `GET /{code}` 并下发解锁 cookie；错误 → **401** 重新渲染口令页。两者都**不计点击**（计点击的是随后那个 GET）。限流 20 次 / 10 分钟 / IP |
+
+**访问口令**（`POST /{code}`）
+
+- 摘要用 **bcrypt cost 12** 存在 `links.password_hash`，**绝不进缓存、绝不回响应**：跳转路径只读缓存里的「有没有口令」这一个布尔（`linkDTO.password_protected`，`omitzero`，缺席即「不需要口令」）
+- 比对只在被限流的 `POST /{code}` 上做一次**库读**（缓存里没有摘要，也不该有）
+- 解锁 cookie 名 `ac_unlock`，值把短码装进签名体（HMAC-SHA256，子密钥由 `JWT_SECRET` 域分离派生），因此「A 链的解锁」在 B 链上一律无效；`HttpOnly` + `SameSite=Lax` + `Path=/`，**站点是 https 时**才加 `Secure`（写死它会让 `http://localhost:8080` 永远解锁不了）。一个浏览器只记一条链接的解锁状态
+- 解锁后 **303 而不是 302**：303 让浏览器改用 GET 去取，于是解锁本身不计点击、也不会刷新重放提交
 
 **鉴权方式**
 
@@ -326,6 +334,11 @@ POSTGRES_TEST_DSN='postgres://ashen:ashen@localhost:5432/ashen_test?sslmode=disa
 ⚠️ 库名**必须以 `_test` 结尾**：准备阶段会 `DROP SCHEMA public CASCADE` 再按序重放全部
 迁移，护栏就是为了不让它落到开发库上。CI 里由 `backend` job 的 postgres service 提供，
 所以每次 PR 都会真跑一遍。
+
+⚠️ 顺带一提：`docker-compose.dev.yml` 与生产形态的 `docker-compose.yml` **共用同一个
+compose 项目名**，两个文件里的 `postgres` 是同一个容器名。所以「起一个 dev 的 PG 来跑集成测试」
+会把正在跑的 postgres 容器换成 dev 定义（连带换掉数据卷）—— 跑完用 `docker compose up -d`
+把生产形态拉回来，别在只跑着 dev PG 的状态下调试主栈。
 
 ### 关于 `frontend/.npmrc` 的镜像源
 
@@ -606,7 +619,8 @@ MVP 有意不做的部分：
 | --- | --- |
 | 自动抓取目标页标题 | 会引入 SSRF 风险，标题由用户手填 |
 | GeoIP / 国家维度统计 | 需要 mmdb 库；`click_events.country` 字段已预留，恒为 NULL |
-| 短链密码保护、A/B 分流 | P1 扩展点，数据模型已预留（二维码已在详情页提供：前端 `qrcode` 生成，无需后端接口） |
+| A/B 分流 / 短链轮换 | 需要 `link_targets` 表与「目标页归属」的新语义，收益不明（二维码已在详情页提供：前端 `qrcode` 生成，无需后端接口） |
+| 口令的重置流程 / 提示语 | 没有邮箱找回，也没有 `hint`：口令只由所有者设置与清除（忘了就重新设一条） |
 | 团队 / 多租户 / 权限体系 | 只有「匿名」与「个人账号」两种身份 |
 | Prometheus / Grafana | 只暴露 `/healthz` + JSON 结构化日志 + 关键计数 |
 | 顶点域名分离（`link.xxx`） | 单域名用保留字黑名单隔离；分域时只需改 nginx |
@@ -631,7 +645,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | `docker compose up -d --build` | 5 个容器全部 healthy（PG / Redis / backend / worker / frontend） | 本机 + CI `smoke` |
 | **容器级 ①**：`docker compose stop postgres` + 删短码缓存后跳转 | **503 + `Retry-After: 2`**，体为 `{"error":{"code":"unavailable"}}`（不是 500；缓存 `DEL` 返回 1，确认真的回源） | 本机 |
 | **容器级 ②**：`docker compose restart backend` 的关停顺序 | 日志顺序为 `收到退出信号 / 开始优雅关闭` → `统计写入队列已排空` → `api 已退出`；`dropped_clicks` 0 → 0；关停前 12 次跳转全部进流（`stream_len` 1 → 13） | 本机 |
-| **容器级 ③**：`go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | **24 / 24 通过**（含「SPA 顶级路由经 nginx 返回 HTML」） | 本机 + CI `smoke` |
+| **容器级 ③**：`go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | M0 时 **24 / 24 通过**（含「SPA 顶级路由经 nginx 返回 HTML」）；M5-1 加了 3 条口令用例后是 **27 / 27** | 本机 + CI `smoke` |
 | **容器级 ④**：明细幂等去重（M2-1） | 5 次跳转后 `count(event_uid) = count(distinct event_uid) = 5`（迁移前的 19 行历史数据为 NULL）；用**显式 Stream ID** 重投一条「已经插过」的消息 → 明细 7 → 7、该 `event_uid` 行数 1 → 1，worker 无 ERROR/WARN 且消息被 ACK | 本机 |
 | 迁移往返（M2-1） | `migrate down 1` + `up` 连续两轮无报错；`version` = 2；列与部分唯一索引恢复，之后的新跳转仍写入 `event_uid` | 本机 |
 | **容器级 ⑤**：列表口径 = 基线 + 待同步增量（M2-2） | 停掉 worker 后跳转 4 次：PG 基线仍 `0`、Redis 增量 `4`，而 `GET /api/links` 的 `click_count` = **4**，与详情 `total_clicks` 相等；恢复 worker 后基线刷成 `4`、增量键清空、列表仍为 `4`；把 Redis 停掉时列表仍 **200**（退回纯基线，不 5xx） | 本机 |
@@ -644,6 +658,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「六条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | **集成测试 ⑫**：store 层迁移与 SQL（N1 / 自动化缺口 16.3-1） | 带 `POSTGRES_TEST_DSN` 时 14 个用例全绿（迁移形状与索引清单 / links 往返 / Update 的三种语义 / 与权威 SQL 逐项比对的 keyset 两处 / `tags @> ARRAY[...]` 走 `links_tags_gin` / `event_uid` 幂等 / 聚合的 UTC 日界 / 计数累加 / 过期扫描）；不带 DSN 时 9 个集成用例全部 SKIP、整包仍绿。**变异验证**：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → 报 `42P10 no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → 报 `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` | 本机（PG 18.6 容器）+ CI `backend` |
+| **容器级 ⑬**：短链访问口令（M5-1 / N2） | 建带口令的短链 → `password_protected=True`；库里 `password_hash` 是 `$2a$12$…`（60 字符，且 `= 'smoke-pass-9f3a'` 为 `f`）。未解锁 `GET /{code}` = **200 + text/html** 且 `total_clicks` 仍 0；错误口令 = **401** 且 `total_clicks` 仍 0；正确口令 = **303 + Set-Cookie**（`HttpOnly` / `SameSite=Lax` / `Path=/`，http 下不带 `Secure`）；带 cookie 的 GET = **302**，`total_clicks` = **1**、`click_events` = **1**（解锁那次没被重复计）；`clear_password` 后立刻 302（缓存被主动失效）。迁移 000005 往返两轮：`down 1` 后列消失、`up` 后回来，无报错且之后新跳转仍 302。冒烟 **27 / 27**（三条口令用例逐条 ✓）。浏览器侧（无头 Chrome + CDP）：创建表单展开高级选项后有「访问口令」；详情页显示「受口令保护」徽章，编辑面板有「访问口令」输入与「清除口令」按钮；短链未解锁渲染口令页、输错显示「口令不对，请再试一次。」、输对**真的落到目标地址** | 本机（Docker + 无头 Chrome） |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 

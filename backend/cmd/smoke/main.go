@@ -4,7 +4,7 @@
 // 而 Go 程序跨平台且能做真正的 JSON 断言。
 //
 // 覆盖：健康检查 → 匿名创建 → 302 跳转 → 统计收敛 → 鉴权边界 →
-// 修改/删除 → 保留字与开放重定向防护 → 注册/登录 → 认领 → 分页 → 限流。
+// 修改/删除 → 保留字与开放重定向防护 → 访问口令 → 注册/登录 → 认领 → 分页 → 限流。
 //
 // 用法：
 //
@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -157,6 +158,52 @@ func (s *suite) do(ctx context.Context, method, path string, body any, headers m
 		fmt.Printf("      [%s %s] → %d %s\n", method, path, out.status, truncate(string(data), 200))
 	}
 	return out, nil
+}
+
+// postForm 发一个 application/x-www-form-urlencoded 的 POST。
+//
+// 口令页是**原生表单提交**而不是 JSON，这条路径必须按浏览器的形态测；
+// 用 s.do 会带上 application/json，后端就读不到 password 字段了。
+func (s *suite) postForm(ctx context.Context, path string, form url.Values) (*resp, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.base+path, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("构造请求: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	raw, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer raw.Body.Close()
+
+	data, err := io.ReadAll(io.LimitReader(raw.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("读取响应体: %w", err)
+	}
+
+	out := &resp{status: raw.StatusCode, header: raw.Header, body: data}
+	if s.verbose {
+		fmt.Printf("      [POST %s form] → %d %s\n", path, out.status, truncate(string(data), 200))
+	}
+	return out, nil
+}
+
+// unlockCookieName 必须与 handler 里的解锁 cookie 名一致。
+//
+// 刻意硬编码而不是 import internal/handler：冒烟工具是黑盒端到端，
+// 引了内部包就等于把「实现改了测试跟着改」的通道打开。
+const unlockCookieName = "ac_unlock"
+
+// unlockCookieValue 从响应的 Set-Cookie 里取出解锁凭据的 name=value 片段。
+// 交给 http.Response.Cookies() 解析，免得手撕 SameSite / Secure 这些属性。
+func unlockCookieValue(r *resp) string {
+	for _, c := range (&http.Response{Header: r.header}).Cookies() {
+		if c.Name == unlockCookieName {
+			return c.Name + "=" + c.Value
+		}
+	}
+	return ""
 }
 
 // ---- 各步骤 ----
@@ -409,6 +456,10 @@ func (s *suite) runAll(ctx context.Context) error {
 	})
 
 	customCode := "smoke-" + randomSuffix(6)
+	// 这条链接后面要用作「访问口令」的载体：口令用例一律走 PATCH，
+	// 不再新建链接 —— 创建接口是 10 次/分钟/IP，本套用例前面已经用掉 8 次，
+	// 再建几条会把最后的限流用例变成偶发红。
+	var customKey string
 	s.check("自定义短码可创建", func(ctx context.Context) error {
 		got, err := s.do(ctx, http.MethodPost, "/api/links", map[string]any{
 			"target_url":  "https://example.com/custom",
@@ -420,6 +471,16 @@ func (s *suite) runAll(ctx context.Context) error {
 		if got.status != http.StatusCreated {
 			return fmt.Errorf("期望 201，实际 %d：%s", got.status, got.body)
 		}
+		var body struct {
+			ManageKey string `json:"manage_key"`
+		}
+		if err := got.decode(&body); err != nil {
+			return err
+		}
+		if body.ManageKey == "" {
+			return errors.New("匿名创建必须返回 manage_key（口令用例要用它改这条链接）")
+		}
+		customKey = body.ManageKey
 		return nil
 	})
 
@@ -459,6 +520,117 @@ func (s *suite) runAll(ctx context.Context) error {
 		// 直连后端时是 404；经 nginx 时是 SPA 首页 200。两者都不是跳转。
 		if got.status == http.StatusFound || got.status == http.StatusGone {
 			return fmt.Errorf("期望 404 或 200，实际 %d（被短码路由吃掉了）", got.status)
+		}
+		return nil
+	})
+
+	// ---------- 6b. 访问口令（M5-1）----------
+	// 载体是上面那条 customCode 链接：口令一律通过 PATCH 设置，不新建链接
+	// （创建接口 10 次/分钟/IP，本套用例前面已经用掉 8 次）。
+	customKeyHeader := map[string]string{"X-Manage-Key": customKey}
+	const customPassword = "smoke-pass-9f3a"
+
+	s.check("PATCH 设置口令后：跳转返回 200 口令页，且不计点击", func(ctx context.Context) error {
+		got, err := s.do(ctx, http.MethodPatch, "/api/links/"+customCode, map[string]any{
+			"password": customPassword,
+		}, customKeyHeader)
+		if err != nil {
+			return err
+		}
+		if got.status != http.StatusOK {
+			return fmt.Errorf("设置口令期望 200，实际 %d：%s", got.status, got.body)
+		}
+		var body struct {
+			PasswordProtected bool `json:"password_protected"`
+		}
+		if err := got.decode(&body); err != nil {
+			return err
+		}
+		if !body.PasswordProtected {
+			return errors.New("设置口令后 password_protected 应为 true")
+		}
+
+		// 未解锁：200 + HTML 的口令页，不是 302
+		page, err := s.do(ctx, http.MethodGet, "/"+customCode, nil, nil)
+		if err != nil {
+			return err
+		}
+		if page.status != http.StatusOK {
+			return fmt.Errorf("未解锁期望 200 口令页，实际 %d", page.status)
+		}
+		if ct := page.header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			return fmt.Errorf("口令页 Content-Type=%q，期望 text/html", ct)
+		}
+		if !bytes.Contains(page.body, []byte("<form")) {
+			return errors.New("口令页里应当有口令表单")
+		}
+
+		// 口令页不是跳转：计数必须还是 0（用 stats 的 total_clicks，
+		// 它含 Redis 待同步增量；详情接口的 click_count 只有 PG 基线）
+		stats, err := s.fetchStats(ctx, customCode, customKeyHeader)
+		if err != nil {
+			return err
+		}
+		if stats.TotalClicks != 0 {
+			return fmt.Errorf("口令页不该计点击，total_clicks=%d，期望 0", stats.TotalClicks)
+		}
+		return nil
+	})
+
+	s.check("口令错误：401 且不计点击", func(ctx context.Context) error {
+		got, err := s.postForm(ctx, "/"+customCode, url.Values{"password": {"wrong-guess"}})
+		if err != nil {
+			return err
+		}
+		if got.status != http.StatusUnauthorized {
+			return fmt.Errorf("错误口令期望 401，实际 %d：%s", got.status, got.body)
+		}
+		if ct := got.header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+			return fmt.Errorf("口令错误也应当回到口令页，Content-Type=%q", ct)
+		}
+
+		stats, err := s.fetchStats(ctx, customCode, customKeyHeader)
+		if err != nil {
+			return err
+		}
+		if stats.TotalClicks != 0 {
+			return fmt.Errorf("口令错误也不该计点击，total_clicks=%d，期望 0", stats.TotalClicks)
+		}
+		return nil
+	})
+
+	s.check("口令正确：303 → 带 cookie 的 GET 302，且恰好只多一次点击", func(ctx context.Context) error {
+		got, err := s.postForm(ctx, "/"+customCode, url.Values{"password": {customPassword}})
+		if err != nil {
+			return err
+		}
+		if got.status != http.StatusSeeOther {
+			return fmt.Errorf("口令正确期望 303（让浏览器改用 GET），实际 %d：%s", got.status, got.body)
+		}
+		if loc := got.header.Get("Location"); loc != "/"+customCode {
+			return fmt.Errorf("303 的 Location=%q，期望 /%s", loc, customCode)
+		}
+
+		cookie := unlockCookieValue(got)
+		if cookie == "" {
+			return errors.New("303 响应缺少解锁 cookie")
+		}
+
+		jump, err := s.do(ctx, http.MethodGet, "/"+customCode, nil, map[string]string{"Cookie": cookie})
+		if err != nil {
+			return err
+		}
+		if jump.status != http.StatusFound {
+			return fmt.Errorf("带 cookie 跳转期望 302，实际 %d", jump.status)
+		}
+
+		// 只多一次：解锁那次不计点击，计点击的是随后这个 GET
+		stats, err := s.fetchStats(ctx, customCode, customKeyHeader)
+		if err != nil {
+			return err
+		}
+		if stats.TotalClicks != 1 {
+			return fmt.Errorf("解锁后 total_clicks=%d，期望恰好 1", stats.TotalClicks)
 		}
 		return nil
 	})

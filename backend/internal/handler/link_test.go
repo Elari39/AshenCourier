@@ -151,6 +151,9 @@ func TestBuildPatch(t *testing.T) {
 		wantCode   string
 		// wantStatusPatch 仅在 wantOK 时校验：补丁里的 status 是否被设成该值。
 		wantStatusPatch *domain.LinkStatus
+		// wantPassword 仅在 wantOK 时校验：补丁里的口令字段。handler 只透传，
+		// 摘要化发生在 service 层，所以这里看到的就是请求里那个字符串。
+		wantPassword *string
 		// wantPatchEmpty 只在「在任何字段被写入之前就拒绝」的用例上为 true。
 		// expired_link 不适用：那时 patch.Status 已经赋值，但 handler 在 ok=false 时
 		// 直接返回、不会调用 Update —— 拒绝的补丁不允许被使用，而不是不允许非空。
@@ -212,6 +215,38 @@ func TestBuildPatch(t *testing.T) {
 			req:    updateLinkRequest{Title: new("新标题")},
 			wantOK: true,
 		},
+		{
+			name:       "password 与 clear_password 同时传：422 invalid_password",
+			link:       domain.Link{ShortCode: "abc1234"},
+			req:        updateLinkRequest{Password: new("new-pass-1234"), ClearPassword: true},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   "invalid_password",
+			// 冲突检查在赋值之前：两个字段都不该进补丁
+			wantPatchEmpty: true,
+		},
+		{
+			name:       "password 传空串：422 invalid_password（清除请用 clear_password）",
+			link:       domain.Link{ShortCode: "abc1234"},
+			req:        updateLinkRequest{Password: new("")},
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   "invalid_password",
+			// 空串不接受，避免「空串 = 清除」与「不传 = 不动」两种都能清空的写法
+			wantPatchEmpty: true,
+		},
+		{
+			name:         "设置口令：透传给 service（摘要化在那一层）",
+			link:         domain.Link{ShortCode: "abc1234"},
+			req:          updateLinkRequest{Password: new("new-pass-1234")},
+			wantOK:       true,
+			wantPassword: new("new-pass-1234"),
+		},
+		{
+			name:         "clear_password：补丁里是空串（由 service 原样落库）",
+			link:         domain.Link{ShortCode: "abc1234", PasswordHash: "$2a$12$placeholder", PasswordProtected: true},
+			req:          updateLinkRequest{ClearPassword: true},
+			wantOK:       true,
+			wantPassword: new(""),
+		},
 	}
 
 	for _, tt := range tests {
@@ -248,6 +283,11 @@ func TestBuildPatch(t *testing.T) {
 			if tt.wantStatusPatch != nil {
 				if patch.Status == nil || *patch.Status != *tt.wantStatusPatch {
 					t.Errorf("patch.Status=%v，期望 %v", patch.Status, *tt.wantStatusPatch)
+				}
+			}
+			if tt.wantPassword != nil {
+				if patch.PasswordHash == nil || *patch.PasswordHash != *tt.wantPassword {
+					t.Errorf("patch.PasswordHash=%v，期望 %q", patch.PasswordHash, *tt.wantPassword)
 				}
 			}
 		})

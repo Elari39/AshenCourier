@@ -365,3 +365,50 @@ func TestListByOwnerTagFilterUsesGinIndex(t *testing.T) {
 		t.Errorf("tags @> ARRAY[...] 应当走 links_tags_gin，实际计划：\n%s", plan)
 	}
 }
+
+// TestLinkPasswordHashRoundTrip 守住 links.password_hash 的往返与清除语义。
+//
+// store 层不校验摘要格式（那是 service 的事），所以这里用一个占位摘要即可 ——
+// 要证的是「列写进去了、读出来还是它、清除之后确实是空串」。
+func TestLinkPasswordHashRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	db := testDB(t)
+	ctx := t.Context()
+	links := db.Links()
+
+	// 形状与 bcrypt 摘要一致，但内容是占位：store 不解析它
+	const hash = "$2a$12$0123456789012345678901234567890123456789012345678901234"
+
+	code := testCode(t, "it-pwh")
+	createLink(t, db, code, func(l *domain.Link) { l.PasswordHash = hash })
+
+	locked, err := links.GetByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("读取 %q: %v", code, err)
+	}
+	if locked.PasswordHash != hash {
+		t.Errorf("password_hash = %q，期望 %q", locked.PasswordHash, hash)
+	}
+	// 库读路径必须同时把「需要口令」的标志填上（缓存路径只靠它）
+	if !locked.HasPassword() || !locked.PasswordProtected {
+		t.Errorf("有摘要的链接必须 HasPassword 且 PasswordProtected：%+v", locked)
+	}
+
+	cleared, err := links.Update(ctx, code, domain.LinkPatch{PasswordHash: new("")})
+	if err != nil {
+		t.Fatalf("清除口令: %v", err)
+	}
+	if cleared.PasswordHash != "" || cleared.HasPassword() || cleared.PasswordProtected {
+		t.Errorf("清除之后不该还有口令：%+v", cleared)
+	}
+
+	// 清除后再读一次：确认落库的是空串而不是被 COALESCE 当成「不动」
+	reread, err := links.GetByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("再读 %q: %v", code, err)
+	}
+	if reread.PasswordHash != "" {
+		t.Errorf("清除后库里仍是 %q", reread.PasswordHash)
+	}
+}

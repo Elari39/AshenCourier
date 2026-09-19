@@ -32,6 +32,11 @@ type CachedLink struct {
 	Status LinkStatus
 	// ExpiresAt 为空表示永久有效。
 	ExpiresAt *time.Time
+	// PasswordProtected 表示该短链需要口令才能跳转。
+	//
+	// 缓存里**只放这一个布尔**，不放 bcrypt 摘要：Redis 转储泄露不该 enable 离线爆破，
+	// 而跳转路径只需要知道「有没有口令」。真正的比对发生在 POST /{code}（库读 + IP 限流）。
+	PasswordProtected bool
 }
 
 // LinkCache 是短码缓存的抽象，实现在 internal/store/redis。

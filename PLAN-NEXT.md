@@ -926,6 +926,14 @@ cd backend ; go run ./cmd/smoke -base http://localhost:8080 -expect-spa     # �
 | `store/redis`（改） | 线格式往返带 `password_protected`；**旧线格式（没有该字段）解出来是 false** |
 | 17.1 的集成测试（改） | `password_hash` 的 Create/Update 往返与清除 |
 
+**冒烟怎么接**：新增的三条用例挂在**已经建好的** `customCode` 链接上（用 `PATCH` 设口令），
+不新建链接 —— 创建接口是 10 次/分钟/IP，而现有 24 项里已经用掉 8 次，再建几条会把最后的限流
+用例变成偶发红。「密码页不计点击」的断言用 `stats` 的 `total_clicks`（基线 + 待同步增量），
+**不是**详情接口的 `click_count` —— 后者只有 PG 基线，worker 没刷之前恒为 0，断言会假通过。
+
+**测试耗时**：bcrypt cost 12 在 `-race` 下每次要数秒。测试里必须**共用一份摘要**（`sync.Once`）
+并且只保留「对 / 错」两次真实比对，否则 handler 包的单测会从 20s 变成 55s（实测）。
+
 **变异验证**：删掉口令闸门 ⇒ 冒烟 ① 必红；把 401 与 303 写反 ⇒ ③ 必红；把 cookie 的 `Secure`
 写死为 `true` ⇒ 本机 ⑤ 必红。
 

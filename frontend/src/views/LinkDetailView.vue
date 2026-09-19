@@ -79,6 +79,11 @@ const editTitle = ref('')
 const editTarget = ref('')
 const editTags = ref('')
 const editStatus = ref<'active' | 'disabled'>('active')
+/**
+ * 新口令输入。刻意**不回填**现有口令：后端只存 bcrypt 摘要，回填等于把摘要
+ * 送给前端；留空即「不改口令」。
+ */
+const editPassword = ref('')
 const saving = ref(false)
 const editError = ref('')
 
@@ -142,6 +147,7 @@ async function loadLink(): Promise<void> {
     editTarget.value = link.value.target_url
     editTags.value = (link.value.tags ?? []).join(', ')
     editStatus.value = link.value.status === 'disabled' ? 'disabled' : 'active'
+    editPassword.value = ''
   } catch (cause) {
     if (cause instanceof ApiError && cause.status === 404) {
       notFound.value = true
@@ -259,10 +265,13 @@ async function saveEdit(): Promise<void> {
         target_url: editTarget.value.trim(),
         tags: splitTags(editTags.value),
         status: editStatus.value,
+        // 只在填了的时候发：空串是 422（清除口令要走 clear_password）
+        ...(editPassword.value ? { password: editPassword.value } : {}),
       },
       manageKey.value,
     )
     link.value = updated
+    editPassword.value = ''
     editOpen.value = false
     toast.success('已保存')
   } catch (cause) {
@@ -277,6 +286,18 @@ async function clearExpiry(): Promise<void> {
   try {
     link.value = await linksApi.update(code.value, { clear_expires: true }, manageKey.value)
     toast.success('已改为永久有效')
+  } catch (cause) {
+    toast.error(cause instanceof ApiError ? cause.friendly : '操作失败')
+  }
+}
+
+/** 清除访问口令（与 clearExpiry 同一套路：单独一个动作，不等保存）。 */
+async function clearPassword(): Promise<void> {
+  if (!link.value) return
+  try {
+    link.value = await linksApi.update(code.value, { clear_password: true }, manageKey.value)
+    editPassword.value = ''
+    toast.success('已清除访问口令')
   } catch (cause) {
     toast.error(cause instanceof ApiError ? cause.friendly : '操作失败')
   }
@@ -375,6 +396,7 @@ onMounted(async () => {
               <span>{{ describeExpiry(link.expires_at) }}</span>
               <span>创建于 {{ formatDateTime(link.created_at) }}</span>
               <span v-if="link.anonymous">匿名创建</span>
+              <span v-if="link.password_protected">受口令保护</span>
             </div>
           </div>
 
@@ -452,8 +474,23 @@ onMounted(async () => {
                 <option value="disabled">停用（跳转返回 410）</option>
               </select>
             </div>
-            <div class="flex items-end">
+            <Input
+              v-model="editPassword"
+              label="访问口令"
+              type="password"
+              autocomplete="new-password"
+              placeholder="留空表示不改"
+              hint="至少 8 位；设置后需凭口令跳转"
+            />
+            <div class="flex items-end gap-2">
               <Button variant="secondary" @click="clearExpiry">改为永久有效</Button>
+              <Button
+                v-if="link.password_protected"
+                variant="secondary"
+                @click="clearPassword"
+              >
+                清除口令
+              </Button>
             </div>
           </div>
           <p v-if="editError" class="mt-3 text-[13px] text-error">{{ editError }}</p>

@@ -33,6 +33,8 @@ const (
 	DefaultNegativeTTL     = 60 * time.Second
 	DefaultLinkPageSize    = 20
 	DefaultMaxLinkPageSize = 100
+	// DefaultLinkUnlockTTL 是短链解锁凭据（cookie）的有效期。
+	DefaultLinkUnlockTTL = 30 * time.Minute
 )
 
 // insecureSecrets 是必须拒绝的「默认/占位」JWT 密钥，避免生产裸奔。
@@ -81,6 +83,8 @@ type Config struct {
 
 	// JWTExpiry 是登录令牌有效期。
 	JWTExpiry time.Duration
+	// LinkUnlockTTL 是短链解锁凭据的有效期（用户输一次口令后能跳转多久）。
+	LinkUnlockTTL time.Duration
 
 	// RateLimitCreatePerMin 是创建接口的每 IP 每分钟配额。
 	RateLimitCreatePerMin int
@@ -133,7 +137,8 @@ func LoadFor(role Role) (*Config, error) {
 		LinkPageSize:    DefaultLinkPageSize,
 		MaxLinkPageSize: DefaultMaxLinkPageSize,
 
-		JWTExpiry: 7 * 24 * time.Hour,
+		JWTExpiry:     7 * 24 * time.Hour,
+		LinkUnlockTTL: DefaultLinkUnlockTTL,
 
 		RateLimitCreatePerMin:   10,
 		RateLimitLoginPerWindow: 20,

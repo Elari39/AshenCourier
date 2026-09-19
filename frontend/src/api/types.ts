@@ -30,6 +30,11 @@ export interface Link {
   expires_at?: string
   /** 是否为匿名创建（未归属任何账号）。 */
   anonymous: boolean
+  /**
+   * 跳转是否需要口令。
+   * 后端只回这个布尔，**绝不回摘要**；字段为 omitzero，缺席即「不需要口令」。
+   */
+  password_protected?: boolean
   created_at?: string
   updated_at?: string
 }
@@ -151,6 +156,8 @@ export interface CreateLinkPayload {
   /** 标签：最多 10 个、每个 32 字符；后端会统一转小写。 */
   tags?: string[]
   expires_at?: string | null
+  /** 可选访问口令（至少 8 位）；留空表示不设口令。后端只落 bcrypt 摘要。 */
+  password?: string
 }
 
 /** 修改短链入参。字段缺省 = 不修改。 */
@@ -163,6 +170,10 @@ export interface UpdateLinkPayload {
   expires_at?: string | null
   /** 为 true 时把 expires_at 置空（改为永久有效）。 */
   clear_expires?: boolean
+  /** 新口令；不传表示保持原样（传空串是 422，清除请用 clear_password）。 */
+  password?: string
+  /** 为 true 时清除口令（改为无需口令）。 */
+  clear_password?: boolean
 }
 
 /** 注册入参。 */

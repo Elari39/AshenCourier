@@ -189,8 +189,13 @@ func run() error {
 		DeltaBatch:  rdb,
 		TrustProxy:  cfg.TrustProxy,
 		CORSOrigins: corsOrigins(cfg.PublicBaseURL),
-		PageSize:    cfg.LinkPageSize,
-		MaxPageSize: cfg.MaxLinkPageSize,
+
+		Unlock: service.NewLinkUnlocker(cfg.JWTSecret, cfg.LinkUnlockTTL),
+		// Secure 只在站点本身是 https 时打开：本地 http 下写死它会让解锁 cookie
+		// 直接被浏览器拒收，表现为「口令输对了也跳不过去」。
+		SecureCookies: strings.HasPrefix(cfg.PublicBaseURL, "https://"),
+		PageSize:      cfg.LinkPageSize,
+		MaxPageSize:   cfg.MaxLinkPageSize,
 		// 点击明细复用列表的分页配置：两者都是「一页 N 条」的表格，
 		// 分成两组配置只会让运维多记一个旋钮，实际也很少需要分别调。
 		ClickPageSize:    cfg.LinkPageSize,
@@ -206,6 +211,12 @@ func run() error {
 		},
 		RateLimitRedirect: httpx.RateLimitRule{
 			Scope: "redirect", Limit: cfg.RateLimitRedirectPerMin, Window: time.Minute,
+			Dimension: httpx.RateLimitByIP,
+		},
+		// 口令校验：比照 login 的 20 次 / 10 分钟防在线爆破。scope 不同 ⇒
+		// 与 login / redirect 的 Redis 键完全独立，不会互相吃配额。
+		RateLimitUnlock: httpx.RateLimitRule{
+			Scope: "unlock", Limit: cfg.RateLimitLoginPerWindow, Window: cfg.RateLimitLoginWindow,
 			Dimension: httpx.RateLimitByIP,
 		},
 		// 统计单独一条规则：scope 不同 → Redis 键独立，不会与真实跳转互相吃配额；

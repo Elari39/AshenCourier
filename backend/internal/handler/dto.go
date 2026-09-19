@@ -43,8 +43,10 @@ type linkDTO struct {
 	ClickCount int64      `json:"click_count"`
 	ExpiresAt  *time.Time `json:"expires_at,omitzero"`
 	Anonymous  bool       `json:"anonymous"`
-	CreatedAt  time.Time  `json:"created_at,omitzero"`
-	UpdatedAt  time.Time  `json:"updated_at,omitzero"`
+	// PasswordProtected 表示跳转需要口令。**只回这个布尔，绝不回摘要**。
+	PasswordProtected bool      `json:"password_protected,omitzero"`
+	CreatedAt         time.Time `json:"created_at,omitzero"`
+	UpdatedAt         time.Time `json:"updated_at,omitzero"`
 }
 
 // toLinkDTO 把领域实体转成 DTO。baseURL 由 service 统一提供，避免各处手拼。
@@ -60,8 +62,10 @@ func toLinkDTO(link *domain.Link, shortURL string) linkDTO {
 		ClickCount: link.ClickCount,
 		ExpiresAt:  link.ExpiresAt,
 		Anonymous:  link.IsAnonymous(),
-		CreatedAt:  link.CreatedAt,
-		UpdatedAt:  link.UpdatedAt,
+
+		PasswordProtected: link.HasPassword(),
+		CreatedAt:         link.CreatedAt,
+		UpdatedAt:         link.UpdatedAt,
 	}
 }
 
@@ -87,6 +91,8 @@ type createLinkRequest struct {
 	Title      string     `json:"title"`
 	Tags       []string   `json:"tags"`
 	ExpiresAt  *time.Time `json:"expires_at"`
+	// Password 是可选访问口令（明文，只在本次请求里存在）；留空表示不设口令。
+	Password string `json:"password"`
 }
 
 // updateLinkRequest 是修改短链入参。指针字段区分「没传」与「传了零值」。
@@ -98,6 +104,10 @@ type updateLinkRequest struct {
 	ClearExpires bool       `json:"clear_expires"`
 	// Tags 指向新标签集合；传 [] 表示清空，不传表示保持原样。
 	Tags *[]string `json:"tags"`
+	// Password 指向新口令；不传表示保持原样。传空串是 422（清空请用 ClearPassword）。
+	Password *string `json:"password"`
+	// ClearPassword 为 true 时清除口令（改为无需口令）。
+	ClearPassword bool `json:"clear_password"`
 }
 
 // ---- 响应体 ----

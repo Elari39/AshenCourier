@@ -36,6 +36,7 @@ func (h *linkHandler) create(w http.ResponseWriter, r *http.Request) {
 		Title:      req.Title,
 		ExpiresAt:  req.ExpiresAt,
 		Tags:       req.Tags,
+		Password:   req.Password,
 		ClientIP:   httpx.ClientIP(r, h.trustProxy),
 	}
 	if id, authed := userIDFrom(r.Context()); authed {
@@ -260,6 +261,26 @@ func (h *linkHandler) buildPatch(w http.ResponseWriter, r *http.Request, link *d
 			return patch, false
 		}
 		patch.Status = &status
+	}
+
+	if req.Password != nil && req.ClearPassword {
+		httpx.WriteError(w, r, http.StatusUnprocessableEntity, "invalid_password",
+			"password 与 clear_password 不能同时指定", "password")
+		return patch, false
+	}
+	if req.Password != nil {
+		// 空串不接受：否则「空串 = 清除」与「不传 = 不动」会变成两种都能清空的写法。
+		// 强度校验与摘要化都在 service 层（这里只管跨字段一致性）。
+		if *req.Password == "" {
+			httpx.WriteError(w, r, http.StatusUnprocessableEntity, "invalid_password",
+				"口令不能为空；清除口令请用 clear_password", "password")
+			return patch, false
+		}
+		patch.PasswordHash = req.Password
+	}
+	if req.ClearPassword {
+		// 指向空串 = 清除口令（由 service 原样落库）
+		patch.PasswordHash = new("")
 	}
 
 	if patch.IsEmpty() {

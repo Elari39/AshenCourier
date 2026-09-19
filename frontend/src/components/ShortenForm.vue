@@ -24,6 +24,7 @@ const customCode = ref('')
 const title = ref('')
 const tags = ref('')
 const expiresAt = ref('')
+const password = ref('')
 const advancedOpen = ref(false)
 
 const submitting = ref(false)
@@ -54,6 +55,7 @@ function reset(): void {
   title.value = ''
   tags.value = ''
   expiresAt.value = ''
+  password.value = ''
   formError.value = ''
   fieldErrors.value = {}
 }
@@ -88,6 +90,8 @@ async function submit(): Promise<void> {
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
       ...(splitTags(tags.value).length > 0 ? { tags: splitTags(tags.value) } : {}),
       ...(toISODateTime(expiresAt.value) ? { expires_at: toISODateTime(expiresAt.value) } : {}),
+      // 口令只在填了的时候才发：空串会被后端当成「非法口令」而不是「不设口令」
+      ...(password.value ? { password: password.value } : {}),
     }
     const result = await linksApi.create(payload)
 
@@ -134,7 +138,7 @@ async function submit(): Promise<void> {
         :aria-expanded="advancedOpen"
         @click="advancedOpen = !advancedOpen"
       >
-        {{ advancedOpen ? '收起高级选项' : '高级选项：自定义短码 / 标题 / 标签 / 有效期' }}
+        {{ advancedOpen ? '收起高级选项' : '高级选项：自定义短码 / 标题 / 标签 / 有效期 / 访问口令' }}
       </button>
       <span v-if="!isAuthenticated" class="text-[13px] text-muted-soft">匿名创建，无需注册</span>
     </div>
@@ -168,6 +172,15 @@ async function submit(): Promise<void> {
         type="datetime-local"
         :error="fieldErrors.expires_at"
         hint="留空表示永久有效"
+      />
+      <Input
+        v-model="password"
+        label="访问口令（可选）"
+        type="password"
+        autocomplete="new-password"
+        placeholder="至少 8 位"
+        :error="fieldErrors.password"
+        hint="设置后需凭口令跳转，页面不计点击"
       />
     </div>
 

@@ -76,6 +76,16 @@ type Link struct {
 	OwnerID *uuid.UUID
 	// KeyHash 是匿名管理密钥的 SHA-256；被认领后清空。
 	KeyHash []byte
+	// PasswordHash 是访问口令的 bcrypt 摘要；空串表示不设口令。
+	// 只有库读路径（store/postgres）会填它 —— 缓存里刻意不放摘要。
+	PasswordHash string
+	// PasswordProtected 表示「这条链接需要口令才能跳转」。
+	//
+	// 它与 PasswordHash 之间是一条**单向不变量**：PasswordHash 非空 ⇒ PasswordProtected 为 true。
+	// 之所以要这个冗余布尔：跳转路径只读 Redis 缓存，而缓存里不放 bcrypt 摘要
+	// （转储泄露不该 enable 离线爆破），因此缓存回填的实体只有这个标志位；
+	// 库读路径一定同时填好两者。判空一律走 HasPassword()。
+	PasswordProtected bool
 	// Status 是状态机取值。
 	Status LinkStatus
 	// ClickCount 是 PG 侧基线计数，worker 把 Redis 增量刷进来。
@@ -101,6 +111,10 @@ func (l *Link) IsExpired(now time.Time) bool {
 
 // IsAnonymous 判断是否为匿名创建的链接。
 func (l *Link) IsAnonymous() bool { return l.OwnerID == nil }
+
+// HasPassword 判断这条链接是否需要口令才能跳转。
+// 两个字段取或，理由见 PasswordProtected 的注释：库读路径填两个，缓存路径只填一个。
+func (l *Link) HasPassword() bool { return l.PasswordProtected || l.PasswordHash != "" }
 
 // Redirectable 判断该链接在给定时刻能否跳转；不能时返回对应的领域错误。
 // 返回值是 errors.Is(err, ErrNotFound) / errors.Is(err, ErrGone) 可判定的包装错误。
@@ -134,12 +148,15 @@ type LinkPatch struct {
 	ClearExpires bool
 	// Tags 指向新标签集合（空切片 = 清空）；nil 表示保持原样。
 	Tags *[]string
+	// PasswordHash 指向新的口令**摘要**（明文由 service 层摘要化后填入）；
+	// nil 表示保持原样，指向空串表示清除口令。
+	PasswordHash *string
 }
 
 // IsEmpty 判断这个 patch 是否什么都没改。
 func (p LinkPatch) IsEmpty() bool {
 	return p.TargetURL == nil && p.Title == nil && p.Status == nil &&
-		p.ExpiresAt == nil && !p.ClearExpires && p.Tags == nil
+		p.ExpiresAt == nil && !p.ClearExpires && p.Tags == nil && p.PasswordHash == nil
 }
 
 // LinkFilter 是「我的链接」列表的查询条件。

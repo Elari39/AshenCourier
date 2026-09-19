@@ -33,6 +33,7 @@ func newTestRouter(t *testing.T, links map[string]*domain.Link) http.Handler {
 		Shortener:   newTestShortener(repo),
 		Stats:       service.NewStats(repo, &stubClicks{}, stubDelta{}),
 		Health:      okProbe{},
+		Unlock:      service.NewLinkUnlocker("test-secret-0123456789", time.Hour),
 		Limiter:     nil, // 不限流：路由表用例不该被配额干扰
 		TrustProxy:  false,
 		PageSize:    20,
@@ -43,7 +44,7 @@ func newTestRouter(t *testing.T, links map[string]*domain.Link) http.Handler {
 	})
 }
 
-// TestRouterTable 用一张表钉住 README「API」一节的 13 条路由：
+// TestRouterTable 用一张表钉住 README「API」一节的 14 条路由：
 // 每条都要能被路由到（而不是 404），且鉴权层次符合文档 ——
 // 这正好挡住「改了路由忘了改文档」和「requireUser 写成 optionalAuth」两类回归。
 func TestRouterTable(t *testing.T) {
@@ -137,6 +138,11 @@ func TestRouterTable(t *testing.T) {
 			name: "12b GET /login 不被当成短码", method: http.MethodGet, path: "/login",
 			wantStatus: http.StatusNotFound,
 			why:        "保留字在 handler 内再排一次（nginx 之外的第二道保险）",
+		},
+		{
+			name: "14 POST /{code}", method: http.MethodPost, path: "/" + code,
+			wantStatus: http.StatusSeeOther,
+			why:        "口令校验入口：没设口令的链接直接 303 回 GET（计点击的是随后那个 GET，不会重复计）",
 		},
 	}
 

@@ -120,6 +120,11 @@ func (r *linkRepoFake) Update(_ context.Context, code string, patch domain.LinkP
 	if patch.Title != nil {
 		l.Title = *patch.Title
 	}
+	if patch.PasswordHash != nil {
+		// 与真实仓储（postgres）一致：落库之后 PasswordProtected 也跟着变
+		l.PasswordHash = *patch.PasswordHash
+		l.PasswordProtected = *patch.PasswordHash != ""
+	}
 	return l, nil
 }
 

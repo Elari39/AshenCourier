@@ -25,6 +25,10 @@ type Options struct {
 	Limiter domain.RateLimiter
 	// DeltaBatch 读取列表页尚未回刷进 PG 的计数增量；nil 表示列表只报 PG 基线。
 	DeltaBatch domain.ClickDeltaBatchReader
+	// Unlock 签发/校验短链访问口令的解锁凭据；nil 时带口令的链接一律不放行（fail-closed）。
+	Unlock *service.LinkUnlocker
+	// SecureCookies 为 true 时解锁 cookie 带 Secure（仅 https 部署）。
+	SecureCookies bool
 
 	// TrustProxy 为 true 时从 X-Real-IP 取客户端 IP。
 	TrustProxy bool
@@ -38,11 +42,13 @@ type Options struct {
 	ClickPageSize    int
 	MaxClickPageSize int
 
-	// 四条限流规则。
+	// 五条限流规则。
 	RateLimitCreate   httpx.RateLimitRule
 	RateLimitLogin    httpx.RateLimitRule
 	RateLimitRedirect httpx.RateLimitRule
 	RateLimitStats    httpx.RateLimitRule
+	// RateLimitUnlock 是短链口令校验的配额，防在线爆破。
+	RateLimitUnlock httpx.RateLimitRule
 }
 
 // Router 装配全部路由并套上中间件链。
@@ -61,7 +67,8 @@ type Options struct {
 //	GET    /api/links/{code}/stats
 //	GET    /api/links/{code}/clicks
 //	POST   /api/links/{code}/claim
-//	GET    /{code}          ← 302 跳转，兜底模式
+//	GET    /{code}          ← 302 跳转；带口令且未解锁时是 200 口令页
+//	POST   /{code}          ← 口令校验：成功 303 回 GET，失败 401
 //
 // 关于 /{code}：ServeMux 会优先匹配「更具体」的模式，因此 /api/... 与
 // /healthz 天然胜过 /{code}，无需手动排序。handler 内部再排一次保留字做双保险。
@@ -81,7 +88,12 @@ func Router(opts Options) http.Handler {
 		pageSize:  opts.ClickPageSize,
 		maxSize:   opts.MaxClickPageSize,
 	}
-	redirectAPI := &redirectHandler{shortener: opts.Shortener, trustProxy: opts.TrustProxy}
+	redirectAPI := &redirectHandler{
+		shortener:     opts.Shortener,
+		unlocker:      opts.Unlock,
+		trustProxy:    opts.TrustProxy,
+		secureCookies: opts.SecureCookies,
+	}
 
 	requireUser := requireAuth(opts.Auth)
 	optionalUser := optionalAuth(opts.Auth)
@@ -129,6 +141,10 @@ func Router(opts Options) http.Handler {
 	// 显式限定 GET：不加方法前缀时 POST /abc、DELETE /abc 也会命中这里
 	// 并返回 302（顺带记一次点击）。ServeMux 的 "GET" 模式顺带匹配 HEAD。
 	mux.Handle("GET /{code}", limit(opts.RateLimitRedirect)(http.HandlerFunc(redirectAPI.serve)))
+
+	// 口令校验：方法与 GET 不同，因此两条模式并存互不遮蔽。
+	// 限流按 IP 防在线爆破；scope 与 login/redirect 不同 ⇒ Redis 键独立，不会互相吃配额。
+	mux.Handle("POST /{code}", limit(opts.RateLimitUnlock)(http.HandlerFunc(redirectAPI.unlock)))
 
 	return httpx.Chain(mux,
 		httpx.Recover(opts.Logger),

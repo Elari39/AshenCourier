@@ -26,30 +26,32 @@ type LinkStore struct {
 // created_ip 用 host(...) 取：inet 的文本形式会带上掩码长度（单个地址读出来是
 // "203.0.113.7/32"），而这一列存的始终是单个地址。click_events.ip 早就做了同样的
 // 处理（见 click.go 的 clickEventColumns），这里对齐它 —— 是集成测试第一次跑就发现的。
-const linkColumns = `id, short_code, target_url, title, owner_id, key_hash, status,
+const linkColumns = `id, short_code, target_url, title, owner_id, key_hash, password_hash, status,
        click_count, expires_at, tags, coalesce(host(created_ip), ''), created_at, updated_at`
 
 // linkRow 是 links 表的一行。
 type linkRow struct {
-	id         pgtype.UUID
-	shortCode  string
-	targetURL  string
-	title      string
-	ownerID    pgtype.UUID
-	keyHash    []byte
-	status     int16
-	clickCount int64
-	expiresAt  pgtype.Timestamptz
-	tags       []string
-	createdIP  string
-	createdAt  time.Time
-	updatedAt  time.Time
+	id        pgtype.UUID
+	shortCode string
+	targetURL string
+	title     string
+	ownerID   pgtype.UUID
+	keyHash   []byte
+	// passwordHash 是访问口令的 bcrypt 摘要；空串 = 不设口令（列是 NOT NULL DEFAULT ''）。
+	passwordHash string
+	status       int16
+	clickCount   int64
+	expiresAt    pgtype.Timestamptz
+	tags         []string
+	createdIP    string
+	createdAt    time.Time
+	updatedAt    time.Time
 }
 
 // dest 返回交给 rows.Scan 的扫描目标，顺序与 linkColumns 完全一致。
 func (r *linkRow) dest() []any {
 	return []any{
-		&r.id, &r.shortCode, &r.targetURL, &r.title, &r.ownerID, &r.keyHash,
+		&r.id, &r.shortCode, &r.targetURL, &r.title, &r.ownerID, &r.keyHash, &r.passwordHash,
 		&r.status, &r.clickCount, &r.expiresAt, &r.tags, &r.createdIP, &r.createdAt, &r.updatedAt,
 	}
 }
@@ -57,18 +59,22 @@ func (r *linkRow) dest() []any {
 // toDomain 把行数据转成领域实体。
 func (r *linkRow) toDomain() *domain.Link {
 	l := &domain.Link{
-		ID:         fromPgUUID(r.id),
-		ShortCode:  r.shortCode,
-		TargetURL:  r.targetURL,
-		Title:      r.title,
-		OwnerID:    uuidPtr(r.ownerID),
-		KeyHash:    r.keyHash,
-		Status:     domain.LinkStatus(r.status),
-		ClickCount: r.clickCount,
-		Tags:       r.tags,
-		CreatedIP:  r.createdIP,
-		CreatedAt:  r.createdAt,
-		UpdatedAt:  r.updatedAt,
+		ID:        fromPgUUID(r.id),
+		ShortCode: r.shortCode,
+		TargetURL: r.targetURL,
+		Title:     r.title,
+		OwnerID:   uuidPtr(r.ownerID),
+		KeyHash:   r.keyHash,
+		// 库读路径同时填两个字段：PasswordProtected 是「缓存路径也要能回答」的冗余标志，
+		// 见 domain.Link.PasswordProtected 的注释。
+		PasswordHash:      r.passwordHash,
+		PasswordProtected: r.passwordHash != "",
+		Status:            domain.LinkStatus(r.status),
+		ClickCount:        r.clickCount,
+		Tags:              r.tags,
+		CreatedIP:         r.createdIP,
+		CreatedAt:         r.createdAt,
+		UpdatedAt:         r.updatedAt,
 	}
 	if r.expiresAt.Valid {
 		t := r.expiresAt.Time
@@ -91,9 +97,9 @@ func tagsParam(tags []string) []string {
 // Create 插入一条短链。ID 由调用方（service 层）生成，不依赖数据库默认值。
 func (s *LinkStore) Create(ctx context.Context, link *domain.Link) error {
 	const q = `
-INSERT INTO links (id, short_code, target_url, title, owner_id, key_hash,
+INSERT INTO links (id, short_code, target_url, title, owner_id, key_hash, password_hash,
                    status, click_count, expires_at, tags, created_ip, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, '')::inet, now(), now())
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, '')::inet, now(), now())
 RETURNING created_at, updated_at`
 
 	opCtx, cancel := s.db.opCtx(ctx)
@@ -106,6 +112,7 @@ RETURNING created_at, updated_at`
 		link.Title,
 		uuidParam(link.OwnerID),
 		link.KeyHash,
+		link.PasswordHash,
 		int16(link.Status),
 		link.ClickCount,
 		link.ExpiresAt,
@@ -149,6 +156,7 @@ UPDATE links SET
     status     = COALESCE($4, status),
     expires_at = CASE WHEN $5 THEN NULL ELSE COALESCE($6, expires_at) END,
     tags       = COALESCE($7, tags),
+    password_hash = COALESCE($8, password_hash),
     updated_at = now()
 WHERE short_code = $1
 RETURNING ` + linkColumns
@@ -166,12 +174,16 @@ RETURNING ` + linkColumns
 		tagsArg = new(tagsParam(*patch.Tags))
 	}
 
+	// password_hash 同理：nil → SQL NULL → 保持原值；指向空串 → 写空串 → 清除口令。
+	// patch.PasswordHash 已经在 service 层被替换成 bcrypt 摘要，这里只负责落库。
+
 	opCtx, cancel := s.db.opCtx(ctx)
 	defer cancel()
 
 	var r linkRow
 	err := s.db.pool.QueryRow(opCtx, q,
 		code, patch.TargetURL, patch.Title, statusArg, patch.ClearExpires, patch.ExpiresAt, tagsArg,
+		patch.PasswordHash,
 	).Scan(r.dest()...)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
