@@ -2,7 +2,7 @@
 # AshenCourier —— CI
 #
 # 三个 job：
-#   backend  快（~1 分钟）：gofmt / go vet / go test -race
+#   backend  快（~1 分钟）：gofmt / go vet / go test -race（含真 PG 上的 store 集成测试）
 #   frontend 快（~1 分钟）：typecheck / lint / build
 #   smoke    慢（3–5 分钟，要真起 5 个容器）：端到端冒烟 + SPA 路由断言
 #
@@ -31,11 +31,30 @@ concurrency:
 
 jobs:
   backend:
-    name: backend（fmt / vet / test -race）
+    name: backend（fmt / vet / test -race + store 集成测试）
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
+    # store 的集成测试要一个真 PG。用 Actions 的 service 容器而不是 compose：
+    # compose 里的 postgres 刻意不映射宿主端口（只 expose），宿主上的 go test 够不到它。
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_USER: ashen
+          POSTGRES_PASSWORD: ashen
+          POSTGRES_DB: ashen_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ashen -d ashen_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # 未设置时集成测试会整体跳过 —— CI 里必须设置，否则等于没跑
+      POSTGRES_TEST_DSN: postgres://ashen:ashen@localhost:5432/ashen_test?sslmode=disable
     steps:
       - uses: actions/checkout@v5
 
@@ -58,8 +77,9 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      # -race 需要 cgo；ubuntu-latest 自带 gcc，无需额外安装
-      - name: go test -race
+      # -race 需要 cgo；ubuntu-latest 自带 gcc，无需额外安装。
+      # 这一条同时跑 store 集成测试：POSTGRES_TEST_DSN 已注入；未注入时它们整体跳过。
+      - name: go test -race（含 store 集成测试）
         run: go test -race -count=1 ./...
 
   frontend:

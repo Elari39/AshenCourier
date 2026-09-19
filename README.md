@@ -307,6 +307,26 @@ pnpm lint && pnpm build
 （同时校验 Redis 计数与落库明细）→ 鉴权边界 → 修改后缓存失效 → 保留字与开放重定向防护
 → 注册/登录 → 认领 → 分页 → 限流。**用 Go 写而不是 shell**：跨平台，且能做真正的 JSON 断言。
 
+### store 层集成测试（迁移与手写 SQL）
+
+`internal/store/postgres` 的集成测试默认**整体跳过**（`t.Skip`），需要一个真 PG。
+它跑的是「迁移文件本身 + 手写 SQL 的真实行为」：迁移后的索引形状、keyset 分页在并列时间上
+不漏行不重复、`tags @> ARRAY[...]` 确实走 GIN 索引、`event_uid` 幂等去重、聚合的 UTC 日界。
+
+```bash
+# 本机用开发形态的 PG（它映射了 5432；生产形态的 compose 刻意不映射）
+docker compose -f docker-compose.dev.yml up -d postgres
+docker compose -f docker-compose.dev.yml exec postgres createdb -U ashen ashen_test   # 首次
+
+cd backend
+POSTGRES_TEST_DSN='postgres://ashen:ashen@localhost:5432/ashen_test?sslmode=disable' \
+  go test -race -count=1 ./internal/store/postgres/
+```
+
+⚠️ 库名**必须以 `_test` 结尾**：准备阶段会 `DROP SCHEMA public CASCADE` 再按序重放全部
+迁移，护栏就是为了不让它落到开发库上。CI 里由 `backend` job 的 postgres service 提供，
+所以每次 PR 都会真跑一遍。
+
 ### 关于 `frontend/.npmrc` 的镜像源
 
 `.npmrc` 里把 registry 指到了腾讯云镜像，这是实测结果而不是直觉选择 ——
@@ -352,6 +372,7 @@ pnpm lint && pnpm build
 | `WORKER_ENABLED` | `false` | `true` 时 api 进程内嵌同一套 worker 循环（本地开发用） |
 | `TRUST_PROXY` | `true` | 从 `X-Real-IP` 取客户端 IP；**不**信任 `X-Forwarded-For` |
 | `RATE_LIMIT_DISABLED` | `false` | `true` 时启动即全量放行（限流应急开关），状态见 `/healthz` 的 `rate_limit_disabled` |
+| `POSTGRES_TEST_DSN` | 空 | **只给测试用，进程不读它**：store 集成测试的 DSN，未设置时整体跳过（见「store 层集成测试」） |
 
 ### 前端（可选）
 
@@ -594,7 +615,7 @@ MVP 有意不做的部分：
 
 ## 验收记录
 
-以下都是实测结果，不是设计意图。基线快照：**2026-09-18**，Windows 本机 + Docker Desktop
+以下都是实测结果，不是设计意图。基线快照：**2026-09-18**（⑫ 起为 2026-09-19 的增量），Windows 本机 + Docker Desktop
 （Go 1.27.1 / Node 24.19.0 / pnpm 11.15.1）。
 
 「在哪跑过」一列区分**本机实测**与 **CI 实测**——两者会得出同一结论，但覆盖面不同：
@@ -622,6 +643,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑪**：二维码（M4-3） | 详情页把 `short_url` 画进 canvas（前端 `qrcode` 生成，无后端接口）。用 **jsQR 真的去扫**：页面 canvas 取回的 PNG 解码 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；点「下载二维码」落盘的 `ashencourier-{code}.png` 是 **1024×1024**，解码结果同样相等。配色为深墨 `#141413` + 暖奶油 `#faf9f5`（≈19:1，不用珊瑚色当前景），下载件用纯白底 | 本机 |
 | **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「六条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
+| **集成测试 ⑫**：store 层迁移与 SQL（N1 / 自动化缺口 16.3-1） | 带 `POSTGRES_TEST_DSN` 时 14 个用例全绿（迁移形状与索引清单 / links 往返 / Update 的三种语义 / 与权威 SQL 逐项比对的 keyset 两处 / `tags @> ARRAY[...]` 走 `links_tags_gin` / `event_uid` 幂等 / 聚合的 UTC 日界 / 计数累加 / 过期扫描）；不带 DSN 时 9 个集成用例全部 SKIP、整包仍绿。**变异验证**：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → 报 `42P10 no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → 报 `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` | 本机（PG 18.6 容器）+ CI `backend` |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 

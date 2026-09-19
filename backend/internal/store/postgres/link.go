@@ -22,9 +22,12 @@ type LinkStore struct {
 }
 
 // linkColumns 是 SELECT / RETURNING 里统一的列顺序，必须与 linkRow 的字段一一对应。
-// created_ip 用 ::text 取出来，避免 inet 类型在不同驱动版本下的扫描差异。
+//
+// created_ip 用 host(...) 取：inet 的文本形式会带上掩码长度（单个地址读出来是
+// "203.0.113.7/32"），而这一列存的始终是单个地址。click_events.ip 早就做了同样的
+// 处理（见 click.go 的 clickEventColumns），这里对齐它 —— 是集成测试第一次跑就发现的。
 const linkColumns = `id, short_code, target_url, title, owner_id, key_hash, status,
-       click_count, expires_at, tags, coalesce(created_ip::text, ''), created_at, updated_at`
+       click_count, expires_at, tags, coalesce(host(created_ip), ''), created_at, updated_at`
 
 // linkRow 是 links 表的一行。
 type linkRow struct {

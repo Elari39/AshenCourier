@@ -704,7 +704,8 @@ M4-1/M4-2 新加的 SQL（`tags @> ARRAY[...]`、`(occurred_at, id) < (...)` 的
    **不**在 `TestMain` 里直接失败 —— 否则所有不关心它的开发者与 PR 都会平白变红。
 2. **建库护栏**：连接前解析 DSN，**要求库名以 `_test` 结尾**，否则 `t.Fatal`。因为下一步是破坏性的。
 3. **破坏性准备**：`DROP SCHEMA public CASCADE` + `CREATE SCHEMA public`，然后按文件名排序执行
-   `backend/migrations/*.up.sql`（路径用 `filepath.Join("..", "..", "migrations")`；`go test` 的 cwd
+   `backend/migrations/*.up.sql`（路径用 `filepath.Join("..", "..", "..", "migrations")` —— 包目录是
+   `backend/internal/store/postgres`，向上三层才回到 `backend`；`go test` 的 cwd
    就是包目录）。这一步**顺带把迁移文件本身纳入了回归**，正是 16.3-1 想要的。
 4. **隔离与并行**：连接池 `MaxConns: 8`；用例之间靠数据隔离（每个用例自己生成 owner uuid 与短码），
    因此可以继续 `t.Parallel()` —— 不需要 `TRUNCATE` 这种会互相打架的清理。
@@ -726,6 +727,9 @@ M4-1/M4-2 新加的 SQL（`tags @> ARRAY[...]`、`(occurred_at, id) < (...)` 的
 > 第 5 条是全批次唯一的「计划形状」断言。用 200 行 + `ANALYZE` 消除计划器在十行小表上选 seqscan 的抖动，
 > 让它成为**确定性断言**而不是偶发红 —— 人工验收（§0 容器级 ⑨）当时是 `SET enable_seqscan=off` 直接看的，
 > 自动化必须把样本量补上才算复现。
+>
+> 集成测试第一次跑就发现一处真实不一致：`links.created_ip` 用 `::text` 读出来会带掩码长度
+> （`203.0.113.7/32`），而这一列存的始终是单个地址；已与 `click_events.ip` 一样改用 `host()`。
 
 #### 17.1.4 CI 改动（只动 `backend` job）
 
