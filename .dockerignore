@@ -11,6 +11,10 @@
 **/.vite
 **/bin
 
+# GeoIP 国家库：只挂进 backend / worker 容器，前端镜像用不到。
+# 不排除的话，一份 9MB 的 mmdb 会白白进 frontend 的构建上下文。
+deploy/geoip
+
 # 浏览器级验收脚本：只在本机/CI 的 runner 上跑，不进镜像。
 # 不排除的话，改一行 e2e 也会让 frontend 镜像的构建缓存失效。
 frontend/e2e

@@ -65,6 +65,13 @@ type Config struct {
 	WorkerEnabled bool
 	// TrustProxy 为 true 时从 X-Real-IP 取客户端 IP（生产由 nginx 注入）。
 	TrustProxy bool
+	// GeoIPDBPath 是 MaxMind DB 格式的国家库文件路径（M5-2）。
+	//
+	// 空串 = 不启用国家维度：worker 会把 country 一律留空，**不报错也不降级告警**。
+	// 配了但文件打不开，则记一条 warn 后按空串处理（同样是留空，不影响跳转与统计）。
+	// 两种形态都是受支持的部署，所以它不是必填项，也没有「关闭」的布尔开关 ——
+	// 一个路径就够了，多一个开关就多一种「路径配了但开关没开」的困惑。
+	GeoIPDBPath string
 
 	// PGTimeout 是单次 PG 调用超时。
 	PGTimeout time.Duration
@@ -128,6 +135,7 @@ func LoadFor(role Role) (*Config, error) {
 		RedisPassword: os.Getenv("REDIS_PASSWORD"),
 		JWTSecret:     strings.TrimSpace(os.Getenv("JWT_SECRET")),
 		PublicBaseURL: strings.TrimRight(cmp.Or(os.Getenv("PUBLIC_BASE_URL"), "http://localhost:8080"), "/"),
+		GeoIPDBPath:   strings.TrimSpace(os.Getenv("GEOIP_DB_PATH")),
 
 		PGTimeout:       DefaultPGTimeout,
 		RedisTimeout:    DefaultRedisTimeout,

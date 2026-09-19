@@ -268,6 +268,72 @@ func hasBucket(buckets []domain.BucketCount, name string, clicks int64) bool {
 	})
 }
 
+// TestAggregateCountriesExcludesEmpty 守住国家分布与其他维度**不一样**的那条口径（M5-2）。
+//
+// device / browser 的空值要归进 unknown 桶，含义是「解析了但没认出来」；
+// 而 country 的空值里混着「这个部署根本没配 GeoIP 库文件」这一大类 ——
+// 把它聚成一条 100% 的「未知」，用户会以为是解析失败而不是「我没开这个功能」。
+// 所以国家维度只返回已知国家：列表为空 = 没开这个功能，前端据此整块隐藏。
+func TestAggregateCountriesExcludesEmpty(t *testing.T) {
+	t.Parallel()
+
+	db := testDB(t)
+	ctx := t.Context()
+	clicks := db.Clicks()
+	at := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
+
+	// ---- 情形一：有已知国家 + 有查不到的点击 ----
+	mixed := createLink(t, db, testCode(t, "it-geo"), nil)
+	if err := clicks.InsertBatch(ctx, []domain.ClickEvent{
+		{EventUID: "1700000200001-0", LinkID: mixed.ID, ShortCode: mixed.ShortCode, OccurredAt: at, Country: "CN"},
+		{EventUID: "1700000200002-0", LinkID: mixed.ID, ShortCode: mixed.ShortCode, OccurredAt: at, Country: "CN"},
+		{EventUID: "1700000200003-0", LinkID: mixed.ID, ShortCode: mixed.ShortCode, OccurredAt: at, Country: "US"},
+		// 未配置 GeoIP 时每一行都是这样：国家为空
+		{EventUID: "1700000200004-0", LinkID: mixed.ID, ShortCode: mixed.ShortCode, OccurredAt: at},
+	}); err != nil {
+		t.Fatalf("插入明细: %v", err)
+	}
+
+	got, err := clicks.Aggregate(ctx, domain.StatsQuery{LinkID: mixed.ID, Since: at.Add(-time.Hour), TopN: 10})
+	if err != nil {
+		t.Fatalf("聚合: %v", err)
+	}
+
+	if len(got.Countries) != 2 {
+		t.Fatalf("国家分布应只有 2 个已知国家，实际 %+v", got.Countries)
+	}
+	if got.Countries[0].Name != "CN" || got.Countries[0].Clicks != 2 {
+		t.Errorf("应按点击数降序且 CN 在前，实际 %+v", got.Countries)
+	}
+	if !hasBucket(got.Countries, "US", 1) {
+		t.Errorf("缺少 US=1：%+v", got.Countries)
+	}
+	if hasBucket(got.Countries, "unknown", 1) {
+		t.Errorf("国家维度不该出现 unknown 桶（那是「没配 GeoIP」的形态，不是一种国家）：%+v", got.Countries)
+	}
+
+	// ---- 情形二：整条链接都没有国家（= 未部署 GeoIP 的形态）----
+	// 必须是**空切片**而不是 nil：handler 会把它转成 JSON 的空数组，
+	// nil 会被序列化成 null，前端就得多写一层判空。
+	noGeo := createLink(t, db, testCode(t, "it-geo0"), nil)
+	if err := clicks.InsertBatch(ctx, []domain.ClickEvent{
+		{EventUID: "1700000200005-0", LinkID: noGeo.ID, ShortCode: noGeo.ShortCode, OccurredAt: at},
+	}); err != nil {
+		t.Fatalf("插入明细: %v", err)
+	}
+
+	gotNoGeo, err := clicks.Aggregate(ctx, domain.StatsQuery{LinkID: noGeo.ID, Since: at.Add(-time.Hour), TopN: 10})
+	if err != nil {
+		t.Fatalf("聚合: %v", err)
+	}
+	if len(gotNoGeo.Countries) != 0 {
+		t.Errorf("没有已知国家时应当为空，实际 %+v", gotNoGeo.Countries)
+	}
+	if gotNoGeo.Countries == nil {
+		t.Error("应当是空切片而不是 nil（否则 JSON 会序列化成 null）")
+	}
+}
+
 // TestAddClickCount 守住计数回刷的写入口：累加返回的是**累加后**的总值，
 // worker 依赖这个返回值来判断基线是否推进。
 func TestAddClickCount(t *testing.T) {

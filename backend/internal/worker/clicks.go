@@ -128,7 +128,20 @@ type Deps struct {
 	Stream domain.ClickStream
 	// Cache 用于过期清理后失效短码缓存。
 	Cache domain.LinkCache
+	// Geo 把客户端 IP 解析成国家代码（M5-2）。
+	// 传 nil 表示「没有配置 GeoIP 库文件」，国家一律留空 —— 这不是错误，
+	// 而是受支持的降级形态（见 New 里的兜底）。
+	Geo domain.GeoLocator
 }
+
+// noGeo 是未配置 GeoIP 时的解析器：永远返回空串。
+//
+// 用一个实现而不是在每个调用点判 nil：降级与正常走**同一行代码**，
+// 于是不可能出现「本地没配库文件一切正常、一上线配了库文件就 panic」这类只在生产暴露的分支。
+type noGeo struct{}
+
+// CountryOf 总是返回空串。
+func (noGeo) CountryOf(string) string { return "" }
 
 // Worker 是点击事件的消费者。
 type Worker struct {
@@ -138,6 +151,7 @@ type Worker struct {
 	counter domain.ClickCounter
 	stream  domain.ClickStream
 	cache   domain.LinkCache
+	geo     domain.GeoLocator
 
 	cfg Config
 	log *slog.Logger
@@ -154,6 +168,11 @@ type Worker struct {
 
 // New 构造 Worker。
 func New(deps Deps, cfg Config, logger *slog.Logger) *Worker {
+	// 未配置 GeoIP 时兜底成 noGeo，而不是留 nil：见 noGeo 的注释
+	geo := deps.Geo
+	if geo == nil {
+		geo = noGeo{}
+	}
 	return &Worker{
 		counts:  deps.Counts,
 		sweeper: deps.Sweeper,
@@ -161,6 +180,7 @@ func New(deps Deps, cfg Config, logger *slog.Logger) *Worker {
 		counter: deps.Counter,
 		stream:  deps.Stream,
 		cache:   deps.Cache,
+		geo:     geo,
 		cfg:     cfg.withDefaults(),
 		log:     logger,
 	}
@@ -356,7 +376,7 @@ func (w *Worker) handleBatch(ctx context.Context, result *domain.ReadResult, sou
 		for _, msg := range result.Messages {
 			// msg.ID 同时用于「落库时的幂等键」与「落库后的 XACK」：
 			// 这两件事必须基于同一个 ID，否则重投时对不上号。
-			events = append(events, toClickEvent(msg.ID, msg.Event))
+			events = append(events, w.toClickEvent(msg.ID, msg.Event))
 			ids = append(ids, msg.ID)
 		}
 
@@ -411,12 +431,14 @@ func (w *Worker) everyFixed(ctx context.Context, name string, interval time.Dura
 	}
 }
 
-// toClickEvent 把 Stream 事件补上 UA 解析结果，转成待落库的明细。
+// toClickEvent 把 Stream 事件补上 UA 与国家的解析结果，转成待落库的明细。
 //
 // msgID 是 Stream 消息 ID，落成 event_uid：at-least-once 投递下同一条消息会被
 // 重投（处理完但 ACK 前重启），唯一索引 + ON CONFLICT DO NOTHING 靠它去重。
 // 因此这个参数不能省 —— 少了它就等于没有幂等。
-func toClickEvent(msgID string, ev domain.ClickRecord) domain.ClickEvent {
+//
+// 定义成方法（而不是包级函数）只为一件事：拿到 w.geo。它没有别的隐含状态。
+func (w *Worker) toClickEvent(msgID string, ev domain.ClickRecord) domain.ClickEvent {
 	info := ua.Parse(ev.UserAgent)
 	return domain.ClickEvent{
 		EventUID:   msgID,
@@ -426,10 +448,11 @@ func toClickEvent(msgID string, ev domain.ClickRecord) domain.ClickEvent {
 		Referer:    ev.Referer,
 		UserAgent:  ev.UserAgent,
 		IP:         ev.IP,
-		Country:    "", // 预留：GeoIP，MVP 恒为空
-		Device:     info.Device,
-		Browser:    info.Browser,
-		OS:         info.OS,
+		// 未配置库文件时 w.geo 是 noGeo，这里同样是空串 —— 不需要分支
+		Country: w.geo.CountryOf(ev.IP),
+		Device:  info.Device,
+		Browser: info.Browser,
+		OS:      info.OS,
 	}
 }
 

@@ -215,10 +215,11 @@ func (s *ClickStore) Aggregate(ctx context.Context, q domain.StatsQuery) (*domai
 	args := []any{toPgUUID(q.LinkID), q.Since}
 
 	out := &domain.StatsAggregate{
-		Daily:    []domain.DailyCount{},
-		Referers: []domain.BucketCount{},
-		Devices:  []domain.BucketCount{},
-		Browsers: []domain.BucketCount{},
+		Daily:     []domain.DailyCount{},
+		Referers:  []domain.BucketCount{},
+		Devices:   []domain.BucketCount{},
+		Browsers:  []domain.BucketCount{},
+		Countries: []domain.BucketCount{},
 	}
 
 	// 1) 按天趋势
@@ -278,6 +279,24 @@ GROUP BY bucket
 ORDER BY clicks DESC, bucket
 LIMIT $3`
 	if out.Browsers, err = s.queryBuckets(ctx, browserSQL, args, q.TopN, "stats browsers"); err != nil {
+		return nil, err
+	}
+
+	// 5) 国家分布（M5-2）
+	//
+	// 这里刻意**不**用其他维度那套 `coalesce(nullif(x, ''), 'unknown')`：
+	// device / browser 的 unknown 含义是「解析了但没认出来」，而 country 的空值里
+	// 混着「这个部署根本没配 GeoIP 库」这一大类 —— 把它聚成一个 100% 的「未知」条，
+	// 用户会以为是解析失败，而不是「我没开这个功能」。
+	// 所以只返回**已知国家**：没有已知国家的点击不进这一维，列表为空时前端整块隐藏。
+	const countrySQL = `
+SELECT country AS bucket, count(*) AS clicks
+FROM click_events
+WHERE link_id = $1 AND occurred_at >= $2 AND coalesce(country, '') <> ''
+GROUP BY bucket
+ORDER BY clicks DESC, bucket
+LIMIT $3`
+	if out.Countries, err = s.queryBuckets(ctx, countrySQL, args, q.TopN, "stats countries"); err != nil {
 		return nil, err
 	}
 

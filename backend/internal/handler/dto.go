@@ -191,6 +191,9 @@ type statsResponse struct {
 	TopReferers  []refererDTO `json:"top_referers"`
 	Devices      []deviceDTO  `json:"devices"`
 	Browsers     []browserDTO `json:"browsers"`
+	// Countries 只含已知国家；未部署 GeoIP 库文件时是空数组（M5-2）。
+	// 前端据此整块隐藏国家分布，而不是画一个空的「未知」条。
+	Countries []countryDTO `json:"countries"`
 }
 
 // dailyDTO 是趋势图的一个数据点。
@@ -217,6 +220,12 @@ type browserDTO struct {
 	Clicks  int64  `json:"clicks"`
 }
 
+// countryDTO 是国家分布的一项。country 是 ISO 3166-1 alpha-2 代码（大写）。
+type countryDTO struct {
+	Country string `json:"country"`
+	Clicks  int64  `json:"clicks"`
+}
+
 // toStatsResponse 把聚合结果转成响应 DTO。
 func toStatsResponse(s *service.StatsResult) statsResponse {
 	resp := statsResponse{
@@ -228,6 +237,7 @@ func toStatsResponse(s *service.StatsResult) statsResponse {
 		TopReferers:  make([]refererDTO, 0, len(s.Referers)),
 		Devices:      make([]deviceDTO, 0, len(s.Devices)),
 		Browsers:     make([]browserDTO, 0, len(s.Browsers)),
+		Countries:    make([]countryDTO, 0, len(s.Countries)),
 	}
 	// dateLayout 与 service 内部保持一致：趋势图横轴固定 YYYY-MM-DD
 	const dateLayout = "2006-01-02"
@@ -242,6 +252,9 @@ func toStatsResponse(s *service.StatsResult) statsResponse {
 	}
 	for _, b := range s.Browsers {
 		resp.Browsers = append(resp.Browsers, browserDTO{Browser: b.Name, Clicks: b.Clicks})
+	}
+	for _, c := range s.Countries {
+		resp.Countries = append(resp.Countries, countryDTO{Country: c.Name, Clicks: c.Clicks})
 	}
 	return resp
 }

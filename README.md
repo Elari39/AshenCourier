@@ -143,7 +143,7 @@ Browser ──┬─ /api/*         ─┐
 | --- | --- | --- |
 | `links` | 短链主体 | `short_code` 全局唯一；`status` 用 `smallint` 而非 PG enum（改状态机不用 `ALTER TYPE`）；`key_hash bytea` 存匿名管理密钥的 SHA-256；`tags text[]`（000003 起）配 GIN 索引做标签筛选 |
 | `users` | 账号 | `email` 存 `text` + `unique index (lower(email))` 做大小写不敏感唯一（不引入 `citext` 扩展，省掉一次 `CREATE EXTENSION`） |
-| `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入；`event_uid`（000002 起）取自 Stream 消息 ID，配合部分唯一索引做幂等去重；`(link_id, occurred_at DESC, id DESC)`（000004 起）服务明细页的 keyset 翻页，旧的 `(link_id, occurred_at DESC)` 是被它覆盖的前缀索引，已删除 |
+| `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入；`country` 由 worker 查 GeoIP 库文件后写入（未部署则恒为 NULL）；`event_uid`（000002 起）取自 Stream 消息 ID，配合部分唯一索引做幂等去重；`(link_id, occurred_at DESC, id DESC)`（000004 起）服务明细页的 keyset 翻页，旧的 `(link_id, occurred_at DESC)` 是被它覆盖的前缀索引，已删除 |
 | `link_click_totals` | 视图 | `links.click_count + count(click_events)`，用于人工对账 |
 
 ## API
@@ -201,12 +201,14 @@ Browser ──┬─ /api/*         ─┐
   "daily":        [{ "date": "2026-09-01", "clicks": 12 }],
   "top_referers": [{ "referer": "twitter.com", "clicks": 300 }],
   "devices":      [{ "device": "mobile", "clicks": 800 }],
-  "browsers":     [{ "browser": "Chrome", "clicks": 900 }]
+  "browsers":     [{ "browser": "Chrome", "clicks": 900 }],
+  "countries":    [{ "country": "CN", "clicks": 512 }]
 }
 ```
 
 `total_clicks` 是全量口径（PG 基线 + Redis 待同步增量）；
-`daily` 与三个分布是窗口口径。`daily` 一定补齐成连续的 `days` 天，缺失日期为 0。
+`daily` 与四个分布是窗口口径。`daily` 一定补齐成连续的 `days` 天，缺失日期为 0。
+`countries` 只含**已知国家** —— 没部署 GeoIP 库文件时是空数组（见「GeoIP 国家维度」）。
 
 标记为 `omitzero` 的字段（`window_clicks` / `since` 等）在零值时不出现——
 `window_clicks` 为 0 就是「窗口内还没有明细落库」，前端按 `?? 0` 兜底。
@@ -248,6 +250,7 @@ Browser ──┬─ /api/*         ─┐
 ├── docker-compose.dev.yml      # 本地开发：只起 pg(5432) + redis(6379)；migrate 在 tools profile 下
 ├── deploy/nginx/nginx.conf     # 反代 + 短码正则 + SPA fallback
 ├── deploy/backup/              # pg_dump 产物目录（*.dump 已被 .gitignore 忽略）
+├── deploy/geoip/               # GeoIP 国家库目录（*.mmdb 已被 .gitignore 忽略）
 ├── backend/
 │   ├── migrations/             # golang-migrate 迁移（up / down 严格互逆）
 │   ├── cmd/{api,worker,smoke}/ # 两个服务入口 + 端到端冒烟工具
@@ -256,6 +259,7 @@ Browser ──┬─ /api/*         ─┐
 │       ├── domain/             # 实体 / 领域错误 / 仓储与端口接口（不 import 任何第三方库）
 │       ├── store/postgres/     # pgxpool 仓储实现
 │       ├── store/redis/        # 缓存 / 计数 / Stream / 限流
+│       ├── store/geoip/        # MaxMind DB 国家库解析（mmdb，未配置时降级为空）
 │       ├── service/            # 应用服务（短链、统计、鉴权、管理密钥）
 │       ├── handler/            # HTTP 处理器 + 路由装配
 │       ├── httpx/              # JSON 读写、统一错误体、中间件、限流中间件、http.Server
@@ -356,6 +360,46 @@ compose 项目名**，两个文件里的 `postgres` 是同一个容器名。所�
 会把正在跑的 postgres 容器换成 dev 定义（连带换掉数据卷）—— 跑完用 `docker compose up -d`
 把生产形态拉回来，别在只跑着 dev PG 的状态下调试主栈。
 
+### GeoIP 国家维度（可选）
+
+点击明细与统计都支持按国家分布，但**默认关闭**：它需要一个外部的国家库文件，
+而库文件不入库 —— 体积数 MB、每月更新一次，进 Git 只会让仓库变大，
+还会让人误以为它是项目源码。
+
+```bash
+# 1) 把 MaxMind DB 格式的国家库放进 deploy/geoip/（该目录下的 *.mmdb 已被 .gitignore 忽略）
+#    推荐 DB-IP Lite（免注册，CC BY 4.0）：https://db-ip.com/db/download/ip-to-country-lite
+#    GeoLite2-Country（MaxMind，需要账号）同样可用 —— 两者文件格式与 country.iso_code 字段一致
+
+# 2) 在 .env 里指向**容器内**的路径
+GEOIP_DB_PATH=/geoip/dbip-country-lite.mmdb
+
+# 3) 重建 worker（解析发生在 worker，不在跳转路径上）
+docker compose up -d worker
+docker compose logs worker | grep GeoIP     # 期望看到 "GeoIP 库文件已加载"
+```
+
+**为什么解析放在 worker 而不是跳转路径**：跳转路径的承诺是「零数据库写入 + 只碰 Redis」。
+mmdb 查询虽然只是一次内存映射读，但它会引入文件句柄与页缓存的不确定性；
+而点击事件本来就是异步落库的，多解析一次国家码完全在 worker 的预算内。
+
+**降级行为**（两种都是受支持的部署形态，任何一种都不会让进程起不来）：
+
+| 配置 | 行为 | 日志 |
+| --- | --- | --- |
+| `GEOIP_DB_PATH` 留空 | 国家字段一律为空，跳转/计数/其余统计照旧 | 一条 `INFO` |
+| 配了但文件打不开 | 同上 | 一条 `WARN` |
+
+`country` 只落**已知国家**：查不到的点击不进国家分布，因此「没开这个功能」就等于
+「国家列表为空」，前端据此整块隐藏 —— 而不是画一个 100% 的「未知」条
+（那会让人以为是解析失败，而不是「我没开这项」）。国家码是 ISO 3166-1 alpha-2（`CN` / `US`）。
+
+**数据来源与署名**：本仓库**不附带**任何 GeoIP 数据。使用
+[DB-IP Lite](https://db-ip.com) 时，数据由 DB-IP 提供、按
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) 授权，要求署名；
+使用 MaxMind 的 GeoLite2 时同样需要按其许可署名。本节即项目的署名位置 ——
+分发本项目的镜像或对外服务时请一并保留。
+
 ### 关于 `frontend/.npmrc` 的镜像源
 
 `.npmrc` 里把 registry 指到了腾讯云镜像，这是实测结果而不是直觉选择 ——
@@ -401,7 +445,9 @@ compose 项目名**，两个文件里的 `postgres` 是同一个容器名。所�
 | `WORKER_ENABLED` | `false` | `true` 时 api 进程内嵌同一套 worker 循环（本地开发用） |
 | `TRUST_PROXY` | `true` | 从 `X-Real-IP` 取客户端 IP；**不**信任 `X-Forwarded-For` |
 | `RATE_LIMIT_DISABLED` | `false` | `true` 时启动即全量放行（限流应急开关），状态见 `/healthz` 的 `rate_limit_disabled` |
+| `GEOIP_DB_PATH` | 空 | MaxMind DB 格式的国家库在**容器内**的路径（如 `/geoip/dbip-country-lite.mmdb`）。留空或文件打不开都只是让 `country` 留空，不影响跳转与统计，见「GeoIP 国家维度」 |
 | `POSTGRES_TEST_DSN` | 空 | **只给测试用，进程不读它**：store 集成测试的 DSN，未设置时整体跳过（见「store 层集成测试」） |
+| `GEOIP_TEST_DB` | 空 | **只给测试用，进程不读它**：`internal/store/geoip` 里唯一会真查库的用例的库文件路径，未设置时该用例 SKIP |
 
 ### 前端（可选）
 
@@ -640,7 +686,6 @@ MVP 有意不做的部分：
 | 不做 | 原因 |
 | --- | --- |
 | 自动抓取目标页标题 | 会引入 SSRF 风险，标题由用户手填 |
-| GeoIP / 国家维度统计 | 需要 mmdb 库；`click_events.country` 字段已预留，恒为 NULL |
 | A/B 分流 / 短链轮换 | 需要 `link_targets` 表与「目标页归属」的新语义，收益不明（二维码已在详情页提供：前端 `qrcode` 生成，无需后端接口） |
 | 口令的重置流程 / 提示语 | 没有邮箱找回，也没有 `hint`：口令只由所有者设置与清除（忘了就重新设一条） |
 | 团队 / 多租户 / 权限体系 | 只有「匿名」与「个人账号」两种身份 |
@@ -683,6 +728,8 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑬**：短链访问口令（M5-1 / N2） | 建带口令的短链 → `password_protected=True`；库里 `password_hash` 是 `$2a$12$…`（60 字符，且 `= 'smoke-pass-9f3a'` 为 `f`）。未解锁 `GET /{code}` = **200 + text/html** 且 `total_clicks` 仍 0；错误口令 = **401** 且 `total_clicks` 仍 0；正确口令 = **303 + Set-Cookie**（`HttpOnly` / `SameSite=Lax` / `Path=/`，http 下不带 `Secure`）；带 cookie 的 GET = **302**，`total_clicks` = **1**、`click_events` = **1**（解锁那次没被重复计）；`clear_password` 后立刻 302（缓存被主动失效）。迁移 000005 往返两轮：`down 1` 后列消失、`up` 后回来，无报错且之后新跳转仍 302。冒烟 **27 / 27**（三条口令用例逐条 ✓）。浏览器侧（无头 Chrome + CDP）：创建表单展开高级选项后有「访问口令」；详情页显示「受口令保护」徽章，编辑面板有「访问口令」输入与「清除口令」按钮；短链未解锁渲染口令页、输错显示「口令不对，请再试一次。」、输对**真的落到目标地址** | 本机（Docker + 无头 Chrome） |
 | **前端单测 ⑭**：纯函数（16.3-3） | `vitest run` **31 个用例全绿**（`format.ts` 24 个 / `tags.ts` 7 个），约 0.8s；同时把 `splitTags` 从两个组件里提到 `src/utils/tags.ts`（原来是一模一样的两份）。**变异验证**：把 `truncateMiddle` 的 `head + tail + 1` 退化成 `head + tail` → 边界用例红；把 `splitTags` 的 `length > 0` 改成 `length > 1` → 第一次**没被抓住**（用例里没有单字符标签），补上「`书` 这种单字符标签不能丢」后变红。时间断言用**不带时区后缀**的输入串，因此本机（Asia/Shanghai）与 CI（UTC）结果一致 | 本机 + CI `frontend` |
 | **容器级 ⑮**：浏览器级验收（16.3-2） | 无头 Chrome + CDP（**零 npm 依赖**，只用 Node 内置 fetch / WebSocket），**19 项全绿**：二维码 6 条（行内尺寸已清空 / 位图 320×320 / 画布真的画过：深墨 4.5 万 px + 暖奶油 5.7 万 px / 画布在容器内 / 显示宽 = 容器宽 − padding → `142.0 = 158 − 8 − 8` / 右边缘 309.5 < 文字列 342.5）、明细 6 条（接口只回 `/24` 网段、首屏 20 行、时间到秒、逐行与接口核对、页面文本无原始 IP、翻页 `20 + 6 = 26` 行且无重复）、口令 6 条（只回布尔不回摘要、未解锁不给 cookie、错口令留在口令页、对口令 303→落到目标 `/login`、`ac_unlock` 是 HttpOnly + `Path=/`、解锁恰好只多一条明细）、全程零 console 错误。**变异验证**：去掉 `canvas.style.width = ''` → **4 条版式断言全红而像素断言仍全绿**（见坑第 6 条）。顺序约束也实测过：**e2e 19/19 之后紧接 smoke 27/27**（两者都不会把对方的创建配额打满） | 本机（Docker + 无头 Chrome）+ CI `smoke` |
+| **单测/集成 ⑯**：GeoIP 解析（M5-2） | `internal/store/geoip` 与 `internal/worker` 的用例全绿：非法输入（空串 / 非 IP / 带端口 / 网段 / 主机名 / 坏 IPv6）一律空串、零值 Locator 与 nil 都安全、打开不存在的文件与非 mmdb 文件都报错；**带真库**（`GEOIP_TEST_DB` = 本机 GeoLite2-Country）时 `81.2.69.142` 解析出两位大写国家码、私网 `10.11.12.13` 为空、`::ffff:81.2.69.142` 与原生 IPv4 结果一致（`Unmap` 生效）。worker 侧断言国家码取自 `GeoLocator` 且**用原始 IP** 去查（不是掩码后的），未配置时留空不 panic。集成测试 `TestAggregateCountriesExcludesEmpty` 覆盖国家聚合 SQL：按点击数降序、**不含 `unknown` 桶**、无已知国家时是空切片（而非 nil）。**变异验证**：把国家 SQL 退回 `coalesce(nullif(country,''),'unknown')` → 结果多出 `{unknown 1}`，用例变红。降级日志也断言了级别：留空是 `INFO` 且不含 `WARN`，路径打不开是**恰好一条** `WARN` | 本机（真 PG 18.6 + 真 mmdb）|
+| **容器级 ⑰**：GeoIP 端到端与降级（M5-2） | worker 启动日志 `GeoIP 库文件已加载 /geoip/GeoLite2-Country.mmdb`。往 Stream 投两条**显式 ID + 公网 IP** 的点击（本机 curl 的客户端 IP 是 Docker 网关 `172.20.0.1`，私网段解析不出国家，所以必须直接投递）：`8.8.8.8` → 库里 `country=US`、`114.114.114.114` → `CN`；`GET /api/links/{code}/stats` 回 `countries=[{CN,1},{US,1}]`。降级实测两轮：`GEOIP_DB_PATH=/geoip/does-not-exist.mmdb` → worker 日志**恰好一条 WARN**、`8.8.8.8` 仍落库且 `country` 为 NULL、`/healthz` 200 `ok`；`GEOIP_DB_PATH` 留空 → 一条 INFO、零 WARN、行为相同 | 本机（Docker + 真 mmdb）|
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 

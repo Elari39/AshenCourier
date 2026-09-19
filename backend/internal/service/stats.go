@@ -42,10 +42,12 @@ type StatsResult struct {
 	Since time.Time
 	// Daily 是补齐后的连续日趋势，长度恒等于 Days。
 	Daily []domain.DailyCount
-	// Referers / Devices / Browsers 是三个维度的 Top-N 分布。
+	// Referers / Devices / Browsers / Countries 是四个维度的 Top-N 分布。
 	Referers []domain.BucketCount
 	Devices  []domain.BucketCount
 	Browsers []domain.BucketCount
+	// Countries 只含**已知国家**：未配置 GeoIP 库文件时恒为空（M5-2）。
+	Countries []domain.BucketCount
 }
 
 // ForLink 聚合某条短链在最近 days 天内的统计。
@@ -77,6 +79,7 @@ func (s *Stats) ForLink(ctx context.Context, link *domain.Link, days int) (*Stat
 		Referers:    agg.Referers,
 		Devices:     agg.Devices,
 		Browsers:    agg.Browsers,
+		Countries:   agg.Countries,
 	}
 
 	// 基线之外再叠加尚未落库的增量；读不到就退化成「只报基线」，

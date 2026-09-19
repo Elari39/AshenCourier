@@ -30,7 +30,8 @@ type ClickEvent struct {
 	UserAgent string
 	// IP 是客户端 IP，非法或缺失时为空串，落库为 NULL。
 	IP string
-	// Country 是 GeoIP 结果，MVP 恒为空。
+	// Country 是 GeoIP 解析出的 ISO 3166-1 alpha-2 国家代码（M5-2 起）。
+	// 未配置库文件、IP 非法、库里查不到时为空串，落库为 NULL。
 	Country string
 	// Device / Browser / OS 由 internal/pkg/ua 解析得出。
 	Device  string
@@ -69,6 +70,9 @@ type StatsAggregate struct {
 	Devices []BucketCount
 	// Browsers 是浏览器分布，按点击数降序。
 	Browsers []BucketCount
+	// Countries 是国家分布，按点击数降序（M5-2）。
+	// 未配置 GeoIP 库文件时这一维恒为空 —— 前端据此整块隐藏，而不是显示一个空的「未知」桶。
+	Countries []BucketCount
 }
 
 // ClickCursor 是点击明细的 keyset 游标：按 (occurred_at, id) 倒序翻页。

@@ -26,6 +26,7 @@ import (
 	"ashen-courier/internal/handler"
 	"ashen-courier/internal/httpx"
 	"ashen-courier/internal/service"
+	"ashen-courier/internal/store/geoip"
 	"ashen-courier/internal/store/postgres"
 	"ashen-courier/internal/store/redis"
 	"ashen-courier/internal/worker"
@@ -148,14 +149,27 @@ func run() error {
 	// ---- 内嵌 worker（本地开发形态）----
 	var embedded *worker.Worker
 	if cfg.WorkerEnabled {
-		embedded = worker.New(worker.Deps{
+		deps := worker.Deps{
 			Counts:  links,
 			Sweeper: links,
 			Clicks:  pg.Clicks(),
 			Counter: rdb,
 			Stream:  rdb,
 			Cache:   cache,
-		}, worker.Config{
+		}
+		// 与 cmd/worker 同一套降级行为（见 store/geoip 的 OpenOrDefault）：
+		// 没配路径或库文件打不开都只记一条日志，国家字段留空，其余链路照旧。
+		// 同样只在拿到非 nil 解析器时才赋值 —— 把 typed nil 装进接口就不再有「兜底」。
+		if locator := geoip.OpenOrDefault(logger, cfg.GeoIPDBPath); locator != nil {
+			defer func() {
+				if err := locator.Close(); err != nil {
+					logger.Warn("关闭 GeoIP 库文件失败", "err", err)
+				}
+			}()
+			deps.Geo = locator
+		}
+
+		embedded = worker.New(deps, worker.Config{
 			Consumer: consumerName(),
 		}, logger.With("component", "worker"))
 		embedded.Start(ctx)

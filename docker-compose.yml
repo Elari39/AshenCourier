@@ -15,6 +15,10 @@ x-backend-env: &backend-env
   JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
   LOG_LEVEL: ${LOG_LEVEL:-info}
+  # 国家库文件在**容器内**的路径。默认留空 = 不启用国家维度：
+  # 这样新克隆的仓库启动时只打一条 info，而不是因为「目录挂进来了但文件还没有」而 warn。
+  # 启用方式：把 mmdb 放进 ./deploy/geoip/，然后在这里指向 /geoip/<文件名>。
+  GEOIP_DB_PATH: ${GEOIP_DB_PATH:-}
 
 services:
   postgres:
@@ -79,6 +83,10 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    volumes:
+      # 国家库文件放宿主的 ./deploy/geoip/（*.mmdb 已被 .gitignore 忽略，
+      # 它是外部数据不是源码）。只读挂载：进程只查询，不需要写。
+      - ./deploy/geoip:/geoip:ro
     expose:
       - "8080"
     restart: unless-stopped
@@ -102,6 +110,9 @@ services:
       start_period: 10s
     environment:
       <<: *backend-env
+    volumes:
+      # 与 backend 同一份挂载：worker 才是真正解析国家的那一方
+      - ./deploy/geoip:/geoip:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

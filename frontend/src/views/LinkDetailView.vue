@@ -124,6 +124,17 @@ const browserItems = computed<DistributionItem[]>(() =>
   (stats.value?.browsers ?? []).map((item) => ({ label: item.browser, value: item.clicks })),
 )
 
+/**
+ * 国家分布（M5-2）。接口只回**已知国家**，所以「没配 GeoIP 库文件」= 空数组 = 整块隐藏。
+ *
+ * 直接显示 ISO 3166-1 alpha-2 代码（CN / US），刻意不引一张「代码 → 中文国名」的表：
+ * 那表要 250 项才完整，而没覆盖到的国家会退化成显示代码 —— 也就是「一半中文一半代码」，
+ * 反而比全用代码更难读。真要中文国名，正确的做法是把它放在后端（与数据同源）。
+ */
+const countryItems = computed<DistributionItem[]>(() =>
+  (stats.value?.countries ?? []).map((item) => ({ label: item.country, value: item.clicks })),
+)
+
 /** 是否是「匿名创建且我有密钥」——只有这种状态才提示可认领。 */
 const canClaim = computed(
   () => isAuthenticated.value && link.value?.anonymous === true && manageKey.value !== null,
@@ -532,10 +543,18 @@ onMounted(async () => {
           </div>
         </Card>
 
-        <!-- 三个分布（同一奶油卡片内并排，维度少不需要拆卡） -->
+        <!-- 分布（同一奶油卡片内并排，维度少不需要拆卡） -->
         <Card class="mt-6 p-6 md:p-8">
           <p class="eyebrow">Distribution</p>
-          <div class="mt-6 grid gap-10 md:grid-cols-3">
+          <!--
+            国家这一维只在部署了 GeoIP（且这段时间内确实解析出过国家）时才出现，
+            于是栅格列数要跟着变：xl 下 4 列还是 3 列。
+            不改默认的 md:grid-cols-3，是为了让「没开 GeoIP」的部署版式与改动前逐字一致。
+          -->
+          <div
+            class="mt-6 grid gap-10 md:grid-cols-3"
+            :class="countryItems.length > 0 ? 'xl:grid-cols-4' : ''"
+          >
             <DistributionList
               title="来源"
               :items="refererItems"
@@ -543,6 +562,11 @@ onMounted(async () => {
             />
             <DistributionList title="设备" :items="deviceItems" />
             <DistributionList title="浏览器" :items="browserItems" />
+            <DistributionList
+              v-if="countryItems.length > 0"
+              title="国家"
+              :items="countryItems"
+            />
           </div>
         </Card>
 

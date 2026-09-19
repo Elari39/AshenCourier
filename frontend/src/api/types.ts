@@ -83,6 +83,12 @@ export interface BrowserBucket {
   clicks: number
 }
 
+/** 国家分布的一项（`country` 是 ISO 3166-1 alpha-2 代码，大写）。 */
+export interface CountryBucket {
+  country: string
+  clicks: number
+}
+
 /** 一条点击明细。 */
 export interface ClickEvent {
   id: number
@@ -122,6 +128,13 @@ export interface Stats {
   top_referers: RefererBucket[]
   devices: DeviceBucket[]
   browsers: BrowserBucket[]
+  /**
+   * 国家分布（ISO 3166-1 alpha-2 代码）。
+   *
+   * **只含已知国家**：部署没有配置 GeoIP 库文件时是空数组，此时详情页整块隐藏这一项
+   * （而不是画一个 100% 的「未知」条 —— 那会让人以为是解析失败）。
+   */
+  countries: CountryBucket[]
 }
 
 /** `/healthz` 响应。 */

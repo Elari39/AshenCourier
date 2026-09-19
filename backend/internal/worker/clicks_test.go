@@ -527,3 +527,87 @@ const (
 	uaChrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 	uaIPhone = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1"
 )
+
+// fakeGeo 是手写的国家解析器：按 IP 查表，并记录被问过哪些 IP。
+type fakeGeo struct {
+	countries map[string]string
+	asked     []string
+}
+
+func (g *fakeGeo) CountryOf(ip string) string {
+	g.asked = append(g.asked, ip)
+	return g.countries[ip]
+}
+
+// TestHandleBatchFillsCountryFromLocator：国家码必须来自 GeoLocator，且用**原始 IP** 去查。
+//
+// 为什么断言「原样传 IP」而不是只看结果：一旦有人在解析前先做了 IP 掩码
+// （明细接口对外确实掩码，但入库的必须是原始地址），查询会静默失效 ——
+// 结果恰好也是空串，只看结果的话根本发现不了。
+func TestHandleBatchFillsCountryFromLocator(t *testing.T) {
+	t.Parallel()
+
+	geo := &fakeGeo{countries: map[string]string{"203.0.113.7": "NL"}}
+	clicks := &fakeClicks{}
+	wk := New(
+		Deps{
+			Counts:  newFakeCounts(),
+			Sweeper: &fakeSweeper{},
+			Clicks:  clicks,
+			Counter: newFakeCounter(),
+			Stream:  &fakeStream{},
+			Cache:   &fakeCache{},
+			Geo:     geo,
+		},
+		Config{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+
+	wk.handleBatch(t.Context(), &domain.ReadResult{
+		Messages: []domain.StreamMessage{{
+			ID: "1712345678901-1",
+			Event: domain.ClickRecord{
+				Code:      "abc1234",
+				UserAgent: uaChrome,
+				IP:        "203.0.113.7",
+			},
+		}},
+	}, "consume")
+
+	if len(clicks.inserted) != 1 || len(clicks.inserted[0]) != 1 {
+		t.Fatalf("应落库一条明细，实际 %#v", clicks.inserted)
+	}
+	got := clicks.inserted[0][0]
+	if got.Country != "NL" {
+		t.Errorf("Country = %q，期望 %q", got.Country, "NL")
+	}
+	if got.IP != "203.0.113.7" {
+		t.Errorf("入库的 IP 被改动了：%q（库里必须是原始地址）", got.IP)
+	}
+	if len(geo.asked) != 1 || geo.asked[0] != "203.0.113.7" {
+		t.Errorf("解析器收到的 IP 是 %v，期望原样的 203.0.113.7", geo.asked)
+	}
+}
+
+// TestHandleBatchWithoutGeoKeepsCountryEmpty：没配 GeoIP 库文件时必须有确定的降级行为 ——
+// 落库照常、国家留空、不 panic。Deps.Geo 传 nil 就是「没配」的表达方式。
+func TestHandleBatchWithoutGeoKeepsCountryEmpty(t *testing.T) {
+	t.Parallel()
+
+	clicks := &fakeClicks{}
+	wk := newTestWorker(newFakeCounter(), newFakeCounts(), clicks, &fakeStream{}, &fakeCache{}, &fakeSweeper{})
+
+	wk.handleBatch(t.Context(), &domain.ReadResult{
+		Messages: []domain.StreamMessage{{
+			ID:    "1712345678901-2",
+			Event: domain.ClickRecord{Code: "abc1234", UserAgent: uaChrome, IP: "203.0.113.7"},
+		}},
+	}, "consume")
+
+	if len(clicks.inserted) != 1 || len(clicks.inserted[0]) != 1 {
+		t.Fatalf("应落库一条明细，实际 %#v", clicks.inserted)
+	}
+	if got := clicks.inserted[0][0].Country; got != "" {
+		t.Errorf("未配置 GeoIP 时 Country 应为空串，实际 %q", got)
+	}
+}

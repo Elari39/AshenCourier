@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ashen-courier/internal/config"
+	"ashen-courier/internal/store/geoip"
 	"ashen-courier/internal/store/postgres"
 	"ashen-courier/internal/store/redis"
 	"ashen-courier/internal/worker"
@@ -126,14 +127,28 @@ func run() error {
 	}()
 	logger.Info("Redis 能力探测完成", "native_increx", rdb.SupportsINCREX())
 
-	wk := worker.New(worker.Deps{
+	deps := worker.Deps{
 		Counts:  pg.Links(),
 		Sweeper: pg.Links(),
 		Clicks:  pg.Clicks(),
 		Counter: rdb,
 		Stream:  rdb,
 		Cache:   redis.NewCache(rdb),
-	}, worker.Config{Consumer: consumer}, logger)
+	}
+	// 国家维度是可选增强：没配路径、或配了但库文件打不开，都只记一条日志后继续跑。
+	// 这里只在**拿到非 nil 的解析器**时才赋值，而不是把 nil 塞进接口 ——
+	// 把 typed nil 装进接口会让 deps.Geo == nil 变成 false，
+	// worker 里那个「兜底成永远空串」的判断就永远走不到了。
+	if locator := geoip.OpenOrDefault(logger, cfg.GeoIPDBPath); locator != nil {
+		defer func() {
+			if err := locator.Close(); err != nil {
+				logger.Warn("关闭 GeoIP 库文件失败", "err", err)
+			}
+		}()
+		deps.Geo = locator
+	}
+
+	wk := worker.New(deps, worker.Config{Consumer: consumer}, logger)
 	wk.Start(ctx)
 
 	// 定期打点，便于观测消费速率与是否有积压
