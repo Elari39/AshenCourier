@@ -624,15 +624,32 @@ func (s *suite) runAll(ctx context.Context) error {
 			return fmt.Errorf("带 cookie 跳转期望 302，实际 %d", jump.status)
 		}
 
-		// 只多一次：解锁那次不计点击，计点击的是随后这个 GET
-		stats, err := s.fetchStats(ctx, customCode, customKeyHeader)
-		if err != nil {
-			return err
+		// 只多一次：解锁那次不计点击，计点击的是随后这个 GET。
+		//
+		// 这里要**轮询**而不是读一次：点击是先投进有界队列、再由写入协程 INCR 进 Redis 的，
+		// 慢 runner 上「GET 的响应」与「INCR 落地」之间可能差几毫秒。读一次就断言会让这条用例
+		// 偶发变红（与上面「统计收敛」那条同一个套路）。
+		deadline := time.Now().Add(5 * time.Second)
+		var lastTotal int64
+		for time.Now().Before(deadline) {
+			stats, err := s.fetchStats(ctx, customCode, customKeyHeader)
+			if err != nil {
+				return err
+			}
+			lastTotal = stats.TotalClicks
+			if lastTotal == 1 {
+				return nil
+			}
+			if lastTotal > 1 {
+				return fmt.Errorf("解锁后 total_clicks=%d，期望恰好 1（解锁那次不该计点击）", lastTotal)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
 		}
-		if stats.TotalClicks != 1 {
-			return fmt.Errorf("解锁后 total_clicks=%d，期望恰好 1", stats.TotalClicks)
-		}
-		return nil
+		return fmt.Errorf("5s 内 total_clicks 仍是 %d，期望 1", lastTotal)
 	})
 
 	// ---------- 7. 注册 / 登录 / 归属 ----------
