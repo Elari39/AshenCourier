@@ -40,13 +40,23 @@ export function formatDateTimeSeconds(iso?: string | null, fallback = '—'): st
   return DATE_TIME_SECONDS_FORMATTER.format(date)
 }
 
-/** 把 ISO 日期格式化成 `09-18`，用于趋势图刻度。 */
+/**
+ * 把 ISO 日期格式化成 `09-18`，用于趋势图刻度。
+ *
+ * 刻意**不经过 Date**：`new Date('2026-09-18')` 按 UTC 午夜解析，
+ * 再用本地的 `getMonth()` / `getDate()` 取值 —— 在负偏移时区（美洲）它会
+ * 落到 9 月 17 日 19:00，刻度整体差一天。而后端是按 UTC 日界聚合的
+ * （`date_trunc('day', occurred_at AT TIME ZONE 'UTC')`），所以这里显示的
+ * 也应当就是 UTC 的那一天：直接取日期部分，既正确又与时区无关。
+ *
+ * 老实现没被单测抓住，是因为用例给的是带时间的串（`2026-09-08T10:00:00`）——
+ * 那种串按本地时间解析，任何时区下都还是 09-08；**真正出问题的恰恰是后端
+ * 实际返回的纯日期串**（`"date": "2026-09-01"`）。
+ */
 export function formatShortDate(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return iso
-  const month = `${date.getMonth() + 1}`.padStart(2, '0')
-  const day = `${date.getDate()}`.padStart(2, '0')
-  return `${month}-${day}`
+  const parts = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso.trim())
+  if (!parts) return iso
+  return `${parts[2]}-${parts[3]}`
 }
 
 /** 千分位数字。 */

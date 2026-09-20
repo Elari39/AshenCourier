@@ -13,7 +13,6 @@ import type {
   ClickListResponse,
   CreateLinkPayload,
   CreateLinkResponse,
-  HealthReport,
   Link,
   LinkListResponse,
   LoginPayload,
@@ -314,13 +313,6 @@ export const authApi = {
 
   me(signal?: AbortSignal) {
     return request<User>('/api/auth/me', { signal })
-  },
-}
-
-/** 健康检查（同源，不在 /api 下）。 */
-export const systemApi = {
-  health(signal?: AbortSignal) {
-    return request<HealthReport>('/healthz', { signal })
   },
 }
 

@@ -63,8 +63,36 @@ describe('formatShortDate', () => {
     expect(formatShortDate('2026-09-08T10:00:00')).toBe('09-08')
   })
 
+  // 后端 daily[].date 就是这种**纯日期**串。老实现用 new Date() 解析它，
+  // 在负偏移时区（美洲）会整体差一天 —— 而带时间的串不会，所以那条用例
+  // 从来没抓住这个 bug。这条是真正的回归守卫。
+  it('纯日期串不会随时区偏移一天（后端 daily.date 就是这个形状）', () => {
+    expect(formatShortDate('2026-09-01')).toBe('09-01')
+    expect(formatShortDate('2026-01-01')).toBe('01-01')
+    expect(formatShortDate('2026-12-31')).toBe('12-31')
+  })
+
+  it('带时间与时区后缀时取的仍是 UTC 那一天', () => {
+    expect(formatShortDate('2026-09-01T00:00:00Z')).toBe('09-01')
+    expect(formatShortDate('2026-09-01T23:59:59Z')).toBe('09-01')
+  })
+
   it('解析不了时原样返回 —— 图上宁可显示原始串，也不要 Invalid Date', () => {
     expect(formatShortDate('nope')).toBe('nope')
+    expect(formatShortDate('')).toBe('')
+  })
+
+  // 上面那条「纯日期串」在 UTC 与 Asia/Shanghai 下**即使代码有 bug 也是绿的**
+  // （正偏移时区里 UTC 午夜还是同一天）。真正会踩的是美洲那种负偏移，
+  // 所以这里临时把 TZ 切到 America/New_York 复现它 —— 否则这条用例等于没写。
+  it('负偏移时区（America/New_York）下纯日期串不提前一天', () => {
+    const prev = process.env.TZ
+    process.env.TZ = 'America/New_York'
+    try {
+      expect(formatShortDate('2026-09-01')).toBe('09-01')
+    } finally {
+      process.env.TZ = prev
+    }
   })
 })
 

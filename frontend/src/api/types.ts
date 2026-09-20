@@ -137,30 +137,6 @@ export interface Stats {
   countries: CountryBucket[]
 }
 
-/** `/healthz` 响应。 */
-export interface HealthReport {
-  status: 'ok' | 'degraded'
-  version?: string
-  postgres: string
-  redis: string
-  worker_enabled: boolean
-  dropped_clicks?: number
-  failed_clicks?: number
-  queue_len?: number
-  stream_len?: number
-  stream_pending?: number
-  /** 短码缓存未命中、真正回源 PG 的累计次数（缓存击穿的观测口径）。 */
-  pg_fallbacks?: number
-  rate_limit_degraded?: number
-  uptime_seconds?: number
-  rate_limit_native_increx?: boolean
-  /** 限流应急开关是否被打开（RATE_LIMIT_DISABLED=true，全量放行）。 */
-  rate_limit_disabled?: boolean
-  consumed_clicks?: number
-  worker_errors?: number
-  errors?: string[]
-}
-
 /** 创建短链入参。 */
 export interface CreateLinkPayload {
   target_url: string
