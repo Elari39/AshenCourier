@@ -133,20 +133,31 @@ func (c *Client) TakeDelta(ctx context.Context, code string) (int64, error) {
 //  1. delta > 0 时减掉这批增量；
 //  2. 减到 0（或更少）就把计数键删掉 —— 只 DECRBY 的话，每个被点过的短码都会永久
 //     留下一个值为 0 的键（这些键没有 TTL），键数量随「历史上被点过的链接数」无限增长；
-//  3. 摘掉 dirty 标记。
+//  3. **只在没有残留时**才摘 dirty 标记（见下面的「为什么第 3 步不能无条件做」）。
 //
 // 整段必须原子：拆成「先减、后删」两条命令时，若两次之间有新点击（INCR），
 // 那个 DEL 会把新点击一起删掉 —— 少计一次，正是本批次要消灭的东西。
+//
+// 为什么第 3 步不能无条件做：TakeDelta（GET）→ AddClickCount（PG）→ SettleDelta（本脚本）
+// 是**三次独立往返**。若这中间来了新点击，键已经 INCR 到 delta+k 且重新 SADD 了 dirty，
+// 而本脚本只知道 delta —— 减完还剩 k。此时若照旧摘掉 dirty，那 k 条就既不在 dirty 里、
+// 又留在键里没人扫：基线落后 k 条，且键永不删除，只有等下一次点击重新 SADD 才能自愈
+// （链接若从此无人再点，就永远差这几条）。
 var settleDeltaScript = goredis.NewScript(`
 local delta = tonumber(ARGV[1])
+local left = 0
 if delta > 0 then
-  local left = redis.call('DECRBY', KEYS[1], delta)
+  left = redis.call('DECRBY', KEYS[1], delta)
   if left <= 0 then
     redis.call('DEL', KEYS[1])
+    left = 0
   end
 end
-redis.call('SREM', KEYS[2], ARGV[2])
-return 1
+-- 有残留就不摘 dirty：留给下一轮继续回刷。
+if left <= 0 then
+  redis.call('SREM', KEYS[2], ARGV[2])
+end
+return left
 `)
 
 // SettleDelta 在增量成功写进 PG 基线之后结算：减掉这批增量 + 摘掉 dirty 标记。
@@ -156,6 +167,10 @@ return 1
 //   - 只摘不减：那批增量留在键里却再也不会被回刷 —— 等于少计
 //
 // delta <= 0 表示「这一轮没有增量」，此时只摘标记。
+//
+// ⚠️ 结算之后键里**可能仍有残留**（这轮之后又来了新点击）。此时 dirty 标记刻意保留：
+// 残留还在键里，摘掉标记就等于让它们再也等不到下一次回刷。细节见 settleDeltaScript。
+// 返回值仍然只是 error —— 残留量由下一轮的 TakeDelta 自然读到，上层无需感知。
 func (c *Client) SettleDelta(ctx context.Context, code string, delta int64) error {
 	if delta < 0 {
 		delta = 0
