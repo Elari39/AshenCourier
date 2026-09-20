@@ -126,6 +126,10 @@ services:
       # 单独构建用：docker build -f frontend/Dockerfile .
       context: .
       dockerfile: frontend/Dockerfile
+      args:
+        # 短链基址：默认与后端 PUBLIC_BASE_URL 取同一个值（同源部署下两者本就相同）。
+        # 留空时前端回退到 window.location.origin。⚠️ 构建期注入，改它要重新 build。
+        VITE_SHORT_BASE_URL: ${PUBLIC_BASE_URL:-}
     ports:
       - "${FRONTEND_PORT:-8080}:80" # 对外唯一入口
     depends_on:

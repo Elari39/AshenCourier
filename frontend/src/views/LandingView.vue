@@ -14,8 +14,17 @@ import ResultCard from '@/components/ResultCard.vue'
 import ShortenForm from '@/components/ShortenForm.vue'
 import Button from '@/components/ui/Button.vue'
 import { useAuth } from '@/composables/useAuth'
+import { shortBase } from '@/utils/shortlink'
 
 const { isAuthenticated } = useAuth()
+
+/**
+ * 演示用短链：域名取自 VITE_SHORT_BASE_URL，未配置时回退同源（拼出 `/7Kd2pQ`）。
+ *
+ * ⚠️ 真实链接一律展示后端返回的 `short_url` —— 链接可能挂在自定义域名下，
+ *    前端拿域名自己拼是拼不出来的。这里只是「还没有任何链接」时的静态示意。
+ */
+const demoShortLink = `${shortBase()}/7Kd2pQ`
 
 /** 最近一次创建的结果；有值就把右栏的静态 mockup 换成真实结果卡。 */
 const latest = ref<{ link: Link; manageKey?: string } | null>(null)
@@ -82,7 +91,7 @@ const features = [
             <p class="mt-3 text-on-dark">
               <span class="text-primary">✓</span> 短链已生成
             </p>
-            <p class="mt-1 text-on-dark">ashen.example/7Kd2pQ</p>
+            <p class="mt-1 text-on-dark">{{ demoShortLink }}</p>
             <p class="mt-1 text-on-dark-soft">→ 302 Location: https://example.com/2026/09/a-very-long-article</p>
           </div>
 

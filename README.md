@@ -465,8 +465,14 @@ mmdb 查询虽然只是一次内存映射读，但它会引入文件句柄与页
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `VITE_API_BASE_URL` | `/api` | API 基址（短链前缀不用它配 —— 后端按 `PUBLIC_BASE_URL` 与所属域名拼进 `short_url` 返回） |
+| `VITE_SHORT_BASE_URL` | `window.location.origin` | 短链基址。**只在落地页演示区用到** —— 那是用户还没创建任何链接、手上没有后端响应可展示的时刻。留空时回退到当前访问域名，同源部署下就对了；短链域名与控制台域名分离时才需要配。compose 已从 `PUBLIC_BASE_URL` 带过来 |
 
 > 只有 `VITE_` 前缀会打进产物，**绝不要往里面放密钥**。
+>
+> ⚠️ 两者都是**构建期**替换：改它们必须重新 `docker compose build frontend`。
+> 给已构建好的容器加 `environment: VITE_...=...` 是**无效的** —— 值已经烤进 JS 里，
+> 运行时产物里没有任何 `import.meta.env` 残留。需要「同一份镜像部署到不同域名」
+> 的话得另加一套运行时注入（nginx 启动时写 `config.js` 或 `envsubst` 占位）。
 
 ## 部署与运维排查
 

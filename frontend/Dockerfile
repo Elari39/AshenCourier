@@ -26,6 +26,12 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
 
 # 再拷源码并构建
 COPY frontend/ ./
+
+# 短链基址（构建期注入）：只在落地页演示区用到，留空则回退 window.location.origin。
+# 声明在 build 之前而不是 stage 开头 —— ARG 取值变化会让**后续所有层**失效，
+# 靠后声明能保住上面那条 pnpm install 的缓存（改域名不该重装一遍依赖）。
+ARG VITE_SHORT_BASE_URL=""
+ENV VITE_SHORT_BASE_URL=$VITE_SHORT_BASE_URL
 RUN pnpm build
 
 # ---------- 阶段 2：运行时 ----------
