@@ -58,7 +58,7 @@ export default defineConfig({
   test: {
     // 只跑纯函数单测，环境用 node：不引 jsdom / @vue/test-utils。
     // 组件的正确性（渲染、交互、版式）交给 e2e/ 下那套真浏览器脚本断言 ——
-    // 「图能解码、接口 200」不等于「页面对不对」，见 README 六条踩过的坑第 6 条。
+    // 「图能解码、接口 200」不等于「页面对不对」，见 README 七条踩过的坑第 6 条。
     environment: 'node',
     include: ['src/**/*.test.ts'],
   },

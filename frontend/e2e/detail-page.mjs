@@ -1,7 +1,7 @@
 /**
  * 详情页的浏览器检查：二维码版式、点击明细、翻页。
  *
- * 这个文件存在的主要理由是**版式断言**。README「六条踩过的坑」第 6 条记的正是
+ * 这个文件存在的主要理由是**版式断言**。README「七条踩过的坑」第 6 条记的正是
  * 「二维码画布撑破容器」：当时的验收只解码了 `toDataURL()` 的像素，而那永远是 320×320 ——
  * 版式坏了也照样全绿。所以这里断言的是**几何关系**（画布在容器内 / 显示宽等于容器宽减去
  * padding / 右边缘不压文字列），而不是「图能不能解码」。
@@ -101,7 +101,7 @@ export async function register({ checks, session, base, fixture, expectedClicks,
   await checks.run('二维码画布存在，且行内尺寸已被清空（不被 qrcode 写的 320px 盖住）', async () => {
     const qr = await session.evaluate(MEASURE_QR)
     assert(qr.found, '页面上找不到 canvas[aria-label="短链二维码"]')
-    // 这一条直接守住「六条踩过的坑」第 6 条：qrcode 的 canvas 渲染器会把
+    // 这一条直接守住「七条踩过的坑」第 6 条：qrcode 的 canvas 渲染器会把
     // style.width/height 写成 320px 行内样式，行内优先级高于 Tailwind 的 h-full w-full
     assertEqual(qr.inlineWidth, '', 'canvas 的行内 width 没被清空')
     assertEqual(qr.inlineHeight, '', 'canvas 的行内 height 没被清空')

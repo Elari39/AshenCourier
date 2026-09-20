@@ -183,7 +183,7 @@ func (h *linkHandler) claim(w http.ResponseWriter, r *http.Request) {
 	code := r.PathValue("code")
 	link, err := h.shortener.Get(r.Context(), code)
 	if err != nil || link.Status == domain.LinkStatusDeleted {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "未找到该短链", "")
+		writeLinkNotFound(w, r)
 		return
 	}
 	if !link.IsAnonymous() {
@@ -205,6 +205,14 @@ func (h *linkHandler) claim(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, r, http.StatusOK, toLinkDTO(claimed, h.shortener.ShortURL(r.Context(), claimed)))
 }
 
+// writeLinkNotFound 写「短链不存在」的 404。
+//
+// 抽出来是为了让五个调用点（claim / loadAuthorized 的三处 / 二维码）用同一套文案：
+// 同一个事实在不同接口上不该有两套措辞。
+func writeLinkNotFound(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteError(w, r, http.StatusNotFound, "not_found", "未找到该短链", "")
+}
+
 // loadAuthorized 取短链并做鉴权，link / stats 两个 handler 共用。
 // forDetail=true 时把「无权限」也报成 404（详情查询不泄露资源是否存在）。
 func loadAuthorized(w http.ResponseWriter, r *http.Request, shortener *service.Shortener, forDetail bool) (*domain.Link, bool) {
@@ -213,20 +221,20 @@ func loadAuthorized(w http.ResponseWriter, r *http.Request, shortener *service.S
 	link, err := shortener.Get(r.Context(), code)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "未找到该短链", "")
+			writeLinkNotFound(w, r)
 			return nil, false
 		}
 		httpx.WriteDomainError(w, r, err)
 		return nil, false
 	}
 	if link.Status == domain.LinkStatusDeleted {
-		httpx.WriteError(w, r, http.StatusNotFound, "not_found", "未找到该短链", "")
+		writeLinkNotFound(w, r)
 		return nil, false
 	}
 
 	if err := shortener.Authorize(link, actorOf(r)); err != nil {
 		if forDetail {
-			httpx.WriteError(w, r, http.StatusNotFound, "not_found", "未找到该短链", "")
+			writeLinkNotFound(w, r)
 			return nil, false
 		}
 		httpx.WriteDomainError(w, r, err)

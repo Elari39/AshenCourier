@@ -43,7 +43,7 @@
 - [本地开发](#本地开发)
 - [环境变量](#环境变量)
 - [部署与运维排查](#部署与运维排查)
-- [六条踩过的坑](#六条踩过的坑)
+- [七条踩过的坑](#七条踩过的坑)
 - [已知限制](#已知限制)
 - [验收记录](#验收记录)
 - [许可](#许可)
@@ -177,6 +177,7 @@ Browser ──┬─ /api/*         ─┐
 | 12 | GET | `/{code}` | — | **302 跳转**（不在 `/api` 下），**按请求的 `Host` 定位域**：未登记的主机名按默认域名处理。带口令且未解锁时改为 **200 口令页**（HTML，**不计点击**） |
 | 13 | GET | `/api/links/{code}/clicks?limit=20&cursor=&days=30&device=` | JWT 或 Key | 点击明细，`(occurred_at, id)` keyset 分页（**时间倒序**）；`device` 取 `desktop` / `mobile` / `tablet` / `bot` / `unknown`（与分布口径一致）。**IP 只回掩码网段**：IPv4 → `/24`、IPv6 → `/64` |
 | 14 | POST | `/{code}` | — | **口令校验**（表单 `password`）：正确 → **303** 回 `GET /{code}` 并下发解锁 cookie；错误 → **401** 重新渲染口令页。两者都**不计点击**（计点击的是随后那个 GET）。限流 20 次 / 10 分钟 / IP |
+| 15 | GET | `/api/links/{code}/qr.svg` | — | **二维码 SVG**（`image/svg+xml`），给邮件模板 / 印刷品 / 第三方系统引用。**公开可读**（二维码的内容就是 `short_url` 本身，而 `GET /{code}` 本来就公开）；只要求「短链存在且未被软删除」，已停用/过期的链接**仍能取图**（印好的二维码不该因此失效）。`Cache-Control: public, max-age=300`。限流沿用统计那一档（IP + 路径哈希） |
 
 **访问口令**（`POST /{code}`）
 
@@ -325,7 +326,7 @@ node e2e/browser-check.mjs --base http://localhost:8080
 `frontend/e2e/` 断言的是**接口测不出来的那一类问题**：二维码画布有没有撑破容器、
 明细翻页后两页有没有重叠、口令页在真浏览器里会不会按 303 换成 GET 并带上 cookie。
 它只创建 1 条短链（创建接口是 10 次/分钟/IP 的硬配额），跑之前请先起全栈；详见
-[六条踩过的坑](#6-渲染库写的行内尺寸会盖过-tailwind-类) 第 6 条。
+[七条踩过的坑](#6-渲染库写的行内尺寸会盖过-tailwind-类) 第 6 条。
 
 | 变量 | 作用 |
 | --- | --- |
@@ -540,7 +541,7 @@ docker compose exec postgres dropdb -U ashen restore_check
 ⚠️ 备份文件在宿主机的 `./deploy/backup/`（已被 `.gitignore` 忽略）。生产环境请把该目录
 换成对象存储或异地卷 —— 和数据库放在同一块盘上的备份，在磁盘故障时一起没有。
 
-## 六条踩过的坑
+## 七条踩过的坑
 
 这六条都是「设计稿上看不出来、只有真跑容器（或真在浏览器里看一眼）才暴露」的，
 写在这里省得别人再踩一遍。
@@ -680,6 +681,26 @@ canvas.style.height = ''
 与文字列左边缘 342.5），而**像素断言依然全绿**。也就是说，它确实守着当初那个洞，
 而不是「跑了、绿了、什么也没守住」。
 
+### 7. 第三方库的默认值：先实测，再写进计划
+
+`PLAN-NEXT §19.1` 的初稿断言「`skip2/go-qrcode` 的 `Bitmap()` **不含** quiet zone，SVG 要自己补 4 模块」。
+照这句话实现，图**照样能扫** —— 多一圈白边不会让扫码器读不出来，只会让二维码在版面上白边更宽、
+显得更小。这种错最难发现，因为它产出一个**合法、可解码**的结果。
+
+库的源码注释其实写着 *"The bitmap includes the required quiet zone"*（`qrcode.go:264`），
+只是计划里没写。真正的判据是两条**结构断言**：
+
+```go
+side := len(bitmap)   // 37 = 29（版本 3 的模块数）+ 两侧各 4 —— 静默区已经在里面了
+// 断言 1：viewBox 边长就等于 Bitmap() 的行数，不要再 +8
+// 断言 2：定位图案落在第 5 个模块（下标 4）
+bitmap[4][4] == true  // ← 若多补一圈，它会落在下标 8，这条立刻红
+```
+
+> 一般化的教训：**第三方库的默认行为要看源码或实测，不要照「印象 / 常识」写进计划**。
+> 「多补一圈静默区」与「少补一圈静默区」在肉眼与「能否解码」上都无法区分，
+> 只有「定位图案在第几个模块」这种断言分得清 4 与 8。
+
 ## 已知限制
 
 MVP 有意不做的部分：
@@ -687,17 +708,17 @@ MVP 有意不做的部分：
 | 不做 | 原因 |
 | --- | --- |
 | 自动抓取目标页标题 | 会引入 SSRF 风险，标题由用户手填 |
-| A/B 分流 / 短链轮换 | 需要 `link_targets` 表与「目标页归属」的新语义，收益不明（二维码已在详情页提供：前端 `qrcode` 生成，无需后端接口） |
+| A/B 分流 / 短链轮换 | 需要 `link_targets` 表与「目标页归属」的新语义，收益不明（二维码已两路提供：详情页前端 `qrcode` 画 canvas，后端 `GET /api/links/{code}/qr.svg` 给外部引用） |
 | 口令的重置流程 / 提示语 | 没有邮箱找回，也没有 `hint`：口令只由所有者设置与清除（忘了就重新设一条） |
 | 团队 / 多租户 / 权限体系 | 只有「匿名」与「个人账号」两种身份 |
-| Prometheus / Grafana | 只暴露 `/healthz` + JSON 结构化日志 + 关键计数 |
+| Prometheus / Grafana | 只暴露 `/healthz` + JSON 结构化日志 + 关键计数（`/metrics` 文本端点已立项，见 `PLAN-NEXT.md` §19.2） |
 | 自定义域名的**管理接口 / UI** | 数据模型与解析路径已就绪（000006 的 `domains` 表 + `links.domain_id`，`Host` 归一化后按域定位，缓存键按域分开），但「登记一个域名」目前只能由运维写库、再在 nginx 加一个 `server_name` + 证书。做管理端要先回答「谁来验证域名归属」（DNS TXT / 文件校验），不是表结构问题 |
 
 欢迎提 Issue 讨论优先级。
 
 ## 验收记录
 
-以下都是实测结果，不是设计意图。基线快照：**2026-09-18**（⑫ 起为 2026-09-19 的增量），Windows 本机 + Docker Desktop
+以下都是实测结果，不是设计意图。基线快照：**2026-09-18**（⑫ 起为 2026-09-19 / ⑲ 起为 2026-09-20 的增量），Windows 本机 + Docker Desktop
 （Go 1.27.1 / Node 24.19.0 / pnpm 11.15.1）。
 
 「在哪跑过」一列区分**本机实测**与 **CI 实测**——两者会得出同一结论，但覆盖面不同：
@@ -713,7 +734,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | `docker compose up -d --build` | 5 个容器全部 healthy（PG / Redis / backend / worker / frontend） | 本机 + CI `smoke` |
 | **容器级 ①**：`docker compose stop postgres` + 删短码缓存后跳转 | **503 + `Retry-After: 2`**，体为 `{"error":{"code":"unavailable"}}`（不是 500；缓存 `DEL` 返回 1，确认真的回源） | 本机 |
 | **容器级 ②**：`docker compose restart backend` 的关停顺序 | 日志顺序为 `收到退出信号 / 开始优雅关闭` → `统计写入队列已排空` → `api 已退出`；`dropped_clicks` 0 → 0；关停前 12 次跳转全部进流（`stream_len` 1 → 13） | 本机 |
-| **容器级 ③**：`go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | M0 时 **24 / 24 通过**（含「SPA 顶级路由经 nginx 返回 HTML」）；M5-1 加了 3 条口令用例后是 **27 / 27** | 本机 + CI `smoke` |
+| **容器级 ③**：`go run ./cmd/smoke -base http://localhost:8080 -expect-spa` | M0 时 **24 / 24 通过**（含「SPA 顶级路由经 nginx 返回 HTML」）；M5-1 加了 3 条口令用例后是 **27 / 27**；N8 又加了 1 条二维码用例（并给删除那一步补上「二维码也 404」）后是 **28 / 28**。⚠️ 不带 `-expect-spa` 时是 27 —— 那条 SPA 断言只在走 nginx 时才有意义，直连后端顶级路由本来就该 404 | 本机 + CI `smoke` |
 | **容器级 ④**：明细幂等去重（M2-1） | 5 次跳转后 `count(event_uid) = count(distinct event_uid) = 5`（迁移前的 19 行历史数据为 NULL）；用**显式 Stream ID** 重投一条「已经插过」的消息 → 明细 7 → 7、该 `event_uid` 行数 1 → 1，worker 无 ERROR/WARN 且消息被 ACK | 本机 |
 | 迁移往返（M2-1） | `migrate down 1` + `up` 连续两轮无报错；`version` = 2；列与部分唯一索引恢复，之后的新跳转仍写入 `event_uid` | 本机 |
 | **容器级 ⑤**：列表口径 = 基线 + 待同步增量（M2-2） | 停掉 worker 后跳转 4 次：PG 基线仍 `0`、Redis 增量 `4`，而 `GET /api/links` 的 `click_count` = **4**，与详情 `total_clicks` 相等；恢复 worker 后基线刷成 `4`、增量键清空、列表仍为 `4`；把 Redis 停掉时列表仍 **200**（退回纯基线，不 5xx） | 本机 |
@@ -723,7 +744,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑨**：标签（M4-1） | 创建时传 `["Ops","  ops  ","Dev"]` → 返回 `["ops","dev"]`（归一化 + 去重）；`?tag=ops` 只命中该条，`?tag=DEV`（大写）也能命中（按小写比较）；11 个标签 / 33 字符标签都返回 422 `invalid_tags`；`EXPLAIN` 下 `tags @> ARRAY['ops']` 走 **`links_tags_gin`**（Bitmap Index Scan）。浏览器侧：无头 Chrome 在 `/dashboard` 输入 `ops` 后列表从 2 条变 1 条 | 本机 |
 | **容器级 ⑩**：点击明细页（M4-2） | 跳转 3 次（手机 / 桌面 / 爬虫 UA）→ `?limit=2` 拿到 2 行 + 游标，带游标翻到第 2 页拿到剩下的 1 行、`next_cursor` 为空；时间倒序且两页无重叠无缺口（26 行 = 首屏 20 + 「加载更多」6，逐行核对无重复）。IP 掩码：库里 `host(ip)` = `172.20.0.1`，响应里是 `172.20.0.0/24`，且响应体里搜不到原始地址。`device=mobile` 命中 1 条、`device=unknown` 命中 0 条（与设备分布口径一致）；`limit=0` / `days=abc` / `device=tv` / 坏游标都返回 422 且 `field` 正确；无凭据 404。`EXPLAIN` 下 `(occurred_at, id) < (…)` 被下推进 **`click_events_link_time_id_idx`** 的 Index Cond，且 Index Only Scan **不带 Sort 节点**（索引本身给出倒序）。浏览器侧：无头 Chrome 打开 `/links/{code}`，首屏 20 行 + 「加载更多」，点一下变 26 行、按钮换成「已经到底了」，两页拼接处无重复行 | 本机 |
 | **容器级 ⑪**：二维码（M4-3） | 详情页把 `short_url` 画进 canvas（前端 `qrcode` 生成，无后端接口）。用 **jsQR 真的去扫**：页面 canvas 取回的 PNG 解码 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；点「下载二维码」落盘的 `ashencourier-{code}.png` 是 **1024×1024**，解码结果同样相等。配色为深墨 `#141413` + 暖奶油 `#faf9f5`（≈19:1，不用珊瑚色当前景），下载件用纯白底 | 本机 |
-| **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「六条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
+| **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「七条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | **集成测试 ⑫**：store 层迁移与 SQL（N1 / 自动化缺口 16.3-1） | 带 `POSTGRES_TEST_DSN` 时 20 个用例全绿（迁移形状与索引清单 / links 往返 / Update 的三种语义 / 与权威 SQL 逐项比对的 keyset 两处 / `tags @> ARRAY[...]` 走 `links_tags_gin` / `event_uid` 幂等 / 聚合的 UTC 日界 / 计数累加 / 过期扫描）；不带 DSN 时 9 个集成用例全部 SKIP、整包仍绿。**变异验证**：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → 报 `42P10 no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → 报 `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` | 本机（PG 18.6 容器）+ CI `backend` |
 | **容器级 ⑬**：短链访问口令（M5-1 / N2） | 建带口令的短链 → `password_protected=True`；库里 `password_hash` 是 `$2a$12$…`（60 字符，且 `= 'smoke-pass-9f3a'` 为 `f`）。未解锁 `GET /{code}` = **200 + text/html** 且 `total_clicks` 仍 0；错误口令 = **401** 且 `total_clicks` 仍 0；正确口令 = **303 + Set-Cookie**（`HttpOnly` / `SameSite=Lax` / `Path=/`，http 下不带 `Secure`）；带 cookie 的 GET = **302**，`total_clicks` = **1**、`click_events` = **1**（解锁那次没被重复计）；`clear_password` 后立刻 302（缓存被主动失效）。迁移 000005 往返两轮：`down 1` 后列消失、`up` 后回来，无报错且之后新跳转仍 302。冒烟 **27 / 27**（三条口令用例逐条 ✓）。浏览器侧（无头 Chrome + CDP）：创建表单展开高级选项后有「访问口令」；详情页显示「受口令保护」徽章，编辑面板有「访问口令」输入与「清除口令」按钮；短链未解锁渲染口令页、输错显示「口令不对，请再试一次。」、输对**真的落到目标地址** | 本机（Docker + 无头 Chrome） |
@@ -732,6 +753,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **单测/集成 ⑯**：GeoIP 解析（M5-2） | `internal/store/geoip` 与 `internal/worker` 的用例全绿：非法输入（空串 / 非 IP / 带端口 / 网段 / 主机名 / 坏 IPv6）一律空串、零值 Locator 与 nil 都安全、打开不存在的文件与非 mmdb 文件都报错；**带真库**（`GEOIP_TEST_DB` = 本机 GeoLite2-Country）时 `81.2.69.142` 解析出两位大写国家码、私网 `10.11.12.13` 为空、`::ffff:81.2.69.142` 与原生 IPv4 结果一致（`Unmap` 生效）。worker 侧断言国家码取自 `GeoLocator` 且**用原始 IP** 去查（不是掩码后的），未配置时留空不 panic。集成测试 `TestAggregateCountriesExcludesEmpty` 覆盖国家聚合 SQL：按点击数降序、**不含 `unknown` 桶**、无已知国家时是空切片（而非 nil）。**变异验证**：把国家 SQL 退回 `coalesce(nullif(country,''),'unknown')` → 结果多出 `{unknown 1}`，用例变红。降级日志也断言了级别：留空是 `INFO` 且不含 `WARN`，路径打不开是**恰好一条** `WARN` | 本机（真 PG 18.6 + 真 mmdb）|
 | **容器级 ⑰**：GeoIP 端到端与降级（M5-2） | worker 启动日志 `GeoIP 库文件已加载 /geoip/GeoLite2-Country.mmdb`。往 Stream 投两条**显式 ID + 公网 IP** 的点击（本机 curl 的客户端 IP 是 Docker 网关 `172.20.0.1`，私网段解析不出国家，所以必须直接投递）：`8.8.8.8` → 库里 `country=US`、`114.114.114.114` → `CN`；`GET /api/links/{code}/stats` 回 `countries=[{CN,1},{US,1}]`。降级实测两轮：`GEOIP_DB_PATH=/geoip/does-not-exist.mmdb` → worker 日志**恰好一条 WARN**、`8.8.8.8` 仍落库且 `country` 为 NULL、`/healthz` 200 `ok`；`GEOIP_DB_PATH` 留空 → 一条 INFO、零 WARN、行为相同 | 本机（Docker + 真 mmdb）|
 | **容器级 ⑱**：自定义域名分域解析（N6-1） | 跑完迁移 000006 后库内登记 `a.local`（此时 `domains` + `links.domain_id` 就位）→ 创建带 `domain=a.local` 的短链，`short_url` = `http://a.local/{code}`。`curl -H 'Host: a.local'` 得 **302**，而同一短码在默认 Host 上是 **404**；反向（默认域名的短链拿到 `a.local` 上）同样是 **404**；`Host: A.LOCAL:8080`（大写 + 端口）也能命中（归一化生效）。真 Redis 里键确实按域分开：`link:v2:{域 UUID}:{code}` 与 `link:v2:-:{code}`，跨域那条**没有**落在默认域前缀下。共 **24 / 24**。**变异验证**：把缓存键改回不分域 + `sameDomain` 改成恒 true → **8 / 24 红**，失败的正是要害 —— 「紧接着在 `a.local` 上访问该短码」变成 404（跨域探测写下的负缓存把正确域的访问挡死）、反向那条变成 302（串味，访问者被送到另一个域的目标）；还原后回到 24 / 24 | 本机 |
+| **容器级 ⑲**：后端二维码 SVG 端点（N8 / M4-3 方案 B） | `GET /api/links/{code}/qr.svg` 返回 `image/svg+xml`（3243 字节），带 `Cache-Control: public, max-age=300` 与 `nosniff`，响应体里搜不到短码与 `short_url`（**没有任何用户可控字节**）。**真扫两轮尺寸**（无头 Chrome 光栅化 → jsQR）：512px 与 128px 解码都 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；两种情况都有深墨前景 `#141413` + 纯白底，四条边采样全白（静默区），定位图案落在**第 5 个模块**（证明静默区恰好 4，不是 8）。404 语义三种都验过：不存在的短码 / 保留字 / **已软删除**（删完再取图 → 404）。共 **19 / 19**。**变异验证**：`symbol.DisableBorder = true`（去掉静默区）→ 静默区断言红；子路径写成 `h-%d`（方向反）→ 闭合/模块数断言红。冒烟侧固化了两条（公开可读 + SVG 形状 + 不含用户可控字节；删除后 **404**），使 `cmd/smoke` 从 27 项变 **28 项** | 本机（Docker + 无头 Chrome） |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 
@@ -749,11 +771,12 @@ PR 只跑 `backend` 与 `frontend` 两个快 job（约 1 分钟），因为 `doc
 （26 次跳转 + 等明细落库），所以 smoke 开始时限流窗口已经滚过 —— 顺序一旦颠倒，
 浏览器验收第一步就会拿到 429。
 
-最近的实测：[run 35424447615](https://github.com/Elari39/AshenCourier/actions/runs/35424447615)
-三个 job 全绿（`frontend` 41s / `backend` 54s / `smoke` 85s）。两个关键证据：`backend` 里
-`internal/store/postgres` 耗时 **1.271s**（未设置 `POSTGRES_TEST_DSN` 时集成测试会整体跳过，
-那时只有零点几秒 —— 所以它是真的连上了 service 容器里的 PG）；`smoke` 输出
-**27 项检查，0 项失败**，含三条口令用例。
+最近的实测：[run 35482195414](https://github.com/Elari39/AshenCourier/actions/runs/35482195414)
+三个 job 全绿（`frontend` 41s / `backend` 1m59s / `smoke` 1m41s）。三个关键证据：`backend` 里
+`internal/store/postgres` 跑了 **1.271s**（未设置 `POSTGRES_TEST_DSN` 时集成测试会整体跳过，
+那时只有零点几秒 —— 所以它是真的连上了 service 容器里的 PG）；`smoke` 里 **`frontend/e2e/` 19/19
+之后紧接 `cmd/smoke` 27/27**（在 runner 自带的 Chrome 上真跑，不靠本机的 `CHROME_BIN` 探测），
+按 step 分组计数 19 + 27 = 46，与日志里的 ✓ 行数相等；`frontend` 的 vitest **31 个用例**全绿。
 
 **CI 自身也实测过「会红」**（不是只看过绿灯）：故意破坏一个文件的 gofmt → `backend` job 红并列出
 文件名；故意改错冒烟工具的期望值 → `smoke` job 红、日志里能看到断言失败与容器日志。配置见

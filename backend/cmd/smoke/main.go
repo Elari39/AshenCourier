@@ -4,7 +4,8 @@
 // 而 Go 程序跨平台且能做真正的 JSON 断言。
 //
 // 覆盖：健康检查 → 匿名创建 → 302 跳转 → 统计收敛 → 鉴权边界 →
-// 修改/删除 → 保留字与开放重定向防护 → 访问口令 → 注册/登录 → 认领 → 分页 → 限流。
+// 修改/删除 → 保留字与开放重定向防护 → 访问口令 → 注册/登录 → 认领 → 分页 →
+// 二维码 → 限流。
 //
 // 用法：
 //
@@ -877,8 +878,40 @@ func (s *suite) runAll(ctx context.Context) error {
 		return nil
 	})
 
-	// ---------- 9. 删除 ----------
-	s.check("DELETE 后详情 404、跳转 404", func(ctx context.Context) error {
+	// ---------- 9. 二维码（公开可读，N8 / M4-3 方案 B）----------
+	//
+	// 这个端点刻意不要求凭据：二维码的内容就是 short_url 本身，而 GET /{code}
+	// 本来就公开。这条断言同时钉住「公开」这件事 —— 将来谁给它挂上鉴权，这里会红。
+	s.check("GET /api/links/{code}/qr.svg 公开可读、是 SVG、且不含用户可控字节", func(ctx context.Context) error {
+		got, err := s.do(ctx, http.MethodGet, "/api/links/"+code+"/qr.svg", nil, nil)
+		if err != nil {
+			return err
+		}
+		if got.status != http.StatusOK {
+			return fmt.Errorf("期望 200（不带任何凭据），实际 %d：%s", got.status, got.body)
+		}
+		if ct := got.header.Get("Content-Type"); !strings.HasPrefix(ct, "image/svg+xml") {
+			return fmt.Errorf("Content-Type 期望 image/svg+xml，实际 %q", ct)
+		}
+		if cc := got.header.Get("Cache-Control"); !strings.Contains(cc, "max-age=300") {
+			return fmt.Errorf("Cache-Control 期望含 max-age=300，实际 %q", cc)
+		}
+
+		body := string(got.body)
+		if !strings.HasPrefix(body, "<svg ") || !strings.Contains(body, "<path ") {
+			return fmt.Errorf("响应体不是预期的 SVG 形状：%.80s", body)
+		}
+		// 二维码把 short_url 编成了**模块几何**：文本里既不该出现短码，
+		// 也不该出现目标地址。这条同时钉住「没有 XML 注入面」——
+		// 响应体里根本不进任何用户可控字节。
+		if strings.Contains(body, code) || strings.Contains(body, targetURL) {
+			return errors.New("SVG 响应体里出现了用户可控字节（短码或目标地址）")
+		}
+		return nil
+	})
+
+	// ---------- 10. 删除 ----------
+	s.check("DELETE 后详情 404、跳转 404、二维码 404", func(ctx context.Context) error {
 		del, err := s.do(ctx, http.MethodDelete, "/api/links/"+code, nil, bearer(tokenB))
 		if err != nil {
 			return err
@@ -902,10 +935,20 @@ func (s *suite) runAll(ctx context.Context) error {
 		if jump.status != http.StatusNotFound {
 			return fmt.Errorf("删除后跳转期望 404，实际 %d", jump.status)
 		}
+
+		// 已软删除的短链不该再出图：二维码印出去之后，取图这件事本身
+		// 仍应以「链接还在不在」为准（而不是以「曾经存在过」为准）。
+		qr, err := s.do(ctx, http.MethodGet, "/api/links/"+code+"/qr.svg", nil, nil)
+		if err != nil {
+			return err
+		}
+		if qr.status != http.StatusNotFound {
+			return fmt.Errorf("删除后二维码期望 404，实际 %d", qr.status)
+		}
 		return nil
 	})
 
-	// ---------- 10. 限流（放在最后：会消耗掉本 IP 的创建配额）----------
+	// ---------- 11. 限流（放在最后：会消耗掉本 IP 的创建配额）----------
 	s.check("创建接口按 IP 限流，连续请求最终返回 429 + Retry-After", func(ctx context.Context) error {
 		for i := range 15 {
 			got, err := s.do(ctx, http.MethodPost, "/api/links", map[string]any{

@@ -66,6 +66,7 @@ type Options struct {
 //	DELETE /api/links/{code}
 //	GET    /api/links/{code}/stats
 //	GET    /api/links/{code}/clicks
+//	GET    /api/links/{code}/qr.svg   ← 二维码图片（公开可读，见 qrHandler）
 //	POST   /api/links/{code}/claim
 //	GET    /{code}          ← 302 跳转；带口令且未解锁时是 200 口令页
 //	POST   /{code}          ← 口令校验：成功 303 回 GET，失败 401
@@ -88,6 +89,7 @@ func Router(opts Options) http.Handler {
 		pageSize:  opts.ClickPageSize,
 		maxSize:   opts.MaxClickPageSize,
 	}
+	qrAPI := &qrHandler{shortener: opts.Shortener}
 	redirectAPI := &redirectHandler{
 		shortener:     opts.Shortener,
 		unlocker:      opts.Unlock,
@@ -136,6 +138,12 @@ func Router(opts Options) http.Handler {
 	// 不会波及真实跳转的配额（scope 不同 → Redis 键不同）。
 	mux.Handle("GET /api/links/{code}/clicks",
 		limit(opts.RateLimitStats)(optionalUser(http.HandlerFunc(clickAPI.list))))
+
+	// 二维码图片：公开可读（理由见 qrHandler），但仍挂上限流 ——
+	// 复用统计那条规则（IP + 路径哈希）：既防刷，又不会和真实跳转共享配额
+	// （scope 不同 ⇒ Redis 键不同；路径不同 ⇒ 哈希不同）。
+	mux.Handle("GET /api/links/{code}/qr.svg",
+		limit(opts.RateLimitStats)(http.HandlerFunc(qrAPI.serve)))
 
 	// ---- 短码跳转：兜底模式 ----
 	// 显式限定 GET：不加方法前缀时 POST /abc、DELETE /abc 也会命中这里

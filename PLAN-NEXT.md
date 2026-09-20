@@ -98,7 +98,7 @@
 画布压住右侧文字与下方卡片。原因是当时的验收只解码 `toDataURL()` 的像素（那永远是 320×320，
 版式坏了也全绿），是在真浏览器里看了一眼才暴露的。修法是画完清掉行内尺寸；
 验收也补了三个版式断言（画布落在容器内 / 显示宽 = 容器宽 − padding / 右边缘不压文字列）。
-细节写进 README「六条踩过的坑」第 6 条。
+细节写进 README「七条踩过的坑」第 6 条。
 
 **本机验收用到的临时工具（未入库）**：`.workbuddy/tmp/browser-check.mjs` —— 无头 Chrome + CDP
 的小脚本（只用 Node 内置 fetch / WebSocket），用来在真实浏览器里截图并断言页面文本。
@@ -692,7 +692,7 @@ docker compose exec postgres dropdb -U ashen restore_check
    gitignore，只在本机跑），所以「画布不溢出容器」这类版式断言**只有我在本地执行**。
    代价刚付过一次：二维码画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 类），
    旧验收只解码 `toDataURL()` 的像素 —— 那永远是 320×320，**版式坏了也全绿**，
-   是有人在真浏览器里看了一眼才暴露的（见 README「六条踩过的坑」第 6 条）。
+   是有人在真浏览器里看了一眼才暴露的（见 README「七条踩过的坑」第 6 条）。
    补法：把 Playwright / Puppeteer 引进 CI（约 +1–2 分钟），或至少把版式断言固化成
    随仓库入库的可重复脚本。
    → **已实施（N4 / `0464754`）**：选了后一条 —— `frontend/e2e/` 入库（`cdp.mjs` / `harness.mjs` /
@@ -736,7 +736,7 @@ docker compose exec postgres dropdb -U ashen restore_check
 | 明确不做的事及理由 | §13 |
 | 需要拍板的六个点与当前状态 | §15 |
 | 迁移与契约变更台账（000002–000006 已实施；000007–000008 未实施） | §9 |
-| 实测验收记录（①–⑪）、设计取舍与踩过的坑 | `README.md` 的「验收记录」「已知限制」「六条踩过的坑」 |
+| 实测验收记录（①–⑪）、设计取舍与踩过的坑 | `README.md` 的「验收记录」「已知限制」「七条踩过的坑」 |
 
 ---
 
@@ -1146,7 +1146,7 @@ CREATE UNIQUE INDEX links_domain_short_code_key
 | 批次 | 内容 | 类型 | 状态 |
 | --- | --- | --- | --- |
 | **N7** | 本节的拍板与 CI 验证记录（§17.3 / §18.5 / §19） | docs | ✅ |
-| **N8** | 后端二维码 SVG 端点（§19.1，M4-3 方案 B） | feat | ⏳ |
+| **N8** | 后端二维码 SVG 端点（§19.1，M4-3 方案 B） | feat | ✅ |
 | **N9** | `/metrics` 零依赖文本端点（§19.2） | feat | ⏳ |
 | **N10** | 收尾：§0 批次表 / README 验收记录补实测输出 | docs | ⏳ |
 
@@ -1165,7 +1165,8 @@ CREATE UNIQUE INDEX links_domain_short_code_key
 | `backend/go.mod` / `go.sum` | 新增 `github.com/skip2/go-qrcode`（编码用，纯 Go、无传递依赖） |
 | `backend/internal/handler/qr_test.go` | 新建：单测（形态 / 静默区 / 尺寸 / 转义） |
 | `backend/internal/handler/router_test.go` | 路由表补一行（无鉴权：公开可读） |
-| `README.md` | API 表 + 「二维码」小节 + 依赖说明 |
+| `README.md` | API 表 + 验收记录 + 「七条踩过的坑」新增第 7 条（库的默认值要实测） |
+| `backend/cmd/smoke/main.go` | 补一条「公开可读 + SVG 形状 + 不含用户可控字节」，并给 DELETE 那步加「二维码也 404」（27 → 28 项） |
 
 **为什么新增依赖而不是手写编码器**：QR 的 Reed-Solomon 纠错、掩码选择与版本信息是**规范驱动**的
 一堆位运算 —— 手写一遍的收益只是「少一个依赖」，代价是任何一个位算错都会产出一个**看起来很像、
@@ -1179,22 +1180,46 @@ CREATE UNIQUE INDEX links_domain_short_code_key
 | **公开可读（无鉴权）** | 二维码的内容就是 `short_url` 本身，而 `GET /{code}` 本来就公开；要求所有者凭据会让「邮件/印刷品引用」这个唯一的使用场景无法实现 |
 | 只要求「短链存在且未被软删除」 | 与 `claim` 的判定一致。**不**要求 `Redirectable`：印刷好的二维码不该因为「链接临时过期/停用」就取不到图，而扫码时该 410 的仍然 410 |
 | 复用 `RateLimitStats`（IP + 该路径哈希） | 与统计/明细同一条规则：既防刷，又不会吃掉真实跳转的配额（scope 不同 → Redis 键独立） |
-| 4 模块静默区**由自己补** | `qrcode.Bitmap()` 返回的符号**不含** quiet zone，直接渲染成 SVG 会贴边，很多扫码器（尤其印刷品）读不出来 |
+| 4 模块静默区：**库已经自带** | ⚠️ 本节初稿写「`Bitmap()` 不含 quiet zone、要自己补」，**实测是错的** —— `skip2/go-qrcode` 的 `Bitmap()` 默认已含 4 模块边框（`DisableBorder` 字段可取反）。因此 SVG 的 `viewBox` 边长 = `symbol.Bitmap()` 的行数，**不要再手动 +8**，否则会得到一个 12 模块的双重静默区（仍能扫，但白白浪费 30% 的边距）。单测断言直接钉「定位图案落在第 5 个模块上」，这样「库哪天改了默认值」也会被抓到 |
 | `viewBox` 用模块坐标，宽高用固定 256 | `viewBox="0 0 N N"` + `width/height="256"`：既能被 `<img width=64>` 缩小、也能被印刷放大到任意尺寸而不糊 |
 | `Cache-Control: public, max-age=300` | 图只依赖 `short_url`（域 + 短码），与目标地址无关；5 分钟够挡掉重复渲染，又不至于让「刚改的域名」长时间残留 |
 | `X-Content-Type-Options: nosniff` | 与 JSON 响应同一套思路 |
 
 **验收**
 
-1. 单测：`IsValidShape` / 保留字 → 404；不存在 → 404；已软删除 → 404；正常 → 200 + `image/svg+xml`；
-   SVG 里 `viewBox` 边长 = 模块数 + 8（两侧各 4 模块静默区）；短码含 `&` 之类不会逃逸出 XML（内容只进
-   `<svg>` 的属性/文本之前先转义）
-2. **真扫**（不能只看「生成没报错」）：把 SVG 光栅化后用 jsQR 解码 —— 与 M4-3 方案 A 的验收同一把尺子。
-   本机路径：用无头 Chrome 打开一个内联了该 SVG 的页面 → 截图 → jsQR 解码 → 断言等于 `short_url`；
-   解码值还要与 `GET /api/links/{code}` 的 `short_url` **逐字相等**（含自定义域名时也要对）
+1. 单测（`qr_test.go`）：非法形态 / 保留字 → 404；不存在 → 404；已软删除 → 404；正常
+   → 200 + `image/svg+xml`；`viewBox` 是正方形、边长 = `Bitmap()` 行数；`Cache-Control`
+   与 `nosniff` 都在；响应体不含任何用户可控字节
+2. **真扫**（不能只看「生成没报错」）：把 SVG 光栅化后用 jsQR 解码 —— 与 M4-3 方案 A 的验收同一把尺子
 3. 容器级：`curl -si localhost:8080/api/links/{code}/qr.svg` 首行 200 + 正确的 Content-Type；
    经 nginx（`localhost:8080` 对外的短码 location 不覆盖 `/api/`，所以走 API 反代）同样 200
-4. 变异验证：把关掉静默区（`quiet=0`）→ 静默区断言必须变红；把 `code` 直接插进 SVG 不做转义 → 转义用例必须红
+4. 变异验证：去掉静默区（`symbol.DisableBorder = true`）→ 静默区断言必须变红；
+   把子路径的 `h%d` 写成 `h-%d`（方向写反）→ 闭合/模块数断言必须变红
+
+**实测（2026-09-20，容器级 19/19）**
+
+单测：`go test ./internal/handler/ -run 'QR|Router'` 全绿；上面两条变异都如期变红后还原。
+容器级脚本 `.workbuddy/tmp/qrcheck/qr-svg-accept.mjs`（无头 Chrome 光栅化 + jsQR 解码）：
+
+| # | 断言 | 实测值 |
+| --- | --- | --- |
+| 1–5 | 200 / `image/svg+xml` / `Cache-Control: public, max-age=300` / `nosniff` / 响应体是 SVG | 3243 字节 |
+| 6 | 响应体不含短码与 `short_url` 字节 | 通过 |
+| 7 | `viewBox` 正方形，边长 = `Bitmap()` 行数 | **37×37**（= 29 模块（版本 3）+ 两侧各 4 静默区，**静默区已含在 Bitmap 里**） |
+| 8–9 | 不存在的短码 → 404；保留字 → 404 | 均为 404 |
+| 10–13 | 512px 渲染后**真扫** = `short_url`；有深墨前景 + 纯白底；四条边是静默区；定位图案落在第 5 个模块 | 解码 = `http://localhost:8080/ZkAtqB4`；边角采样 `255,255,255`；模块 (4,4) = `20,20,19` |
+| 14–17 | 同上，128px（缩小到手机上常见尺寸） | 解码一致；1 模块 = 3.46px |
+| 18–19 | 删除短链 → 204；已删除的短码不再出图 → 404 | 均为通过 |
+
+另有两项固化进了 `cmd/smoke`（**27 → 28 项**，本机带 `-expect-spa` 实测 **28 / 28**）：
+「公开可读 + 是 SVG + 不含用户可控字节」一条，以及给「DELETE 后」那一步补上「二维码也 404」。
+
+> 第 7 行值得停一下：`viewBox=37` 的含义是 `29（版本 3 的模块数）+ 8（两侧各 4 静默区）`。
+> 也就是说 **37 里已经含了静默区** —— 若照本节初稿的说法「再自己补 4 模块」，会得到
+> `numModules + 16 = 45`，白边翻倍。库的 `Bitmap()` 文档原话是
+> *"The bitmap includes the required quiet zone"*。所以正确的断言不是去凑一个公式，
+> 而是「边长 = `Bitmap()` 行数」+「定位图案在第 5 个模块上」—— 后者才是真正证明
+> 静默区恰好 4 模块的那一条。
 
 ### 19.2 批次 N9：`/metrics` 零依赖文本端点
 

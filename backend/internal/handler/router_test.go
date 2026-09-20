@@ -44,7 +44,7 @@ func newTestRouter(t *testing.T, links map[string]*domain.Link) http.Handler {
 	})
 }
 
-// TestRouterTable 用一张表钉住 README「API」一节的 14 条路由：
+// TestRouterTable 用一张表钉住 README「API」一节的 15 条路由：
 // 每条都要能被路由到（而不是 404），且鉴权层次符合文档 ——
 // 这正好挡住「改了路由忘了改文档」和「requireUser 写成 optionalAuth」两类回归。
 func TestRouterTable(t *testing.T) {
@@ -144,6 +144,11 @@ func TestRouterTable(t *testing.T) {
 			wantStatus: http.StatusSeeOther,
 			why:        "口令校验入口：没设口令的链接直接 303 回 GET（计点击的是随后那个 GET，不会重复计）",
 		},
+		{
+			name: "15 GET /api/links/{code}/qr.svg", method: http.MethodGet, path: "/api/links/" + code + "/qr.svg",
+			wantStatus: http.StatusOK,
+			why:        "二维码图片**公开可读**（不挂 optionalUser/requireUser）：它的内容就是 short_url，要能被邮件与印刷品直接引用",
+		},
 	}
 
 	for _, tt := range tests {
@@ -179,6 +184,7 @@ func TestRouterMethodAwareness(t *testing.T) {
 		"/api/links/m0smoke",
 		"/api/links/m0smoke/stats",
 		"/api/links/m0smoke/clicks",
+		"/api/links/m0smoke/qr.svg",
 		"/api/links/m0smoke/claim",
 		"/m0smoke",
 	}
