@@ -43,7 +43,7 @@
 - [本地开发](#本地开发)
 - [环境变量](#环境变量)
 - [部署与运维排查](#部署与运维排查)
-- [八条踩过的坑](#八条踩过的坑)
+- [九条踩过的坑](#九条踩过的坑)
 - [已知限制](#已知限制)
 - [验收记录](#验收记录)
 - [许可](#许可)
@@ -92,8 +92,11 @@ docker compose up -d --build
 | 部署 | Docker Compose + nginx | 单域名同时托管 SPA、反代 `/api`、承接短码跳转 |
 
 设计系统的来源是仓库里的 [`DESIGN.md`](./DESIGN.md)（暖奶油画布 + 珊瑚主色 + 深色产品面板 +
-衬线大标题）。实施计划与全部技术取舍见 [`PLAN.md`](./PLAN.md)；后续迭代计划（M0–M5：CI、
-幂等去重、明细页、标签、密码保护、GeoIP……）见 [`PLAN-NEXT.md`](./PLAN-NEXT.md)。
+衬线大标题）。
+
+> **关于 `PLAN.md` / `PLAN-NEXT.md`**：这两份是**本地工作笔记**，不随仓库分发（已在 `.gitignore` 里）。
+> 代码注释里的「`PLAN.md` §x」「`PLAN-NEXT.md` §y」指的就是它们 —— 每条结论都已经
+> 在注释或本文件里写明，不依赖那两份文件也能读懂代码与运维。
 
 ## 架构
 
@@ -133,6 +136,7 @@ Browser ──┬─ /api/*         ─┐
 | Redis 写统计失败 | 记 warn 日志并丢弃该次统计，**不影响 302** |
 | Redis 限流不可用 | 全量放行并累计降级次数（`/healthz` 的 `rate_limit_degraded`），不熔断自锁 |
 | PostgreSQL 不可用 | 返回 503 + `Retry-After` |
+| 某条点击消息永远写不进库（外键冲突等永久性失败） | 重投 5 次后 ACK 丢弃并记 WARN（worker 打点的 `dead_lettered`），不再无限重投 —— 否则它会每 30 秒被捞回来一次，刷屏日志并卡住同批的正常消息 |
 
 ### 数据模型
 
@@ -142,7 +146,7 @@ Browser ──┬─ /api/*         ─┐
 | 对象 | 作用 | 关键约束 |
 | --- | --- | --- |
 | `links` | 短链主体 | `short_code` **全局唯一**（短码生成与所有管理端接口都按它定位；**这是一条拍板结论**——PLAN-NEXT §18.5 决定不做「同码跨域共存」，不是遗留项）；`domain_id uuid`（000006 起，可空）指向所属自定义域名，`NULL` = 默认域名（`PUBLIC_BASE_URL` 指向的那个）；`status` 用 `smallint` 而非 PG enum（改状态机不用 `ALTER TYPE`）；`key_hash bytea` 存匿名管理密钥的 SHA-256；`tags text[]`（000003 起）配 GIN 索引做标签筛选 |
-| `domains` | 自定义域名（000006 起） | `name` 唯一且**存归一化后的小写、无端口、无尾点**（`A.LOCAL:8080` 与 `a.local.` 是同一个域）；`is_active` 可关停而不删行（保留历史短链的归属）。**没有管理接口**：目前只能由运维写库登记，见「已知限制」 |
+| `domains` | 自定义域名（000006 起） | `domain` 唯一且**存归一化后的小写、无端口、无尾点**（`A.LOCAL:8080` 与 `a.local.` 是同一个域）；`is_active` 可关停而不删行（保留历史短链的归属）。**没有管理接口**：目前只能由运维写库登记，见「已知限制」 |
 | `users` | 账号 | `email` 存 `text` + `unique index (lower(email))` 做大小写不敏感唯一（不引入 `citext` 扩展，省掉一次 `CREATE EXTENSION`） |
 | `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入；`country` 由 worker 查 GeoIP 库文件后写入（未部署则恒为 NULL）；`event_uid`（000002 起）取自 Stream 消息 ID，配合部分唯一索引做幂等去重；`(link_id, occurred_at DESC, id DESC)`（000004 起）服务明细页的 keyset 翻页，旧的 `(link_id, occurred_at DESC)` 是被它覆盖的前缀索引，已删除 |
 | `link_click_totals` | 视图 | `links.click_count + count(click_events)`，用于人工对账 |
@@ -330,7 +334,7 @@ node e2e/browser-check.mjs --base http://localhost:8080
 `frontend/e2e/` 断言的是**接口测不出来的那一类问题**：二维码画布有没有撑破容器、
 明细翻页后两页有没有重叠、口令页在真浏览器里会不会按 303 换成 GET 并带上 cookie。
 它只创建 1 条短链（创建接口是 10 次/分钟/IP 的硬配额），跑之前请先起全栈；详见
-[八条踩过的坑](#6-渲染库写的行内尺寸会盖过-tailwind-类) 第 6 条。
+[九条踩过的坑](#6-渲染库写的行内尺寸会盖过-tailwind-类) 第 6 条。
 
 | 变量 | 作用 |
 | --- | --- |
@@ -454,13 +458,13 @@ mmdb 查询虽然只是一次内存映射读，但它会引入文件句柄与页
 | `GEOIP_DB_PATH` | 空 | MaxMind DB 格式的国家库在**容器内**的路径（如 `/geoip/dbip-country-lite.mmdb`）。留空或文件打不开都只是让 `country` 留空，不影响跳转与统计，见「GeoIP 国家维度」 |
 | `POSTGRES_TEST_DSN` | 空 | **只给测试用，进程不读它**：store 集成测试的 DSN，未设置时整体跳过（见「store 层集成测试」） |
 | `GEOIP_TEST_DB` | 空 | **只给测试用，进程不读它**：`internal/store/geoip` 里唯一会真查库的用例的库文件路径，未设置时该用例 SKIP |
+| `REDIS_TEST_ADDR` | 空 | **只给测试用，进程不读它**：`internal/store/redis` 集成测试的 Redis 地址（形如 `localhost:6379`），未设置时整体跳过。配套口令用 `REDIS_TEST_PASSWORD`（无口令的本地 Redis 不用填）。那段结算逻辑是一段 Lua，只有跑在真 Redis 上才有意义 |
 
 ### 前端（可选）
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `VITE_API_BASE_URL` | `/api` | API 基址 |
-| `VITE_PUBLIC_BASE_URL` | `window.location.origin` | 展示短链用 |
+| `VITE_API_BASE_URL` | `/api` | API 基址（短链前缀不用它配 —— 后端按 `PUBLIC_BASE_URL` 与所属域名拼进 `short_url` 返回） |
 
 > 只有 `VITE_` 前缀会打进产物，**绝不要往里面放密钥**。
 
@@ -490,6 +494,9 @@ docker compose exec postgres psql -U ashen -d ashen -c \
   "select short_code, click_count as base,
           (select count(*) from click_events e where e.link_id = l.id) as events
    from links l order by created_at desc limit 20;"
+
+# 毒消息：重投次数超限、被丢弃（明细不会入库）的点击消息。这个数不该长期增长
+docker compose logs worker | grep '毒消息'
 
 # 最近失败的请求
 docker compose logs backend | grep '"level":"ERROR"'
@@ -589,7 +596,7 @@ docker compose exec postgres dropdb -U ashen restore_check
 ⚠️ 备份文件在宿主机的 `./deploy/backup/`（已被 `.gitignore` 忽略）。生产环境请把该目录
 换成对象存储或异地卷 —— 和数据库放在同一块盘上的备份，在磁盘故障时一起没有。
 
-## 八条踩过的坑
+## 九条踩过的坑
 
 这八条都是「设计稿上看不出来」、只有真跑起来（跑容器、真在浏览器里看一眼、或者真跑一遍 CI）
 才暴露的，写在这里省得别人再踩一遍。
@@ -788,6 +795,34 @@ if budget := deadline.Sub(start); budget < opTimeout || budget > time.Second {
 > 复现手法：**把机器压满**再 `-count` 跑几百次 —— 空闲的 16 核上跑 300 次一次都不会红，
 > 所以「跑过了」不能证明它不抖。
 
+### 9. `t.Cleanup` 里不能再使用 `t.Context()`
+
+给 Redis Stream 的集成测试写清理时，第一版是这么写的：
+
+```go
+t.Cleanup(func() { _ = c.Ack(t.Context(), ids...) })
+```
+
+而 `t.Context()` 返回的 context **在该测试的 Cleanup 函数运行之前就已被取消** ——
+于是这次 ACK 静默失败（错误还被 `_ =` 丢掉了），那几条消息留在 PEL 里，
+把下一个用例的 `PendingCount` 断言带偏。症状很迷惑：单独跑每个用例都绿，
+一起跑就有 3 条「幽灵消息」。
+
+```go
+t.Cleanup(func() {
+    ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+    defer cancel()
+    if err := c.Ack(ctx, ids...); err != nil {   // 别再吞掉错误
+        t.Errorf("清理测试消息失败（会污染下一个用例）：%v", err)
+    }
+})
+```
+
+> 一般化的教训：**清理路径上的错误不要吞**。清理失败在当时往往看不出症状，
+> 但它会悄悄改变下一个用例的前置条件，而那时报错的是别人。
+> 顺带一条：凡是「用例之间共享外部状态」的测试（PEL、数据库表、临时目录），
+> 都要在开跑前先排空一遍，否则上一次运行（尤其是失败中断的那次）的残留会一直咬人。
+
 ## 已知限制
 
 MVP 有意不做的部分：
@@ -831,7 +866,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑨**：标签（M4-1） | 创建时传 `["Ops","  ops  ","Dev"]` → 返回 `["ops","dev"]`（归一化 + 去重）；`?tag=ops` 只命中该条，`?tag=DEV`（大写）也能命中（按小写比较）；11 个标签 / 33 字符标签都返回 422 `invalid_tags`；`EXPLAIN` 下 `tags @> ARRAY['ops']` 走 **`links_tags_gin`**（Bitmap Index Scan）。浏览器侧：无头 Chrome 在 `/dashboard` 输入 `ops` 后列表从 2 条变 1 条 | 本机 |
 | **容器级 ⑩**：点击明细页（M4-2） | 跳转 3 次（手机 / 桌面 / 爬虫 UA）→ `?limit=2` 拿到 2 行 + 游标，带游标翻到第 2 页拿到剩下的 1 行、`next_cursor` 为空；时间倒序且两页无重叠无缺口（26 行 = 首屏 20 + 「加载更多」6，逐行核对无重复）。IP 掩码：库里 `host(ip)` = `172.20.0.1`，响应里是 `172.20.0.0/24`，且响应体里搜不到原始地址。`device=mobile` 命中 1 条、`device=unknown` 命中 0 条（与设备分布口径一致）；`limit=0` / `days=abc` / `device=tv` / 坏游标都返回 422 且 `field` 正确；无凭据 404。`EXPLAIN` 下 `(occurred_at, id) < (…)` 被下推进 **`click_events_link_time_id_idx`** 的 Index Cond，且 Index Only Scan **不带 Sort 节点**（索引本身给出倒序）。浏览器侧：无头 Chrome 打开 `/links/{code}`，首屏 20 行 + 「加载更多」，点一下变 26 行、按钮换成「已经到底了」，两页拼接处无重复行 | 本机 |
 | **容器级 ⑪**：二维码（M4-3） | 详情页把 `short_url` 画进 canvas（前端 `qrcode` 生成，无后端接口）。用 **jsQR 真的去扫**：页面 canvas 取回的 PNG 解码 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；点「下载二维码」落盘的 `ashencourier-{code}.png` 是 **1024×1024**，解码结果同样相等。配色为深墨 `#141413` + 暖奶油 `#faf9f5`（≈19:1，不用珊瑚色当前景），下载件用纯白底 | 本机 |
-| **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「八条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
+| **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「九条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | **集成测试 ⑫**：store 层迁移与 SQL（N1 / 自动化缺口 16.3-1） | 带 `POSTGRES_TEST_DSN` 时 20 个用例全绿（迁移形状与索引清单 / links 往返 / Update 的三种语义 / 与权威 SQL 逐项比对的 keyset 两处 / `tags @> ARRAY[...]` 走 `links_tags_gin` / `event_uid` 幂等 / 聚合的 UTC 日界 / 计数累加 / 过期扫描）；不带 DSN 时 9 个集成用例全部 SKIP、整包仍绿。**变异验证**：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → 报 `42P10 no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → 报 `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` | 本机（PG 18.6 容器）+ CI `backend` |
 | **容器级 ⑬**：短链访问口令（M5-1 / N2） | 建带口令的短链 → `password_protected=True`；库里 `password_hash` 是 `$2a$12$…`（60 字符，且 `= 'smoke-pass-9f3a'` 为 `f`）。未解锁 `GET /{code}` = **200 + text/html** 且 `total_clicks` 仍 0；错误口令 = **401** 且 `total_clicks` 仍 0；正确口令 = **303 + Set-Cookie**（`HttpOnly` / `SameSite=Lax` / `Path=/`，http 下不带 `Secure`）；带 cookie 的 GET = **302**，`total_clicks` = **1**、`click_events` = **1**（解锁那次没被重复计）；`clear_password` 后立刻 302（缓存被主动失效）。迁移 000005 往返两轮：`down 1` 后列消失、`up` 后回来，无报错且之后新跳转仍 302。冒烟 **27 / 27**（三条口令用例逐条 ✓）。浏览器侧（无头 Chrome + CDP）：创建表单展开高级选项后有「访问口令」；详情页显示「受口令保护」徽章，编辑面板有「访问口令」输入与「清除口令」按钮；短链未解锁渲染口令页、输错显示「口令不对，请再试一次。」、输对**真的落到目标地址** | 本机（Docker + 无头 Chrome） |
@@ -842,11 +877,14 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑱**：自定义域名分域解析（N6-1） | 跑完迁移 000006 后库内登记 `a.local`（此时 `domains` + `links.domain_id` 就位）→ 创建带 `domain=a.local` 的短链，`short_url` = `http://a.local/{code}`。`curl -H 'Host: a.local'` 得 **302**，而同一短码在默认 Host 上是 **404**；反向（默认域名的短链拿到 `a.local` 上）同样是 **404**；`Host: A.LOCAL:8080`（大写 + 端口）也能命中（归一化生效）。真 Redis 里键确实按域分开：`link:v2:{域 UUID}:{code}` 与 `link:v2:-:{code}`，跨域那条**没有**落在默认域前缀下。共 **24 / 24**。**变异验证**：把缓存键改回不分域 + `sameDomain` 改成恒 true → **8 / 24 红**，失败的正是要害 —— 「紧接着在 `a.local` 上访问该短码」变成 404（跨域探测写下的负缓存把正确域的访问挡死）、反向那条变成 302（串味，访问者被送到另一个域的目标）；还原后回到 24 / 24 | 本机 |
 | **容器级 ⑲**：后端二维码 SVG 端点（N8 / M4-3 方案 B） | `GET /api/links/{code}/qr.svg` 返回 `image/svg+xml`（3243 字节），带 `Cache-Control: public, max-age=300` 与 `nosniff`，响应体里搜不到短码与 `short_url`（**没有任何用户可控字节**）。**真扫两轮尺寸**（无头 Chrome 光栅化 → jsQR）：512px 与 128px 解码都 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；两种情况都有深墨前景 `#141413` + 纯白底，四条边采样全白（静默区），定位图案落在**第 5 个模块**（证明静默区恰好 4，不是 8）。404 语义三种都验过：不存在的短码 / 保留字 / **已软删除**（删完再取图 → 404）。共 **19 / 19**。**变异验证**：`symbol.DisableBorder = true`（去掉静默区）→ 静默区断言红；子路径写成 `h-%d`（方向反）→ 闭合/模块数断言红。冒烟侧固化了两条（公开可读 + SVG 形状 + 不含用户可控字节；删除后 **404**），使 `cmd/smoke` 从 27 项变 **28 项** | 本机（Docker + 无头 Chrome） |
 | **容器级 ⑳**：`/metrics` 文本端点（N9） | **经 nginx 访问 `localhost:8080/metrics` → 404**（响应体 146 字节是 nginx 的 404 页、搜不到 `ashen_`、Content-Type 是 `text/html`）—— 这才是不对外的证明；同一路径从网络内部（借前端容器的 busybox wget 打 `backend:8080`）→ **200 + `text/plain; version=0.0.4; charset=utf-8` + `nosniff`**，**17 条指标**（每条都有 `# HELP` 与 `# TYPE`），零值计数器 `ashen_dropped_clicks_total 0` 在场，`ashen_build_info{version="dev"} 1`。`custom_code=metrics` → 422 `invalid_custom_code`（不是 409、不是静默成功）。**停掉 PG**：`/healthz` 503 而 `/metrics` **仍 200**，`ashen_postgres_up 0`、`ashen_up 0`、**`ashen_redis_up 仍为 1`**（单探针可定位 —— 这一条同时是这个 bug 的回归守卫，修前实测它是 0）。共 **24 / 24**，恢复 PG 后 `/healthz` 回到 200；`cmd/smoke` 仍 **28 / 28**。**变异验证**：删掉保留字表的 `metrics` → `TestReservedSetContents` 报 `保留字表缺少 "metrics"`；把 `ashen_up` 写死成 1 → `TestRenderMetricsDegraded` 报 `ashen_up = 1，期望 0` | 本机（Docker + busybox wget） |
+| **集成 ㉑**：计数结算脚本（真 Redis） | 新增 `internal/store/redis/counter_integration_test.go`。`SettleDelta` 是一段 Lua，语义全在 Redis 里执行，纯 Go 单测只能断言脚本源码的字符串形状 —— 改坏了也未必红。三个用例覆盖正常路径 / **有残留** / `delta=0`。有残留那一条钉住本次修掉的缺陷：结算窗口内来了新点击时，dirty 标记必须保留给下一轮。**变异验证**：把 `SREM` 改回无条件 → 报「有残留时 dirty 不该被摘掉」；还原后自证为绿。门控沿用 `REDIS_TEST_ADDR`（未设置则 SKIP），CI 的 backend job 加了 redis service | 本机（真 Redis 8.10 容器） |
+| **集成 ㉒**：毒消息清理（真 Redis） | 新增 `internal/store/redis/stream_integration_test.go`。`ReapDeadLetters` 靠 XPENDING 翻页，游标推不动是死循环、推过头就漏消息，两种错在 fake 上都看不出来。用 `XCLAIM` 反复认领把重投次数抬上去，断言的是 **Redis 自己记的** delivery count。三个用例：达上限被丢弃且 PEL 归零 / 未达上限必须留着（不误杀，一次长 PG 故障不该丢正常消息）/ 单轮上限 2 时每轮都有进展。**变异验证两条都被真实断言抓住**：阈值 `>=` 改成 `>` → 「丢弃了 0 条，期望 5 条」；只掐掉计数 → `DeadLettered = 0, want 2` | 本机（真 Redis 8.10 容器） |
+| **前端 ㉓**：并发守卫与趋势图时区 | vitest **43** 个用例全绿（新增 `utils/request.ts` 9 个、`formatShortDate` 3 个）。**变异验证三条**：去掉 `abort` → 「发起新一轮会取消上一轮」红；`isStale` 恒 false → 三条过期判定全红；`formatShortDate` 改回 `Date` 解析 → `expected '08-31' to be '09-01'`（America/New_York 下纯日期串提前一天）。最后这条尤其值得记 —— 老用例给的是带时间的串，那种串在任何时区下都是绿的，**真正会踩的恰恰是后端实际返回的纯日期串** | 本机 |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 
 **自定义域名的本机验收**不需要真域名与证书：`curl -H 'Host: a.local' localhost:8080/{code}` 就能走到后端，因为 nginx 的短码规则是按**路径**匹配的，`Host` 只影响后端把请求算到哪个域上。域名记录目前只能用一条
-`INSERT INTO domains (name) VALUES ('a.local')` 登记（没有管理接口，见「已知限制」）。真上线时除了登记域名，还要在 `deploy/nginx/nginx.conf` 里为该域名加 `server_name` 与证书 —— 那是配置工作，代码侧不用改。
+`INSERT INTO domains (domain) VALUES ('a.local')` 登记（没有管理接口，见「已知限制」）。真上线时除了登记域名，还要在 `deploy/nginx/nginx.conf` 里为该域名加 `server_name` 与证书 —— 那是配置工作，代码侧不用改。
 
 **责任划分**：容器级验收（起全栈 + 浏览器级验收 + 端到端冒烟）由 CI 的 `smoke` job 承担 ——
 每次推 `main` 与手动触发（`workflow_dispatch`）都会真跑一遍，失败时自动 dump 容器日志。
@@ -875,7 +913,7 @@ gofmt → `backend` job 红并列出文件名；故意改错冒烟工具的期�
 断言失败与容器日志。**还有一次是自然发生的**：N10 那个纯文档提交把
 `TestOpCtxTimesOutWithCause` 的调度依赖断言撞红了（run `35484924568`），于是多了两个教训 ——
 「红灯未必由本次改动引起，但必须先查清楚再重跑」以及「本机空转跑不出来的抖动，要把 CPU
-压满才复现」，后者写在「八条踩过的坑」第 8 条。
+压满才复现」，后者写在「九条踩过的坑」第 8 条。
 配置见 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)。
 
 ## 许可
