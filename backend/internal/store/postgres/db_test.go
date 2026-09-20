@@ -142,16 +142,30 @@ func TestStorageErrorOnRealDriverFailure(t *testing.T) {
 func TestOpCtxTimesOutWithCause(t *testing.T) {
 	t.Parallel()
 
-	db := &DB{timeout: time.Millisecond}
-	ctx, cancel := db.opCtx(context.Background())
+	// timeout 不能取 1ms：断言若写成「读 deadline 时剩余时间必须 > 0」，
+	// 那测的就不再是 opCtx，而是「从 opCtx 返回到读 deadline 之间调度不超过 1ms」。
+	// 4 核 runner 上 -race 全量并行跑时真的会踩中 —— CI 上实测 -321µs；
+	// 本机把 16 核压满后 2000 次里红 7 次，最差 -6ms。
+	// 取 20ms 留出余量，并改成量「整段预算」，见下面的断言。
+	const opTimeout = 20 * time.Millisecond
+
+	db := &DB{timeout: opTimeout}
+	// start 必须在这里取、且用 deadline.Sub(start) 而不是 time.Until(deadline)：
+	// 要的就是「从调用前到 deadline」的整段预算，换成一个会移动的 now 就没意义了。
+	start := time.Now()
+	ctx, cancel := db.opCtx(t.Context())
 	defer cancel()
 
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		t.Fatal("opCtx 必须带上 deadline，否则慢查询会一直占着连接与请求")
 	}
-	if remaining := time.Until(deadline); remaining <= 0 || remaining > time.Second {
-		t.Fatalf("deadline 剩余时间异常：%v", remaining)
+	// budget = deadline - start = (opCtx 内部取时的时刻 - start) + opTimeout。
+	// 内部那次取时必然不早于 start（单调钟不回退），所以下界 opTimeout 是硬不变量、
+	// 与调度无关；上界则继续拦住「没按 db.timeout 设置、退化成写死的默认值」。
+	if budget := deadline.Sub(start); budget < opTimeout || budget > time.Second {
+		t.Fatalf("opCtx 的预算 = %v，期望落在 [%v, 1s]：它没有按 db.timeout 设置 deadline",
+			budget, opTimeout)
 	}
 
 	<-ctx.Done()
