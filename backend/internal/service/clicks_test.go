@@ -32,10 +32,10 @@ func (r *clickRepoFake) ListByLink(_ context.Context, q domain.ClickListQuery) (
 	return r.events, r.next, nil
 }
 
-// newClickStats 造一个只依赖明细仓储的 Stats：明细路径不碰 links 与增量，
+// newClickStats 造一个只依赖明细仓储的 Stats：明细路径不碰增量，
 // 传 nil 同时也是断言 —— 真被用到会 panic。
 func newClickStats(clicks domain.ClickRepository) *Stats {
-	return NewStats(nil, clicks, nil)
+	return NewStats(clicks, nil)
 }
 
 // utcToday 返回「今天」的 UTC 零点。窗口末端应该正好落在这里：

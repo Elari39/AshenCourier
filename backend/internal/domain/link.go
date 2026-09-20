@@ -38,16 +38,6 @@ func (s LinkStatus) String() string {
 	}
 }
 
-// Valid 判断状态值是否落在合法枚举内。
-func (s LinkStatus) Valid() bool {
-	switch s {
-	case LinkStatusActive, LinkStatusDisabled, LinkStatusDeleted:
-		return true
-	default:
-		return false
-	}
-}
-
 // ParseLinkStatus 解析 API 传入的状态字符串。
 func ParseLinkStatus(raw string) (LinkStatus, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -105,9 +95,6 @@ type Link struct {
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
-
-// HasExpiry 判断是否设置了有效期。
-func (l *Link) HasExpiry() bool { return l.ExpiresAt != nil }
 
 // IsExpired 判断在给定时刻是否已过期。
 func (l *Link) IsExpired(now time.Time) bool {

@@ -127,7 +127,7 @@ func run() error {
 		NegativeTTL: cfg.NegativeTTL,
 	})
 	authSvc := service.NewAuth(pg.Users(), cfg.JWTSecret, cfg.JWTExpiry)
-	statsSvc := service.NewStats(links, pg.Clicks(), rdb)
+	statsSvc := service.NewStats(pg.Clicks(), rdb)
 	limiter := redis.NewLimiter(rdb)
 	// 限流应急开关：打开后全量放行。刻意做成启动期开关而不是运行期端点 ——
 	// 它只在限流组件本身出问题时用，重启一次完全可接受。

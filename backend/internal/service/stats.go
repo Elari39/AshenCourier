@@ -21,15 +21,17 @@ const (
 )
 
 // Stats 负责点击统计的聚合。
+//
+// 这里刻意**不持有** LinkRepository：统计只读 click_events 聚合结果，加上调用方
+// 传进来的 *domain.Link（基线计数在上面）。早先存了一份却从没读过，属于死字段。
 type Stats struct {
-	links  domain.LinkRepository
 	clicks domain.ClickRepository
 	delta  domain.ClickDeltaReader
 }
 
 // NewStats 构造统计服务。
-func NewStats(links domain.LinkRepository, clicks domain.ClickRepository, delta domain.ClickDeltaReader) *Stats {
-	return &Stats{links: links, clicks: clicks, delta: delta}
+func NewStats(clicks domain.ClickRepository, delta domain.ClickDeltaReader) *Stats {
+	return &Stats{clicks: clicks, delta: delta}
 }
 
 // StatsResult 是一次统计查询的结果，可直接映射成 API 响应。

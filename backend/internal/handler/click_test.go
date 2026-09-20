@@ -46,7 +46,7 @@ func newClicksRouter(t *testing.T, link *domain.Link, clicks domain.ClickReposit
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Auth:             service.NewAuth(&stubUsers{}, "test-secret-0123456789", time.Hour),
 		Shortener:        newTestShortener(repo),
-		Stats:            service.NewStats(repo, clicks, stubDelta{}),
+		Stats:            service.NewStats(clicks, stubDelta{}),
 		Health:           okProbe{},
 		Limiter:          nil, // 不限流：这些用例只关心契约
 		PageSize:         20,

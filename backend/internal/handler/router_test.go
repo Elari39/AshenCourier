@@ -31,7 +31,7 @@ func newTestRouter(t *testing.T, links map[string]*domain.Link) http.Handler {
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Auth:        service.NewAuth(&stubUsers{}, "test-secret-0123456789", time.Hour),
 		Shortener:   newTestShortener(repo),
-		Stats:       service.NewStats(repo, &stubClicks{}, stubDelta{}),
+		Stats:       service.NewStats(&stubClicks{}, stubDelta{}),
 		Health:      okProbe{},
 		Unlock:      service.NewLinkUnlocker("test-secret-0123456789", time.Hour),
 		Limiter:     nil, // 不限流：路由表用例不该被配额干扰

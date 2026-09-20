@@ -310,7 +310,13 @@ func (s *ClickStore) queryBuckets(ctx context.Context, sql string, baseArgs []an
 	args = append(args, baseArgs...)
 	args = append(args, topN)
 
-	rows, err := s.db.pool.Query(ctx, sql, args...)
+	// opCtx 不能省：一次 Aggregate 会跑 5 个查询，这是其中唯一没套过 op 超时的
+	// （它比别人晚加，写的时候漏了）。少了它，PG 慢的时候这条查询会一直挂着，
+	// 直到上层 HTTP 超时 —— 而那时日志里归因不到「是这条 SQL 慢」。
+	opCtx, cancel := s.db.opCtx(ctx)
+	defer cancel()
+
+	rows, err := s.db.pool.Query(opCtx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store.postgres: %s: %w", op, storageError(err))
 	}
