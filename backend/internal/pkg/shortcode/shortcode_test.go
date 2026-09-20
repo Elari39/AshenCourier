@@ -15,7 +15,7 @@ func TestReservedSetContents(t *testing.T) {
 	// 这些是最不能少的一组：少任何一个都会造成真实故障
 	wantContains := []string{
 		// 基础设施
-		"api", "assets", "healthz", "static",
+		"api", "assets", "healthz", "metrics", "static",
 		"favicon.ico", "robots.txt", "sitemap.xml", "index.html",
 		// 前端 SPA 顶级路由（与 frontend/src/router/index.ts 严格对应）
 		"login", "register", "dashboard", "links",

@@ -17,6 +17,7 @@ var reserved = map[string]struct{}{
 	"api":           {},
 	"assets":        {},
 	"healthz":       {},
+	"metrics":       {}, // Prometheus 抓取端点：7 位、正好落在短码正则里，必须挡住
 	"static":        {},
 	"public":        {},
 	"cdn":           {},

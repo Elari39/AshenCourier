@@ -178,6 +178,7 @@ Browser ──┬─ /api/*         ─┐
 | 13 | GET | `/api/links/{code}/clicks?limit=20&cursor=&days=30&device=` | JWT 或 Key | 点击明细，`(occurred_at, id)` keyset 分页（**时间倒序**）；`device` 取 `desktop` / `mobile` / `tablet` / `bot` / `unknown`（与分布口径一致）。**IP 只回掩码网段**：IPv4 → `/24`、IPv6 → `/64` |
 | 14 | POST | `/{code}` | — | **口令校验**（表单 `password`）：正确 → **303** 回 `GET /{code}` 并下发解锁 cookie；错误 → **401** 重新渲染口令页。两者都**不计点击**（计点击的是随后那个 GET）。限流 20 次 / 10 分钟 / IP |
 | 15 | GET | `/api/links/{code}/qr.svg` | — | **二维码 SVG**（`image/svg+xml`），给邮件模板 / 印刷品 / 第三方系统引用。**公开可读**（二维码的内容就是 `short_url` 本身，而 `GET /{code}` 本来就公开）；只要求「短链存在且未被软删除」，已停用/过期的链接**仍能取图**（印好的二维码不该因此失效）。`Cache-Control: public, max-age=300`。限流沿用统计那一档（IP + 路径哈希） |
+| 16 | GET | `/metrics` | — | **Prometheus 文本格式**（`text/plain; version=0.0.4`），与 `/healthz` 同一次采集。**不对外**（nginx 里 `= /metrics` 直接 404）、**不加鉴权也不限流**（只在内网可达）；探针异常时仍回 **200**，故障由 `ashen_*_up 0` 表达。详见「`/metrics`」一节 |
 
 **访问口令**（`POST /{code}`）
 
@@ -264,7 +265,7 @@ Browser ──┬─ /api/*         ─┐
 │       ├── store/geoip/        # MaxMind DB 国家库解析（mmdb，未配置时降级为空）
 │       ├── service/            # 应用服务（短链、统计、鉴权、管理密钥）
 │       ├── handler/            # HTTP 处理器 + 路由装配
-│       ├── httpx/              # JSON 读写、统一错误体、中间件、限流中间件、http.Server
+│       ├── httpx/              # JSON 读写、统一错误体、中间件、限流中间件、/metrics 文本渲染、http.Server
 │       ├── worker/             # Stream 消费 + 计数回刷 + 过期清理
 │       └── pkg/                # base62 / shortcode / hostname / ua / validator
 └── frontend/
@@ -466,6 +467,11 @@ mmdb 查询虽然只是一次内存映射读，但它会引入文件句柄与页
 # 服务健康 + 诊断计数（丢弃数、队列积压、Stream 积压、限流是否走原生 INCREX）
 curl -s localhost:8080/healthz | jq
 
+# 同一批数字的 Prometheus 文本形态。⚠️ 它**不对外**：
+# nginx 里 `location = /metrics { return 404; }`，走 localhost:8080 会拿到 404。
+# 要从本机读，得借同一网络内的容器（前端镜像是 nginx:alpine，自带 busybox wget）：
+docker compose exec frontend wget -qO- http://backend:8080/metrics
+
 # 容器状态（5 个都该是 healthy）
 docker compose ps
 
@@ -498,6 +504,45 @@ docker compose logs backend | grep '"level":"ERROR"'
 | `rate_limit_degraded` | 限流器因 Redis 故障降级的累计次数 |
 | `rate_limit_native_increx` | 限流走的是 Redis 8.8+ 原生 `INCREX` 还是 Lua 回落实现 |
 | `rate_limit_disabled` | 限流应急开关是否被打开（`RATE_LIMIT_DISABLED=true`） |
+
+### `/metrics`（Prometheus 文本格式）
+
+同一批数字的另一种形态，供 Prometheus 抓取。**零依赖**：没有客户端库，就是几十行手写的
+文本序列化（`internal/httpx/metrics.go` 的 `RenderMetrics`）。
+
+```bash
+docker compose exec frontend wget -qO- http://backend:8080/metrics
+```
+
+| 指标 | 类型 | 来源字段 |
+| --- | --- | --- |
+| `ashen_build_info{version="…"}` | gauge（恒 1） | 构建版本 |
+| `ashen_up` / `ashen_postgres_up` / `ashen_redis_up` | gauge | `status` / `postgres` / `redis` |
+| `ashen_uptime_seconds` / `ashen_worker_enabled` | gauge | 同上 |
+| `ashen_dropped_clicks_total` / `ashen_failed_clicks_total` | counter | 统计丢弃 / 写失败 |
+| `ashen_consumed_clicks_total` / `ashen_worker_errors_total` | counter | 内嵌 worker 的消费与出错 |
+| `ashen_pg_fallbacks_total` / `ashen_ratelimit_degraded_total` | counter | 回源 PG / 限流降级 |
+| `ashen_click_queue_length` / `ashen_click_stream_length` / `ashen_click_stream_pending` | gauge | 队列与 Stream 积压 |
+| `ashen_ratelimit_native_increx` / `ashen_ratelimit_disabled` | gauge | 限流实现与应急开关 |
+
+三条刻意的设计（改之前先读一遍，都是有原因的）：
+
+- **只在内网可达**。nginx 里 `location = /metrics { return 404; }` —— 用 `return 404` 而不是 `deny`，
+  因为对外要表达的语义是「这里什么都没有」；`403` 等于告诉扫描器「这个路径存在，只是不给你看」。
+  `=` 精确匹配优先级最高，必定先于短码正则命中（`metrics` 正好 7 位，落在 `^/[A-Za-z0-9_-]{3,32}$` 里，
+  所以它**必须**同时在 `pkg/shortcode/reserved.go` 里，否则有人能把它注册成短码）
+- **探针挂了也回 200**（`/healthz` 会回 503）。指标端点的职责是把当前观测值交出去，
+  而 `ashen_postgres_up 0` 正是这一轮抓取里最有价值的数据 —— 回 503 会让抓取端整份丢弃，
+  反而在最需要观测的时候失去观测能力
+- **值为 0 的计数器仍然输出**。Prometheus 的 `rate()` / `increase()` 比较的是相邻样本，
+  序列缺席就断成两段；「缺席」在查询侧另有含义（区分「没有数据」与「真的是 0」）。
+  所以这里没有 `omitempty` 语义 —— 对照 `HealthReport` 上的 `omitzero`，那是给 JSON 看的
+
+> 顺带修掉的一个误报：`Report` 原先让两个探针**共用**同一个 3 秒 deadline。PG 容器被停掉后，
+> 到它的 TCP 连接不会立刻被拒（那个 IP 上已经没有东西在听了），而是一直重试到 deadline ——
+> 3 秒被吃光，紧接着的 Redis ping 落在一个已过期的 context 上必然失败，于是 `/healthz` 报
+> `redis: "error"`（Redis 明明是好的），`/metrics` 上就是 `ashen_redis_up 0`。
+> 这会作废「靠单个探针定位是哪个依赖出问题」这个卖点。现在每个探针各自计时。
 
 ### 备份与恢复演练
 
@@ -543,7 +588,7 @@ docker compose exec postgres dropdb -U ashen restore_check
 
 ## 七条踩过的坑
 
-这六条都是「设计稿上看不出来、只有真跑容器（或真在浏览器里看一眼）才暴露」的，
+这七条都是「设计稿上看不出来、只有真跑容器（或真在浏览器里看一眼）才暴露」的，
 写在这里省得别人再踩一遍。
 
 ### 1. 新增前端顶级路由，必须同步四处
@@ -558,6 +603,12 @@ docker compose exec postgres dropdb -U ashen restore_check
 漏掉第 1 步 → 生产环境刷新 `/settings` 会 404；
 漏掉第 2 步 → 别人可以注册 `settings` 当短码，把真实页面吃掉；
 漏掉第 4 步 → 开发环境刷新该页面会 404。
+
+> **同一个坑的反面：新增「不是 SPA 页面但对外存在」的路径，也要动第 1、2 步。**
+> `/metrics` 就是例子 —— 它 7 位、形状与短码完全一致，于是同时踩两头：
+> 不在 nginx 里显式处理，它会被短码正则截走转发到后端（「后端能出指标、公网也能读」的最坏组合）；
+> 不进保留字表，别人就能把 `metrics` 注册成短码（症状是「他的短链永远打不开」）。
+> 判据是形状，不是用途：**新路径只要匹配 `^/[A-Za-z0-9_-]{3,32}$`，这两步一个都不能省。**
 
 > **为什么 nginx 那一步不能省**：nginx 的 location 优先级是
 > `= 精确` → `^~ 前缀` → `~ 正则` → 最长普通前缀。正则一旦命中就**赢过** `location /`，
@@ -711,7 +762,7 @@ MVP 有意不做的部分：
 | A/B 分流 / 短链轮换 | 需要 `link_targets` 表与「目标页归属」的新语义，收益不明（二维码已两路提供：详情页前端 `qrcode` 画 canvas，后端 `GET /api/links/{code}/qr.svg` 给外部引用） |
 | 口令的重置流程 / 提示语 | 没有邮箱找回，也没有 `hint`：口令只由所有者设置与清除（忘了就重新设一条） |
 | 团队 / 多租户 / 权限体系 | 只有「匿名」与「个人账号」两种身份 |
-| Prometheus / Grafana | 只暴露 `/healthz` + JSON 结构化日志 + 关键计数（`/metrics` 文本端点已立项，见 `PLAN-NEXT.md` §19.2） |
+| Prometheus / Grafana 全套 | 只做零依赖的 `/metrics` **文本端点**（不引客户端库、不带 Grafana），且默认**不对外**（nginx 里 `= /metrics` → 404）。详见「`/metrics`」一节 |
 | 自定义域名的**管理接口 / UI** | 数据模型与解析路径已就绪（000006 的 `domains` 表 + `links.domain_id`，`Host` 归一化后按域定位，缓存键按域分开），但「登记一个域名」目前只能由运维写库、再在 nginx 加一个 `server_name` + 证书。做管理端要先回答「谁来验证域名归属」（DNS TXT / 文件校验），不是表结构问题 |
 
 欢迎提 Issue 讨论优先级。
@@ -754,6 +805,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑰**：GeoIP 端到端与降级（M5-2） | worker 启动日志 `GeoIP 库文件已加载 /geoip/GeoLite2-Country.mmdb`。往 Stream 投两条**显式 ID + 公网 IP** 的点击（本机 curl 的客户端 IP 是 Docker 网关 `172.20.0.1`，私网段解析不出国家，所以必须直接投递）：`8.8.8.8` → 库里 `country=US`、`114.114.114.114` → `CN`；`GET /api/links/{code}/stats` 回 `countries=[{CN,1},{US,1}]`。降级实测两轮：`GEOIP_DB_PATH=/geoip/does-not-exist.mmdb` → worker 日志**恰好一条 WARN**、`8.8.8.8` 仍落库且 `country` 为 NULL、`/healthz` 200 `ok`；`GEOIP_DB_PATH` 留空 → 一条 INFO、零 WARN、行为相同 | 本机（Docker + 真 mmdb）|
 | **容器级 ⑱**：自定义域名分域解析（N6-1） | 跑完迁移 000006 后库内登记 `a.local`（此时 `domains` + `links.domain_id` 就位）→ 创建带 `domain=a.local` 的短链，`short_url` = `http://a.local/{code}`。`curl -H 'Host: a.local'` 得 **302**，而同一短码在默认 Host 上是 **404**；反向（默认域名的短链拿到 `a.local` 上）同样是 **404**；`Host: A.LOCAL:8080`（大写 + 端口）也能命中（归一化生效）。真 Redis 里键确实按域分开：`link:v2:{域 UUID}:{code}` 与 `link:v2:-:{code}`，跨域那条**没有**落在默认域前缀下。共 **24 / 24**。**变异验证**：把缓存键改回不分域 + `sameDomain` 改成恒 true → **8 / 24 红**，失败的正是要害 —— 「紧接着在 `a.local` 上访问该短码」变成 404（跨域探测写下的负缓存把正确域的访问挡死）、反向那条变成 302（串味，访问者被送到另一个域的目标）；还原后回到 24 / 24 | 本机 |
 | **容器级 ⑲**：后端二维码 SVG 端点（N8 / M4-3 方案 B） | `GET /api/links/{code}/qr.svg` 返回 `image/svg+xml`（3243 字节），带 `Cache-Control: public, max-age=300` 与 `nosniff`，响应体里搜不到短码与 `short_url`（**没有任何用户可控字节**）。**真扫两轮尺寸**（无头 Chrome 光栅化 → jsQR）：512px 与 128px 解码都 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；两种情况都有深墨前景 `#141413` + 纯白底，四条边采样全白（静默区），定位图案落在**第 5 个模块**（证明静默区恰好 4，不是 8）。404 语义三种都验过：不存在的短码 / 保留字 / **已软删除**（删完再取图 → 404）。共 **19 / 19**。**变异验证**：`symbol.DisableBorder = true`（去掉静默区）→ 静默区断言红；子路径写成 `h-%d`（方向反）→ 闭合/模块数断言红。冒烟侧固化了两条（公开可读 + SVG 形状 + 不含用户可控字节；删除后 **404**），使 `cmd/smoke` 从 27 项变 **28 项** | 本机（Docker + 无头 Chrome） |
+| **容器级 ⑳**：`/metrics` 文本端点（N9） | **经 nginx 访问 `localhost:8080/metrics` → 404**（响应体 146 字节是 nginx 的 404 页、搜不到 `ashen_`、Content-Type 是 `text/html`）—— 这才是不对外的证明；同一路径从网络内部（借前端容器的 busybox wget 打 `backend:8080`）→ **200 + `text/plain; version=0.0.4; charset=utf-8` + `nosniff`**，**17 条指标**（每条都有 `# HELP` 与 `# TYPE`），零值计数器 `ashen_dropped_clicks_total 0` 在场，`ashen_build_info{version="dev"} 1`。`custom_code=metrics` → 422 `invalid_custom_code`（不是 409、不是静默成功）。**停掉 PG**：`/healthz` 503 而 `/metrics` **仍 200**，`ashen_postgres_up 0`、`ashen_up 0`、**`ashen_redis_up 仍为 1`**（单探针可定位 —— 这一条同时是这个 bug 的回归守卫，修前实测它是 0）。共 **24 / 24**，恢复 PG 后 `/healthz` 回到 200；`cmd/smoke` 仍 **28 / 28**。**变异验证**：删掉保留字表的 `metrics` → `TestReservedSetContents` 报 `保留字表缺少 "metrics"`；把 `ashen_up` 写死成 1 → `TestRenderMetricsDegraded` 报 `ashen_up = 1，期望 0` | 本机（Docker + busybox wget） |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 

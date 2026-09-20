@@ -284,11 +284,23 @@ type healthProbe struct {
 	startedAt     time.Time
 }
 
+// probeTimeout 是**单个**探针的超时预算。
+//
+// 为什么是「单个」而不是「整次 Report 共用」：共用同一个 deadline 会让先失败的那个
+// 探针吃掉整段预算，后面的探针随即落在一个已经过期的 context 上 —— 而它必然失败。
+//
+// 这条不是推演，是实测（N9 的验收里停掉 PG 复现过）：PG 容器被停之后，到它的 TCP
+// 连接**不会立刻被拒**（那个 IP 上已经没有东西在听了），而是一直重试到 deadline，
+// 于是 3 秒被耗尽；紧接着的 Redis ping 立刻失败，报告里就出现
+// `redis: "error"` 与 `errors: ["redis 不可用"]`。运维拿着这份报告去查 Redis，
+// 查不出任何问题 —— 真正挂的只有 PG。
+//
+// 它在 /metrics 上更刺眼：ashen_redis_up 会跟着 ashen_postgres_up 一起变 0，
+// 而「靠单个探针定位是哪个依赖出了问题」正是那两个指标存在的全部理由。
+const probeTimeout = 3 * time.Second
+
 // Report 采集一次健康报告。任一依赖异常 → status=degraded（HTTP 503）。
 func (p *healthProbe) Report(ctx context.Context) httpx.HealthReport {
-	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-
 	report := httpx.HealthReport{
 		Status:            "ok",
 		Version:           p.version,
@@ -305,11 +317,12 @@ func (p *healthProbe) Report(ctx context.Context) httpx.HealthReport {
 		UptimeSeconds:     int64(time.Since(p.startedAt).Seconds()),
 	}
 
-	if err := p.pg.Ping(probeCtx); err != nil {
+	// 两个依赖**各自**计时，理由见 probeTimeout
+	if err := ping(ctx, p.pg.Ping); err != nil {
 		report.Postgres = "error"
 		report.Errors = append(report.Errors, "postgres 不可用")
 	}
-	if err := p.rdb.Ping(probeCtx); err != nil {
+	if err := ping(ctx, p.rdb.Ping); err != nil {
 		report.Redis = "error"
 		report.Errors = append(report.Errors, "redis 不可用")
 	}
@@ -317,11 +330,16 @@ func (p *healthProbe) Report(ctx context.Context) httpx.HealthReport {
 		report.Status = "degraded"
 	}
 
-	// 以下为观测指标，取不到不影响 status
-	if n, err := p.rdb.StreamLen(probeCtx); err == nil {
+	// 以下为观测指标，取不到不影响 status。
+	// 这几个共用一个**新开的**预算就够：它们都在 Redis 上，一个超时其余大概率也超时，
+	// 各自计时只会让最坏情况的耗时叠加上去。关键是这个预算不能与上面的探针共用 ——
+	// 那正是 Redis 已经挂掉时我们还想拿到数字的场景。
+	obsCtx, cancelObs := context.WithTimeout(ctx, probeTimeout)
+	defer cancelObs()
+	if n, err := p.rdb.StreamLen(obsCtx); err == nil {
 		report.StreamLen = n
 	}
-	if n, err := p.rdb.PendingCount(probeCtx); err == nil {
+	if n, err := p.rdb.PendingCount(obsCtx); err == nil {
 		report.StreamPending = n
 	}
 	if p.worker != nil {
@@ -330,6 +348,13 @@ func (p *healthProbe) Report(ctx context.Context) httpx.HealthReport {
 		report.WorkerErrors = stats.Errors
 	}
 	return report
+}
+
+// ping 用一份独立的超时预算跑一次依赖探针。
+func ping(ctx context.Context, probe func(context.Context) error) error {
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	return probe(probeCtx)
 }
 
 // newLogger 构造 JSON 结构化日志器。

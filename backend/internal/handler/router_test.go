@@ -44,7 +44,7 @@ func newTestRouter(t *testing.T, links map[string]*domain.Link) http.Handler {
 	})
 }
 
-// TestRouterTable 用一张表钉住 README「API」一节的 15 条路由：
+// TestRouterTable 用一张表钉住 README「API」一节的 16 条路由：
 // 每条都要能被路由到（而不是 404），且鉴权层次符合文档 ——
 // 这正好挡住「改了路由忘了改文档」和「requireUser 写成 optionalAuth」两类回归。
 func TestRouterTable(t *testing.T) {
@@ -149,6 +149,11 @@ func TestRouterTable(t *testing.T) {
 			wantStatus: http.StatusOK,
 			why:        "二维码图片**公开可读**（不挂 optionalUser/requireUser）：它的内容就是 short_url，要能被邮件与印刷品直接引用",
 		},
+		{
+			name: "16 GET /metrics", method: http.MethodGet, path: "/metrics",
+			wantStatus: http.StatusOK,
+			why:        "Prometheus 文本端点：**不挂鉴权也不挂限流**（它只在内网可达，公网由 nginx 的 `= /metrics` 挡掉）；探针异常时仍回 200，故障由 ashen_*_up 0 表达",
+		},
 	}
 
 	for _, tt := range tests {
@@ -177,6 +182,7 @@ func TestRouterMethodAwareness(t *testing.T) {
 
 	paths := []string{
 		"/healthz",
+		"/metrics",
 		"/api/auth/register",
 		"/api/auth/login",
 		"/api/auth/me",

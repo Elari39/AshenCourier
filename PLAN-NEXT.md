@@ -571,6 +571,7 @@ docker compose exec postgres dropdb -U ashen restore_check
 - 仓库不变量（**违反会直接造成线上故障**）：
   - 短码字符集与长度 3–32 三处一致（`shortcode` 常量 / nginx 正则 / DB CHECK）
   - **任何新的后端顶级路径都要进 `pkg/shortcode/reserved.go`**，否则能被注册成短码。例：`/metrics` 落在 nginx 短码正则 `^/[A-Za-z0-9_-]{3,32}$` 的范围内（`metrics` 正好 7 位），不进保留字表就会「有人注册了 metrics，然后他的短链永远打不开 + 指标被公开」
+  - **判据是形状而不是用途**（N9 实施时补全的这一半）：新路径只要匹配 `^/[A-Za-z0-9_-]{3,32}$`，除了进保留字表，**还要在 nginx 里加一条 `location =`**（SPA 页面用 `try_files … /index.html`，不对外的基础设施路径用 `return 404`）。少了 nginx 那一半，该路径会被短码正则截走转发到后端 —— `/metrics` 那样就变成「后端能出指标、公网也能读」。README「七条踩过的坑」第 1 条的补充段落记的就是这个反面
   - 前端顶级路由仍是「四处同步」（nginx `location =` / `reserved.go` / `shortcode_test.go` / `vite.config.ts` 的 `SPA_ROUTES`）
   - `internal/domain` 不 import 任何第三方库（singleflight 只能出现在 store/service 层）
   - 每批次一个 commit + 门禁 green
@@ -1147,7 +1148,7 @@ CREATE UNIQUE INDEX links_domain_short_code_key
 | --- | --- | --- | --- |
 | **N7** | 本节的拍板与 CI 验证记录（§17.3 / §18.5 / §19） | docs | ✅ |
 | **N8** | 后端二维码 SVG 端点（§19.1，M4-3 方案 B） | feat | ✅ |
-| **N9** | `/metrics` 零依赖文本端点（§19.2） | feat | ⏳ |
+| **N9** | `/metrics` 零依赖文本端点（§19.2） | feat | ✅ |
 | **N10** | 收尾：§0 批次表 / README 验收记录补实测输出 | docs | ⏳ |
 
 ### 19.1 批次 N8：后端二维码 SVG 端点（M4-3 方案 B）
@@ -1237,8 +1238,9 @@ CREATE UNIQUE INDEX links_domain_short_code_key
 | `backend/internal/pkg/shortcode/shortcode_test.go` | `wantContains` 补 `metrics` 与本批新增的 `robots` 类条目（若补） |
 | `backend/internal/httpx/metrics_test.go` | 新建：格式断言 + 转义断言 |
 | `backend/internal/handler/router_test.go` | 路由表补一行 |
+| `backend/cmd/api/main.go` | **顺带修**：两个探针各自计时（原先共用 deadline，见下文「两处偏离」第 2 条） |
 | `deploy/nginx/nginx.conf` | `location = /metrics { return 404; }`（明确不对外） |
-| `README.md` | 「可观测性」小节 + 环境变量/端点说明 |
+| `README.md` | API 表补一行 + 「可观测性」小节 + 验收记录 |
 
 **关键决定**
 
@@ -1259,6 +1261,42 @@ CREATE UNIQUE INDEX links_domain_short_code_key
 2. 容器级：`curl -s localhost:8080/metrics | head` 能读；`curl -si` 的 Content-Type 是
    `text/plain; version=0.0.4; charset=utf-8`；**经 nginx 访问同一路径是 404**（这才是「不对外」的证明）；
    停 PG → `ashen_postgres_up 0` 且 `/healthz` 同时 503（两处口径一致）
-3. 保留字：`POST /api/links {"custom_code":"metrics"}` → 422 `invalid_code`（不是 409、不是静默成功）
-4. 变异验证：把保留字表里那行删掉 → 上一条必须变红；把 `aspen_up` 的判定从 `status` 改成恒 1 →
+3. 保留字：`POST /api/links {"custom_code":"metrics"}` → 422（不是 409、不是静默成功）
+4. 变异验证：把保留字表里那行删掉 → 上一条必须变红；把 `ashen_up` 的判定从 `status` 改成恒 1 →
    「停 PG 后为 0」必须红
+
+**实测（2026-09-20，容器级 24/24）**
+
+单测：`TestRenderMetricsShape` / `ZeroCounters` / `Degraded` / `EscapesLabelValues` 四条全绿。
+两条变异都如期变红后还原：删掉保留字表的 `metrics` → `TestReservedSetContents` 报
+`保留字表缺少 "metrics"`；把 `ashen_up` 写死成 1 → `TestRenderMetricsDegraded` 两处断言红
+（`ashen_up = 1，期望 0`）。
+
+容器级脚本 `.workbuddy/tmp/metrics-accept.py`：
+
+| 组 | 断言 | 实测 |
+| --- | --- | --- |
+| 经 nginx（宿主机 8080） | `/metrics` → **404**，响应体里搜不到 `ashen_`，Content-Type 是 `text/html` 而非 Prometheus 文本 | 全部通过（body 146 字节 = nginx 的 404 页） |
+| 同上 | `/healthz` 仍 200（回归） | 200 |
+| 同上 | `custom_code=metrics` → 422 | `error.code=invalid_custom_code`，`field=custom_code` |
+| 直连 `backend:8080`（网络内部，借 frontend 容器的 busybox wget） | 200；`text/plain; version=0.0.4; charset=utf-8`；`nosniff` | 全部通过 |
+| 同上 | 17 条指标，每条都有 `# HELP` 与 `# TYPE`；零值计数器在场；`build_info{version="dev"} 1` | 17 / 17 / 17 |
+| 停掉 PG | `/healthz` 503 且 `/metrics` **仍 200**；`ashen_postgres_up 0`、`ashen_up 0`、**`ashen_redis_up 仍为 1`** | 全部通过；恢复 PG 后 `/healthz` 回到 200 |
+| 回归 | `cmd/smoke -expect-spa` | **28 / 28**，无回归 |
+
+**验收里发现的两处偏离（都已修，见下）**
+
+1. **错误码不是 `invalid_code`，而是 `invalid_custom_code`**。本节的验收第 3 条按印象写了前者，
+   实测是后者 —— 它由 `domain.Invalid("custom_code", …)` 派生（`httpx.invalidCode` 拼 `invalid_` + 字段名）。
+   已按实测修正本文档。
+2. **`HealthReport` 会把健康的 Redis 一起报成故障**（`cmd/api/main.go` 的真 bug，本批次顺带修掉）。
+   根因是 `Report` 里两个探针**共用同一个 3 秒 deadline**：PG 容器被停掉之后，到它的 TCP 连接
+   不会立刻被拒（那个 IP 上已经没有东西在听了），而是一直重试到 deadline —— 3 秒被吃光，
+   紧接着的 Redis ping 落在一个已经过期的 context 上，必然失败。
+   症状：`/healthz` 报 `redis: "error"` + `errors: ["redis 不可用"]`（Redis 明明是好的），
+   `/metrics` 上就是 `ashen_redis_up 0` —— 而「靠单个探针定位是哪个依赖出问题」正是这两个指标
+   存在的全部理由，这个误报把那个卖点作废。
+   修法：抽出 `ping(ctx, fn)` 给每个探针**各自**配一份预算（`probeTimeout`），
+   观测指标那一段另开一个新预算（它们都在 Redis 上，各自计时只会叠加最坏耗时）。
+   **这不是推演**：修前实测过一次 —— 停 PG 后 `/healthz` 的 `errors` 里两条都在；
+   修后同一场景 `ashen_redis_up` 保持 1。

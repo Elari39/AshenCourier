@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"io"
 	"log/slog"
 	"net/http"
 
@@ -56,6 +57,7 @@ type Options struct {
 // 路由表（与 PLAN.md §7 一致）：
 //
 //	GET    /healthz
+//	GET    /metrics         ← Prometheus 文本格式（**不对外**，见 metricsHandler）
 //	POST   /api/auth/register
 //	POST   /api/auth/login
 //	GET    /api/auth/me
@@ -111,6 +113,12 @@ func Router(opts Options) http.Handler {
 
 	// ---- 基础设施 ----
 	mux.Handle("GET /healthz", http.HandlerFunc(healthHandler(opts.Health)))
+
+	// /metrics 与 /healthz 同源（同一次 Report），只换一种给 Prometheus 看的形态。
+	// **不对外**：nginx 里 `location = /metrics { return 404; }` 挡住了公网，
+	// 只有同一网络内的抓取方能到 —— 所以这里不需要鉴权，也不该加限流
+	// （限流会把「每 15 秒抓一次」的固定开销变成配额消耗）。
+	mux.Handle("GET /metrics", http.HandlerFunc(metricsHandler(opts.Health)))
 
 	// ---- 鉴权（登录接口限流防撞库）----
 	mux.Handle("POST /api/auth/register", limit(opts.RateLimitLogin)(http.HandlerFunc(authAPI.register)))
@@ -182,5 +190,33 @@ func healthHandler(probe httpx.HealthProbe) http.HandlerFunc {
 			w.Header().Set("Retry-After", "2")
 		}
 		httpx.WriteJSON(w, r, status, report)
+	}
+}
+
+// metricsHandler 返回 /metrics 处理器（Prometheus 文本格式 0.0.4）。
+//
+// 与 healthHandler 的一处刻意差别：**PG / Redis 挂了也回 200**。
+// healthz 用状态码告诉编排系统「别把流量给我」；而指标端点的职责是把当前观测值
+// 交出去 —— `ashen_postgres_up 0` 正是这一轮抓取里最有价值的一条数据，
+// 回 503 会让抓取端把整份响应丢掉，反而在最需要观测的时刻失去观测能力。
+//
+// 内容类型必须写成 `text/plain; version=0.0.4; charset=utf-8`：Prometheus 靠
+// `version=` 参数判断该按哪个版本的文本格式解析，缺了它只能靠内容嗅探。
+func metricsHandler(probe httpx.HealthProbe) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		report := httpx.HealthReport{Status: "ok", Postgres: "unknown", Redis: "unknown"}
+		if probe != nil {
+			report = probe.Report(r.Context())
+		}
+
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		// 与 JSON 响应同一套思路：这份文本不该被任何浏览器当别的类型去解释
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+
+		if _, err := io.WriteString(w, httpx.RenderMetrics(report)); err != nil {
+			// 状态码已经写出去了，客户端提前断开只能记一条日志
+			slog.Debug("写出 /metrics 响应中断", "err", err)
+		}
 	}
 }
