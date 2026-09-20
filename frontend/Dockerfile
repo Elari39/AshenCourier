@@ -29,7 +29,12 @@ COPY frontend/ ./
 RUN pnpm build
 
 # ---------- 阶段 2：运行时 ----------
-FROM nginx:alpine AS runtime
+# 钉到具体 minor（与 postgres:18.6-alpine / redis:8.10-alpine 一个规矩）：
+# `nginx:alpine` 会随 minor 滚动，nginx 的配置指令在不同版本上行为会有差异
+# （比如 IPv6 监听脚本、默认的 server_tokens / MIME 表），滚动 tag 会让
+# 「昨天能起、今天起不来」找不到原因。1.31-alpine 与本机 nginx:alpine
+# 当前指向的是同一个镜像（digest 相同），所以这次钉版本不改变现状。
+FROM nginx:1.31-alpine AS runtime
 
 # 用仓库里的 nginx.conf 整体覆盖默认配置：
 # 反代 /api、短码正则 → backend，/assets 优先于短码正则，其余走 SPA fallback

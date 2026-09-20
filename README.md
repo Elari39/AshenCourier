@@ -291,6 +291,9 @@ docker compose -f docker-compose.dev.yml --profile tools run --rm migrate
 cd backend
 export DATABASE_URL='postgres://ashen:ashen@localhost:5432/ashen?sslmode=disable'
 export REDIS_ADDR='localhost:6379'
+# 开发形态的 redis 也强制了 requirepass（口令与 postgres 一样是 ashen），
+# 且两个端口都只绑 127.0.0.1 —— 不这么做等于把一台无口令的 Redis 开在局域网上
+export REDIS_PASSWORD='ashen'
 export JWT_SECRET="$(openssl rand -base64 32)"
 export WORKER_ENABLED=true
 go run ./cmd/api

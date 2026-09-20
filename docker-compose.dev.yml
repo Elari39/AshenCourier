@@ -17,7 +17,7 @@ services:
       POSTGRES_PASSWORD: ashen
       POSTGRES_DB: ashen
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432" # 只绑回环：开发库不该被局域网访问到
     volumes:
       - pgdata_dev:/var/lib/postgresql
     healthcheck:
@@ -30,13 +30,17 @@ services:
 
   redis:
     image: redis:8.10-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    # ⚠️ 开发形态也强制 requirepass：这个容器把 6379 映射到了宿主，
+    #    没有口令就是一台局域网内任何人可写的 Redis（可用来做未授权访问）。
+    #    口令与 postgres 一样沿用开发用的 ashen —— 宿主要连它时 export
+    #    REDIS_PASSWORD=ashen（README「本地开发」里已写明）。
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "ashen"]
     ports:
-      - "6379:6379" # 仅开发形态对外映射
+      - "127.0.0.1:6379:6379" # 仅开发形态映射，且只绑回环，不暴露到局域网
     volumes:
       - redisdata_dev:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      test: ["CMD-SHELL", "redis-cli -a ashen ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10

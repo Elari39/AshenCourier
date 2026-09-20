@@ -149,8 +149,11 @@ jobs:
           cp .env.example .env
           sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci-postgres-pwd/" .env
           sed -i "s/^REDIS_PASSWORD=.*/REDIS_PASSWORD=ci-redis-pwd/" .env
-          sed -i "s|^DATABASE_URL=.*|DATABASE_URL=postgres://ashen:ci-postgres-pwd@postgres:5432/ashen?sslmode=disable|" .env
           sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -base64 32)|" .env
+          # DATABASE_URL 不用改：.env.example 里它写成 postgres://ashen:${POSTGRES_PASSWORD}@…，
+          # compose 会展开这个引用。上面改了 POSTGRES_PASSWORD，它跟着就对了 ——
+          # 反过来，如果这里还留着一行 sed 去改 DATABASE_URL 的字面量，就说明
+          # 「两处各写一份口令」的坑还在（以前正是这么做的）。
 
       - name: docker compose up -d --build
         run: docker compose up -d --build
@@ -165,6 +168,13 @@ jobs:
             echo "第 $i 次探测未就绪，等待 5s…"
             sleep 5
           done
+          # 探测循环本身不会失败退出：不显式再验一次，超时的症状会变成
+          # 下一步浏览器脚本的报错（「连不上」），而不是「服务没起来」。
+          if ! curl -fsS http://localhost:8080/healthz >/dev/null 2>&1; then
+            echo "::error::栈在 3 分钟内未就绪，下面先看容器状态与日志"
+            docker compose ps
+            exit 1
+          fi
           docker compose ps
 
       # ⚠️ 顺序不能颠倒：本步骤**必须**排在「端到端冒烟」之前。
