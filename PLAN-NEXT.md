@@ -40,13 +40,15 @@
 | **N7** | 拍板与 CI 验证记录入库（§17.3 / §18.5 / §19） | ✅ | `e9d6c27` | 纯文档批次：N6-2 拍板为 **A（不做）**（迁移 `000007` 不实施、管理端接口形状不变）；§16.2 的两个可选项立项为 N8/N9，M5-4 维持「先别做」。**判定的痕迹同时落在代码里**（不是只改文档）：`GetByCode` 的注释写明是拍板结论并指向 §18.5；`TestShortCodeStillGloballyUnique` 从「临时边界、下一批应当反写」改成「长期契约」；README 的 `links` 数据模型行同步。同批记录 N3–N6-1 的 CI 结论：run `35482195414` 三个 job 全绿（`backend` 1m59s / `frontend` 41s / `smoke` 1m41s），`frontend/e2e/` **19/19** 紧接 `cmd/smoke` **27/27**，按 step 分组 19+27=46 与日志里的 ✓ 行数相等 |
 | **N8** | 后端二维码 SVG 端点 `GET /api/links/{code}/qr.svg`（M4-3 方案 B） | ✅ | `adc845a` | 新增 `handler/qr.go`（`skip2/go-qrcode` 只做编码，SVG 序列化自己写）+ 路由第 15 行。公开可读、只要求「存在且未软删除」、限流复用统计那一档、`max-age=300` + nosniff。单测把 SVG 反解成模块矩阵与 `Bitmap()` **逐格**比对。容器级 **19/19**（无头 Chrome 光栅化 + jsQR 真扫，512px 与 128px 解码都等于 `short_url`；定位图案落在第 5 个模块）。变异两条：`DisableBorder=true` → 静默区红；子路径写成 `h-%d` → 闭合红。冒烟固化 2 条 → **28 / 28**。**订正 §19.1 初稿的错误断言**：`Bitmap()` 其实**已含** 4 模块静默区（库的 `quietZoneSize()` 恒为 4），照初稿实现会得到 8 模块双重白边 |
 | **N9** | 零依赖 `/metrics` 文本端点（§19.2）+ 修掉探针共享 deadline 的误报 | ✅ | `d4d2957` | 新增 `httpx/metrics.go`（`RenderMetrics` 纯函数，17 条指标，零依赖）+ 路由第 16 行 + nginx `= /metrics { return 404; }` + 保留字表。三条刻意决定：不对外 / 探针挂了也回 200（healthz 回 503）/ 零值计数器仍输出。单测 4 条 + 变异 2 条（删保留字 → `TestReservedSetContents` 红；`ashen_up` 写死 1 → `TestRenderMetricsDegraded` 红）。容器级 **24/24**（经 nginx **404**、网络内部 **200 + `text/plain; version=0.0.4`**、17 条指标、`custom_code=metrics` → 422、停 PG 时 `/healthz` 503 而 `/metrics` 仍 200 且 **`ashen_redis_up` 仍为 1**）。**顺带修掉一个真 bug**：两个探针原先共用同一个 3 秒 deadline，PG 停掉时 TCP 重试吃光预算 → Redis ping 在已过期的 context 上必然失败 → `/healthz` 把健康的 Redis 也报成 `error`。修前实测复现过，修后同一场景 `redis_up` 保持 1。**订正 §19.2 的笔误**：拒绝码是 `invalid_custom_code` 而非 `invalid_code` |
+| **N10** | 收尾（§19.3） | ✅ | `a26ccbf` | 纯文档，**代码一行没改**（`git diff --stat` 只有 `PLAN-NEXT.md` 59 行 + `README.md` 11 行）：§0 补 N7/N8/N9 三行、§16 改成「已结清」（M5-3 后半指向 §18.5「不做」，§16.2 三项标完成）、§16.5 索引口径对齐、README「最近的实测」指向 run `35484563846` |
+| **N11** | CI 抖动修复：`TestOpCtxTimesOutWithCause` 把调度延迟写进了断言 | ✅ | `2672e4f` | **不是计划项**，是 N10 推送后 CI 变红倒查出来的真缺陷（详见 §19.4）：同一个断言在本机空转 4000 次全绿、把 16 核压满后 2000 次红 **7** 次（最差 `-6ms`），而 CI 报的 `-321.445µs` 正落在同一分布里。改成量「整段预算」后，同负载 2000 次 **0** 红；变异三条全抓到 |
 
 > ✅ N1 / N2 已于 2026-09-19 推送，CI 三个 job 全绿（run `35424447615`）：
 > `backend` 54s —— 含真 PG service 上的 store 集成测试（`internal/store/postgres` **1.271s**，
 > 跳过的话只有零点几秒，所以是真的跑了）；`frontend` 41s；`smoke` 85s —— **27 / 27**，
 > 三条口令用例逐条 ✓。上表两行里除 CI 结论外的数字都是本机实测（真 PG 18.6 容器 + 无头 Chrome）。
 >
-> ✅ 此后每次推送都跑了一遍 CI，全部 green：
+> 此后每次推送都跑了一遍 CI（逐条给结论；只有 N10 那次是红的，原因见下）：
 > `ed5abed`（N3–N6-1 入库）→ run `35482195414`，三个 job 全绿（`backend` 1m59s / `frontend` 41s /
 > `smoke` 1m41s），这是 **N3–N6-1 的首次 CI 验证**；
 > `adc845a`（N8）→ run `35483953065`（`backend` 1m56s / `frontend` 40s / `smoke` 1m36s）；
@@ -54,6 +56,14 @@
 > 后两次的 `smoke` 日志里都是 **`frontend/e2e/` 19/19 紧接 `cmd/smoke` 28/28**
 > （按 step 分组 19 + 28 = 47，与日志里的 ✓ 行数相等）——
 > N8 给 `cmd/smoke` 加的那两条二维码断言在 runner 上也生效。
+>
+> `a26ccbf`（N10）→ run `35484924568` **红**：`backend` 的 `go test -race` 挂在
+> `TestOpCtxTimesOutWithCause`（`deadline 剩余时间异常：-321.445µs`）。**与文档改动无关** ——
+> 是老断言自己把调度延迟写了进去，见 §19.4。这也是「纯文档提交也可能让 CI 变红」的一次实证：
+> 红灯不一定是本次改动引起的，但**必须查清楚**再重跑，否则就是把一颗真地雷盖回土里。
+>
+> `2672e4f`（N11）→ run `35485587539` 三个 job 全绿（`backend` 57s / `frontend` 37s /
+> `smoke` 2m6s），`frontend/e2e/` **19/19** 紧接 `cmd/smoke` **28/28**。
 
 **与计划的偏离（7 条，逐条给理由）**
 
@@ -1169,6 +1179,7 @@ CREATE UNIQUE INDEX links_domain_short_code_key
 | **N8** | 后端二维码 SVG 端点（§19.1，M4-3 方案 B） | feat | ✅ |
 | **N9** | `/metrics` 零依赖文本端点（§19.2） | feat | ✅ |
 | **N10** | 收尾：§0 批次表 / §16 可选项清单 / README 验收记录补 N7–N9 的实测输出 | docs | ✅（本批次） |
+| **N11** | CI 抖动修复：`TestOpCtxTimesOutWithCause` 的调度依赖断言（**非队列项**，N10 推送后 CI 红灯倒查出来的，见 §19.4） | fix | ✅ |
 
 ### 19.1 批次 N8：后端二维码 SVG 端点（M4-3 方案 B）
 
@@ -1333,3 +1344,70 @@ CREATE UNIQUE INDEX links_domain_short_code_key
 
 **N7–N10 全部完成后的状态**：计划里写下的每一条都有了结论 —— 做完（N1–N9）或明确不做并写明理由
 （N6-2 / M5-4）。三者之外没有悬空项。
+
+
+### 19.4 批次 N11：CI 抖动修复（2026-09-20，N10 推送后倒查出来的）
+
+**触发**：N10 是纯文档提交，推送后 CI 却在 `backend` 变红：
+
+```text
+--- FAIL: TestOpCtxTimesOutWithCause (0.00s)
+    db_test.go:154: deadline 剩余时间异常：-321.445µs
+```
+
+**根因** —— 不是 N10 改坏的，是老断言本身有这个毛病：
+
+```go
+db := &DB{timeout: time.Millisecond}
+ctx, cancel := db.opCtx(context.Background())
+if remaining := time.Until(deadline); remaining <= 0 || remaining > time.Second {
+```
+
+`timeout` 只有 1ms，于是 `remaining > 0` 实际断言的是「从 `opCtx()` 返回到读 `deadline`
+之间调度不超过 1ms」—— 一个关于**机器**的假设，而不是关于 `opCtx` 的契约。
+
+**为什么一直没发现**：本机是 16 核，`-count=300`（不带 race）与
+`GOMAXPROCS=1 -count=4000`（带 race）**都是全绿**。换成「32 个忙线程把 16 核压满 +
+`-race` + `-count=2000`」才复现：红 **7** 次，剩余时间 `-8.1µs … -6.0821ms`。
+**这个用例在本机空转时永远测不出来，必须把 CPU 压满。** 一般化的教训写进了
+README「八条踩过的坑」第 8 条。
+
+**修法**：把「此刻还剩多少」换成「整段预算是多少」，且下界取硬不变量：
+
+```go
+const opTimeout = 20 * time.Millisecond
+start := time.Now()
+ctx, cancel := db.opCtx(t.Context())
+if budget := deadline.Sub(start); budget < opTimeout || budget > time.Second {
+```
+
+`budget = deadline - start = (opCtx 内部取时的时刻 - start) + opTimeout`，
+而内部那次取时必然不早于 `start`（单调钟不回退），**所以下界与调度无关**；
+上界则继续拦住「没按 `db.timeout` 设置、退化成写死的默认值」。
+顺带按 modern-go 的 `testing_t_context` 改用 `t.Context()`（本文件另一条用例早已这么写）。
+
+**变异验证**（脚本化，每条改完即还原并断言字节一致，还原后基线自证为绿）：
+
+| 变异 | 预期 | 实测 |
+| --- | --- | --- |
+| A `opCtx` 写死 `defaultOpTimeout`（3s） | 红 | 红：`opCtx 的预算 = 3s，期望落在 [20ms, 1s]` |
+| B `opCtx` 写死 `time.Millisecond` | 红 | 红：`opCtx 的预算 = 1ms，期望落在 [20ms, 1s]` |
+| C `opCtx` 只带 cancel cause、不带 deadline | 红 | 红：`opCtx 必须带上 deadline` |
+| 还原后的基线 | 绿 | 绿 |
+
+**实测**：
+
+- 同一负载（32 线程压满 16 核 + `-race` + 2000 次）：修前红 **7** 次 → 修后 **0** 次
+- `gofmt -l` 无输出；`go vet ./...` 干净
+- 真 PG 18.6 容器 + `POSTGRES_TEST_DSN`：`go test -race ./...` 全绿；
+  `internal/store/postgres` **20** 个顶层用例、**0 SKIP**（含子测试共 39 PASS）
+- 不带 DSN：4 个单测绿 + 16 个集成用例 SKIP，与「未配置就整体跳过」的既有约定一致
+- CI run `35485587539`：三个 job 全绿（`backend` 57s / `frontend` 37s / `smoke` 2m6s），
+  `frontend/e2e/` **19/19** 紧接 `cmd/smoke` **28/28**
+
+> 关于用例数：§0 的 N1 行写「带 `POSTGRES_TEST_DSN` 时 15 个用例全绿」，那是 N1 当时的快照；
+> 此后 N5 / N6-1 又加了用例，现在是 **20** 个顶层用例。那行不改 —— 它记录的是当时的事实，
+> 与本节不冲突。
+
+**N7–N11 全部完成后的状态**：计划里写下的每一条都有了结论 —— 做完（N1–N11）或明确不做并写明
+理由（N6-2 / M5-4）。N11 是这条队列之外、由 CI 红灯倒查出来的修复，二者相加之后没有悬空项。

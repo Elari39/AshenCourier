@@ -43,7 +43,7 @@
 - [本地开发](#本地开发)
 - [环境变量](#环境变量)
 - [部署与运维排查](#部署与运维排查)
-- [七条踩过的坑](#七条踩过的坑)
+- [八条踩过的坑](#八条踩过的坑)
 - [已知限制](#已知限制)
 - [验收记录](#验收记录)
 - [许可](#许可)
@@ -327,7 +327,7 @@ node e2e/browser-check.mjs --base http://localhost:8080
 `frontend/e2e/` 断言的是**接口测不出来的那一类问题**：二维码画布有没有撑破容器、
 明细翻页后两页有没有重叠、口令页在真浏览器里会不会按 303 换成 GET 并带上 cookie。
 它只创建 1 条短链（创建接口是 10 次/分钟/IP 的硬配额），跑之前请先起全栈；详见
-[七条踩过的坑](#6-渲染库写的行内尺寸会盖过-tailwind-类) 第 6 条。
+[八条踩过的坑](#6-渲染库写的行内尺寸会盖过-tailwind-类) 第 6 条。
 
 | 变量 | 作用 |
 | --- | --- |
@@ -586,10 +586,10 @@ docker compose exec postgres dropdb -U ashen restore_check
 ⚠️ 备份文件在宿主机的 `./deploy/backup/`（已被 `.gitignore` 忽略）。生产环境请把该目录
 换成对象存储或异地卷 —— 和数据库放在同一块盘上的备份，在磁盘故障时一起没有。
 
-## 七条踩过的坑
+## 八条踩过的坑
 
-这七条都是「设计稿上看不出来、只有真跑容器（或真在浏览器里看一眼）才暴露」的，
-写在这里省得别人再踩一遍。
+这八条都是「设计稿上看不出来」、只有真跑起来（跑容器、真在浏览器里看一眼、或者真跑一遍 CI）
+才暴露的，写在这里省得别人再踩一遍。
 
 ### 1. 新增前端顶级路由，必须同步四处
 
@@ -752,6 +752,39 @@ bitmap[4][4] == true  // ← 若多补一圈，它会落在下标 8，这条立�
 > 「多补一圈静默区」与「少补一圈静默区」在肉眼与「能否解码」上都无法区分，
 > 只有「定位图案在第几个模块」这种断言分得清 4 与 8。
 
+### 8. 测试断言里不要夹带「调度不会慢」这种假设
+
+`TestOpCtxTimesOutWithCause` 原本这么写：
+
+```go
+db := &DB{timeout: time.Millisecond}
+ctx, cancel := db.opCtx(context.Background())
+// ...
+if remaining := time.Until(deadline); remaining <= 0 || remaining > time.Second {
+```
+
+`timeout` 只有 1ms，于是 `remaining > 0` 实际测的是「从 `opCtx()` 返回到读 `deadline`
+之间，调度不会超过 1ms」—— 一个关于**机器**的假设。4 核 runner 上 `-race` 全量并行跑时
+会真的踩中：CI 报 `-321.445µs`，本机把 16 核压满后 2000 次里红 7 次、最差 `-6ms`。
+
+改法是把「此刻还剩多少」换成「整段预算是多少」，且下界必须是**硬不变量**：
+
+```go
+start := time.Now()
+ctx, cancel := db.opCtx(t.Context())
+if budget := deadline.Sub(start); budget < opTimeout || budget > time.Second {
+```
+
+`budget = deadline - start`，而 `opCtx` 内部那次取时必然不早于 `start`（单调钟不回退），
+所以下界是真的不变量、与调度无关；上界则继续拦住「没按 `db.timeout` 设置」这类真回归
+（写死 3s → `预算 = 3s` 红；写死 1ms → `预算 = 1ms` 红）。
+
+> 一般化的教训：**断言要盯住被测对象的不变量，不要顺带断言运行环境。**
+> 这类用例的症状是「本机怎么跑都绿、CI 偶发红」，而它吐出的失败信息（一个负的微秒数）
+> 看起来像被测代码有 bug，很容易误判成真故障去改错地方。
+> 复现手法：**把机器压满**再 `-count` 跑几百次 —— 空闲的 16 核上跑 300 次一次都不会红，
+> 所以「跑过了」不能证明它不抖。
+
 ## 已知限制
 
 MVP 有意不做的部分：
@@ -795,7 +828,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **容器级 ⑨**：标签（M4-1） | 创建时传 `["Ops","  ops  ","Dev"]` → 返回 `["ops","dev"]`（归一化 + 去重）；`?tag=ops` 只命中该条，`?tag=DEV`（大写）也能命中（按小写比较）；11 个标签 / 33 字符标签都返回 422 `invalid_tags`；`EXPLAIN` 下 `tags @> ARRAY['ops']` 走 **`links_tags_gin`**（Bitmap Index Scan）。浏览器侧：无头 Chrome 在 `/dashboard` 输入 `ops` 后列表从 2 条变 1 条 | 本机 |
 | **容器级 ⑩**：点击明细页（M4-2） | 跳转 3 次（手机 / 桌面 / 爬虫 UA）→ `?limit=2` 拿到 2 行 + 游标，带游标翻到第 2 页拿到剩下的 1 行、`next_cursor` 为空；时间倒序且两页无重叠无缺口（26 行 = 首屏 20 + 「加载更多」6，逐行核对无重复）。IP 掩码：库里 `host(ip)` = `172.20.0.1`，响应里是 `172.20.0.0/24`，且响应体里搜不到原始地址。`device=mobile` 命中 1 条、`device=unknown` 命中 0 条（与设备分布口径一致）；`limit=0` / `days=abc` / `device=tv` / 坏游标都返回 422 且 `field` 正确；无凭据 404。`EXPLAIN` 下 `(occurred_at, id) < (…)` 被下推进 **`click_events_link_time_id_idx`** 的 Index Cond，且 Index Only Scan **不带 Sort 节点**（索引本身给出倒序）。浏览器侧：无头 Chrome 打开 `/links/{code}`，首屏 20 行 + 「加载更多」，点一下变 26 行、按钮换成「已经到底了」，两页拼接处无重复行 | 本机 |
 | **容器级 ⑪**：二维码（M4-3） | 详情页把 `short_url` 画进 canvas（前端 `qrcode` 生成，无后端接口）。用 **jsQR 真的去扫**：页面 canvas 取回的 PNG 解码 = `http://localhost:8080/{code}`，与 `short_url` 逐字相等；点「下载二维码」落盘的 `ashencourier-{code}.png` 是 **1024×1024**，解码结果同样相等。配色为深墨 `#141413` + 暖奶油 `#faf9f5`（≈19:1，不用珊瑚色当前景），下载件用纯白底 | 本机 |
-| **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「七条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
+| **容器级 ⑪ 补**：二维码版式 | 初版画布撑破容器（`qrcode` 写的行内 `320px` 盖过 Tailwind 的 `h-full w-full`，见「八条踩过的坑」第 6 条）。修正后实测：容器 **160×160** @ (158.5, 366.9)、画布 **142×142** @ (167.5, 375.9)（正好等于容器减 padding 与 1px 边框）、右边缘 309.5 < 文字列 327.5（不压字）、位图仍是 **320px**、inline style 已清空；采样像素同时含 `#141413` 与 `#faf9f5`。解码两处仍全对 | 本机 |
 | `docker compose down && docker compose up -d` | 数据仍在（volume 持久化：`links` 8 → 8），`/healthz` 立即 200 | 本机 |
 | **集成测试 ⑫**：store 层迁移与 SQL（N1 / 自动化缺口 16.3-1） | 带 `POSTGRES_TEST_DSN` 时 20 个用例全绿（迁移形状与索引清单 / links 往返 / Update 的三种语义 / 与权威 SQL 逐项比对的 keyset 两处 / `tags @> ARRAY[...]` 走 `links_tags_gin` / `event_uid` 幂等 / 聚合的 UTC 日界 / 计数累加 / 过期扫描）；不带 DSN 时 9 个集成用例全部 SKIP、整包仍绿。**变异验证**：删掉 `ON CONFLICT ... WHERE event_uid IS NOT NULL` → 报 `42P10 no unique or exclusion constraint matching`；把 keyset 的 `(occurred_at, id) <` 退化成 `occurred_at <` → 报 `got=[12 11 10 9 8 6 5 4 3 2] want=[12 11 10 9 8 7 6 5 4 3 2 1]`（并列时间上漏掉第 7 与第 1 条）。第一次跑还发现 `links.created_ip` 读出来带 `/32` 掩码长度，已与 `click_events.ip` 一样改用 `host()` | 本机（PG 18.6 容器）+ CI `backend` |
 | **容器级 ⑬**：短链访问口令（M5-1 / N2） | 建带口令的短链 → `password_protected=True`；库里 `password_hash` 是 `$2a$12$…`（60 字符，且 `= 'smoke-pass-9f3a'` 为 `f`）。未解锁 `GET /{code}` = **200 + text/html** 且 `total_clicks` 仍 0；错误口令 = **401** 且 `total_clicks` 仍 0；正确口令 = **303 + Set-Cookie**（`HttpOnly` / `SameSite=Lax` / `Path=/`，http 下不带 `Secure`）；带 cookie 的 GET = **302**，`total_clicks` = **1**、`click_events` = **1**（解锁那次没被重复计）；`clear_password` 后立刻 302（缓存被主动失效）。迁移 000005 往返两轮：`down 1` 后列消失、`up` 后回来，无报错且之后新跳转仍 302。冒烟 **27 / 27**（三条口令用例逐条 ✓）。浏览器侧（无头 Chrome + CDP）：创建表单展开高级选项后有「访问口令」；详情页显示「受口令保护」徽章，编辑面板有「访问口令」输入与「清除口令」按钮；短链未解锁渲染口令页、输错显示「口令不对，请再试一次。」、输对**真的落到目标地址** | 本机（Docker + 无头 Chrome） |
@@ -823,19 +856,24 @@ PR 只跑 `backend` 与 `frontend` 两个快 job（约 1 分钟），因为 `doc
 （26 次跳转 + 等明细落库），所以 smoke 开始时限流窗口已经滚过 —— 顺序一旦颠倒，
 浏览器验收第一步就会拿到 429。
 
-最近的实测：[run 35484563846](https://github.com/Elari39/AshenCourier/actions/runs/35484563846)
-三个 job 全绿（`backend` 59s / `frontend` 36s / `smoke` 1m35s）。三个关键证据：`backend` 里
-`internal/store/postgres` 跑了 **1.271s**（未设置 `POSTGRES_TEST_DSN` 时集成测试会整体跳过，
+最近的实测：[run 35485587539](https://github.com/Elari39/AshenCourier/actions/runs/35485587539)
+三个 job 全绿（`backend` 57s / `frontend` 37s / `smoke` 2m6s）。三个关键证据：`backend` 里
+`internal/store/postgres` 跑了 **1.364s**（未设置 `POSTGRES_TEST_DSN` 时集成测试会整体跳过，
 那时只有零点几秒 —— 所以它是真的连上了 service 容器里的 PG）；`smoke` 里 **`frontend/e2e/` 19/19
 之后紧接 `cmd/smoke` 28/28**（在 runner 自带的 Chrome 上真跑，不靠本机的 `CHROME_BIN` 探测），
 按 step 分组计数 19 + 28 = 47，与日志里的 ✓ 行数相等；`frontend` 的 vitest **31 个用例**全绿。
 
-（前一次是 [run 35483953065](https://github.com/Elari39/AshenCourier/actions/runs/35483953065) ——
-N8 落地的验证，同样是三个 job 全绿。）
+（前两次分别是 [run 35484563846](https://github.com/Elari39/AshenCourier/actions/runs/35484563846)
+—— N9 `/metrics` 落地的验证；[run 35483953065](https://github.com/Elari39/AshenCourier/actions/runs/35483953065)
+—— N8 二维码端点的验证。这三次都是三个 job 全绿。）
 
-**CI 自身也实测过「会红」**（不是只看过绿灯）：故意破坏一个文件的 gofmt → `backend` job 红并列出
-文件名；故意改错冒烟工具的期望值 → `smoke` job 红、日志里能看到断言失败与容器日志。配置见
-[`.github/workflows/ci.yml`](./.github/workflows/ci.yml)。
+**CI 自身也实测过「会红」**（不是只看过绿灯）：其中两次是故意造出来的 —— 故意破坏一个文件的
+gofmt → `backend` job 红并列出文件名；故意改错冒烟工具的期望值 → `smoke` job 红、日志里能看到
+断言失败与容器日志。**还有一次是自然发生的**：N10 那个纯文档提交把
+`TestOpCtxTimesOutWithCause` 的调度依赖断言撞红了（run `35484924568`），于是多了两个教训 ——
+「红灯未必由本次改动引起，但必须先查清楚再重跑」以及「本机空转跑不出来的抖动，要把 CPU
+压满才复现」，后者写在「八条踩过的坑」第 8 条。
+配置见 [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)。
 
 ## 许可
 
