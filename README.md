@@ -823,12 +823,15 @@ PR 只跑 `backend` 与 `frontend` 两个快 job（约 1 分钟），因为 `doc
 （26 次跳转 + 等明细落库），所以 smoke 开始时限流窗口已经滚过 —— 顺序一旦颠倒，
 浏览器验收第一步就会拿到 429。
 
-最近的实测：[run 35482195414](https://github.com/Elari39/AshenCourier/actions/runs/35482195414)
-三个 job 全绿（`frontend` 41s / `backend` 1m59s / `smoke` 1m41s）。三个关键证据：`backend` 里
+最近的实测：[run 35484563846](https://github.com/Elari39/AshenCourier/actions/runs/35484563846)
+三个 job 全绿（`backend` 59s / `frontend` 36s / `smoke` 1m35s）。三个关键证据：`backend` 里
 `internal/store/postgres` 跑了 **1.271s**（未设置 `POSTGRES_TEST_DSN` 时集成测试会整体跳过，
 那时只有零点几秒 —— 所以它是真的连上了 service 容器里的 PG）；`smoke` 里 **`frontend/e2e/` 19/19
-之后紧接 `cmd/smoke` 27/27**（在 runner 自带的 Chrome 上真跑，不靠本机的 `CHROME_BIN` 探测），
-按 step 分组计数 19 + 27 = 46，与日志里的 ✓ 行数相等；`frontend` 的 vitest **31 个用例**全绿。
+之后紧接 `cmd/smoke` 28/28**（在 runner 自带的 Chrome 上真跑，不靠本机的 `CHROME_BIN` 探测），
+按 step 分组计数 19 + 28 = 47，与日志里的 ✓ 行数相等；`frontend` 的 vitest **31 个用例**全绿。
+
+（前一次是 [run 35483953065](https://github.com/Elari39/AshenCourier/actions/runs/35483953065) ——
+N8 落地的验证，同样是三个 job 全绿。）
 
 **CI 自身也实测过「会红」**（不是只看过绿灯）：故意破坏一个文件的 gofmt → `backend` job 红并列出
 文件名；故意改错冒烟工具的期望值 → `smoke` job 红、日志里能看到断言失败与容器日志。配置见
