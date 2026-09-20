@@ -6,7 +6,7 @@
  * 已加载的列表算出来 —— 不再为此新增一个「账号级汇总」接口，
  * MVP 阶段多一个接口就多一份要维护的契约。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { ApiError, linksApi } from '@/api/client'
 import type { Link } from '@/api/types'
@@ -21,6 +21,7 @@ import Input from '@/components/ui/Input.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useToast } from '@/composables/useToast'
+import { createRequestGuard, isAbortError } from '@/utils/request'
 
 const PAGE_SIZE = 20
 
@@ -57,22 +58,40 @@ const emptyDescription = computed(() => {
   return '用上面的表单创建第一条短链吧。'
 })
 
+/**
+ * 列表的并发守卫：reload 与 loadMore **共用一个**。
+ *
+ * 共用一个是刻意的 —— 两者写的是同一份 `links`：搜索条件变了之后的 reload 必须
+ * 能取消在途的 loadMore，否则「翻页的第二页」会追加到「新查询的第一页」后面，
+ * 同一个列表里混进两组不同查询的结果。分开用两个守卫就挡不住这种情况。
+ *
+ * 原来这里只有 300ms 防抖，那只能压住「重复发送」，取消不了已经发出去的请求。
+ */
+const listGuard = createRequestGuard()
+
 /** 首次加载 / 搜索变化时重置列表。 */
 async function reload(): Promise<void> {
+  const { signal, isStale } = listGuard.begin()
   loading.value = true
   loadError.value = ''
   try {
-    const result = await linksApi.list({
-      limit: PAGE_SIZE,
-      q: query.value.trim() || undefined,
-      tag: tagFilter.value.trim() || undefined,
-    })
+    const result = await linksApi.list(
+      {
+        limit: PAGE_SIZE,
+        q: query.value.trim() || undefined,
+        tag: tagFilter.value.trim() || undefined,
+      },
+      null,
+      signal,
+    )
+    if (isStale()) return
     links.value = result.links
     nextCursor.value = result.next_cursor ?? ''
   } catch (cause) {
+    if (isStale() || isAbortError(cause)) return
     loadError.value = cause instanceof ApiError ? cause.friendly : '加载失败，请稍后重试'
   } finally {
-    loading.value = false
+    if (!isStale()) loading.value = false
   }
 }
 
@@ -80,20 +99,27 @@ async function reload(): Promise<void> {
 async function loadMore(): Promise<void> {
   if (!hasMore.value || loadingMore.value) return
 
+  const { signal, isStale } = listGuard.begin()
   loadingMore.value = true
   try {
-    const result = await linksApi.list({
-      limit: PAGE_SIZE,
-      cursor: nextCursor.value,
-      q: query.value.trim() || undefined,
-      tag: tagFilter.value.trim() || undefined,
-    })
+    const result = await linksApi.list(
+      {
+        limit: PAGE_SIZE,
+        cursor: nextCursor.value,
+        q: query.value.trim() || undefined,
+        tag: tagFilter.value.trim() || undefined,
+      },
+      null,
+      signal,
+    )
+    if (isStale()) return
     links.value = [...links.value, ...result.links]
     nextCursor.value = result.next_cursor ?? ''
   } catch (cause) {
+    if (isStale() || isAbortError(cause)) return
     toast.error(cause instanceof ApiError ? cause.friendly : '加载失败，请稍后重试')
   } finally {
-    loadingMore.value = false
+    if (!isStale()) loadingMore.value = false
   }
 }
 
@@ -131,6 +157,13 @@ onMounted(async () => {
   // 并行：刷新用户资料（令牌可能已过期）+ 拉列表。令牌失效时 401 处理器会接管跳转
   void refreshMe().catch(() => undefined)
   await reload()
+})
+
+// 离开页面时：清掉防抖定时器（否则它会在组件销毁后触发一次 reload），
+// 并取消在飞的列表请求。
+onUnmounted(() => {
+  window.clearTimeout(searchTimer)
+  listGuard.cancel()
 })
 </script>
 

@@ -5,7 +5,7 @@
  * 鉴权：登录用户用自己的账号，匿名创建者用 localStorage 里的 manage_key。
  * 后端对「无权限」和「不存在」都回 404，所以这里只需要处理一种失败态。
  */
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import QRCode from 'qrcode'
 
@@ -34,6 +34,7 @@ import {
   formatNumber,
 } from '@/utils/format'
 import { splitTags } from '@/utils/tags'
+import { createRequestGuard, isAbortError } from '@/utils/request'
 
 const route = useRoute()
 const router = useRouter()
@@ -163,21 +164,39 @@ async function loadLink(): Promise<void> {
   }
 }
 
+/**
+ * 统计与明细各用一个并发守卫（而不是共用一个）：切换统计窗口时两者会同时重发，
+ * 但它们彼此独立 —— 明细分页失败不该把统计面板也作废，反之亦然。
+ *
+ * 没有它们时的症状：连点「7 天 → 90 天」，先回来的 7 天响应会写进标着「90 天」
+ * 的面板；「加载更多」在途时切窗口，旧的一页会被追加进已经重置的列表。
+ */
+const statsGuard = createRequestGuard()
+const clicksGuard = createRequestGuard()
+
 async function loadStats(): Promise<void> {
   if (!link.value) return
+
+  const { signal, isStale } = statsGuard.begin()
   loadingStats.value = true
   try {
-    stats.value = await linksApi.stats(code.value, statsDays.value, manageKey.value)
+    const page = await linksApi.stats(code.value, statsDays.value, manageKey.value, signal)
+    if (isStale()) return
+    stats.value = page
   } catch (cause) {
+    // 取消是我们自己发起的（切窗口 / 离开页面），不是故障，不提示
+    if (isStale() || isAbortError(cause)) return
     toast.error(cause instanceof ApiError ? cause.friendly : '统计加载失败')
   } finally {
-    loadingStats.value = false
+    // 过期的一轮不能掐掉新请求的 loading
+    if (!isStale()) loadingStats.value = false
   }
 }
 
 async function loadClicks(reset = true): Promise<void> {
   if (!link.value) return
 
+  const { signal, isStale } = clicksGuard.begin()
   loadingClicks.value = true
   clicksError.value = ''
   try {
@@ -189,14 +208,17 @@ async function loadClicks(reset = true): Promise<void> {
         cursor: reset ? undefined : clicksCursor.value,
       },
       manageKey.value,
+      signal,
     )
+    if (isStale()) return
     clicks.value = reset ? page.clicks : [...clicks.value, ...page.clicks]
     clicksCursor.value = page.next_cursor ?? ''
   } catch (cause) {
+    if (isStale() || isAbortError(cause)) return
     // 明细加载失败不影响页面其余部分：单独报错，统计与趋势照常显示
     clicksError.value = cause instanceof ApiError ? cause.friendly : '点击明细加载失败'
   } finally {
-    loadingClicks.value = false
+    if (!isStale()) loadingClicks.value = false
   }
 }
 
@@ -361,6 +383,12 @@ onMounted(async () => {
   if (link.value) {
     await Promise.all([loadStats(), loadClicks(), renderQR()])
   }
+})
+
+// 离开页面时取消在飞的请求：响应回来时组件已经卸载，写状态既无意义也易出错
+onUnmounted(() => {
+  statsGuard.cancel()
+  clicksGuard.cancel()
 })
 </script>
 
