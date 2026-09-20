@@ -157,6 +157,17 @@ type ClickStream interface {
 	ReadClicks(ctx context.Context, consumer string, count int64, block time.Duration) (*ReadResult, error)
 	// AutoClaim 认领空闲超过 minIdle 的 pending 消息，防止消费者崩溃后事件永久滞留。
 	AutoClaim(ctx context.Context, consumer string, minIdle time.Duration, count int64) (*ReadResult, error)
+	// ReapDeadLetters 找出重投次数已达上限的 pending 消息并直接 ACK 丢弃，返回被丢弃的 ID。
+	//
+	// 为什么需要它：「写库失败就不 ACK」这条策略在**永久性**失败上会翻车 ——
+	// 一条语义非法的消息（比如 link_id 指向的短链已被硬删，插入撞外键）永远写不进去，
+	// 于是它每轮都被 AutoClaim 捞回来重投，形成带错误日志的死循环，还会把同批的
+	// 正常消息一起卡住。可解析性（MalformedIDs）只挡得住「字段坏了」那一类，
+	// 挡不住「字段都对、但数据库不接受」。
+	//
+	// 重投次数取自 Stream 的 PEL（Redis 自己记的 delivery count），
+	// 因此它跨进程重启依然成立 —— 不能把计数放在 worker 内存里。
+	ReapDeadLetters(ctx context.Context, maxRetries int64, limit int64) ([]string, error)
 	// Ack 确认消息已落库。
 	Ack(ctx context.Context, ids ...string) error
 }

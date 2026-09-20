@@ -178,6 +178,8 @@ func logStats(logger *slog.Logger, wk *worker.Worker, rdb *redis.Client) {
 		"malformed", stats.Malformed,
 		"count_synced", stats.CountSynced,
 		"expired", stats.Expired,
+		// 毒消息数：这个数**不该**长期增长，打出来是为了让「有消息永远写不进库」能被看见
+		"dead_lettered", stats.DeadLettered,
 		"errors", stats.Errors,
 	}
 	// 探针失败不影响打点

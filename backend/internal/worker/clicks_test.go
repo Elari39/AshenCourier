@@ -119,6 +119,13 @@ type fakeStream struct {
 	claimErr    error
 	ackErr      error
 	acked       [][]string
+
+	// 毒消息清理：dead 是被判定为毒消息的 ID，reapErr 模拟清理本身失败。
+	// maxAttempts 记录调用方传进来的上限，用来断言 worker 真的把配置传下去了。
+	dead        []string
+	reapErr     error
+	maxAttempts int64
+	reapCalls   int
 }
 
 func (s *fakeStream) EnsureGroup(context.Context) error { return nil }
@@ -138,6 +145,15 @@ func (s *fakeStream) AutoClaim(context.Context, string, time.Duration, int64) (*
 		return &domain.ReadResult{}, nil
 	}
 	return s.claimResult, nil
+}
+
+func (s *fakeStream) ReapDeadLetters(_ context.Context, maxRetries int64, _ int64) ([]string, error) {
+	s.reapCalls++
+	s.maxAttempts = maxRetries
+	if s.reapErr != nil {
+		return nil, s.reapErr
+	}
+	return s.dead, nil
 }
 
 func (s *fakeStream) Ack(_ context.Context, ids ...string) error {
@@ -456,6 +472,85 @@ func TestHandleBatchAcksMalformedIDs(t *testing.T) {
 	}
 	if got := w.Stats().Malformed; got != 2 {
 		t.Fatalf("Malformed = %d, want 2", got)
+	}
+}
+
+// ---- 毒消息清理 ----
+
+// TestReapDeadLettersCountsAndPassesLimit：清理一轮必须把毒消息计数上去，
+// 并且**真的把配置里的重投上限传下去** —— 上限留在 worker 里不传，等于没配。
+func TestReapDeadLettersCountsAndPassesLimit(t *testing.T) {
+	t.Parallel()
+
+	stream := &fakeStream{dead: []string{"7-0", "7-1"}}
+	w := New(Deps{
+		Counts:  newFakeCounts(),
+		Sweeper: &fakeSweeper{},
+		Clicks:  &fakeClicks{},
+		Counter: newFakeCounter(),
+		Stream:  stream,
+		Cache:   &fakeCache{},
+	}, Config{MaxDeliveryAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if err := w.reapDeadLetters(t.Context()); err != nil {
+		t.Fatalf("reapDeadLetters 不应失败：%v", err)
+	}
+	if got := w.Stats().DeadLettered; got != 2 {
+		t.Fatalf("DeadLettered = %d, want 2", got)
+	}
+	if stream.maxAttempts != 3 {
+		t.Fatalf("传给 ReapDeadLetters 的重投上限 = %d, want 3", stream.maxAttempts)
+	}
+}
+
+// TestReapDeadLettersNoOpWhenClean：没有毒消息时这一轮什么都不做 ——
+// 尤其不能把 DeadLettered 加 0 之外的数，也不能因为空切片就报错。
+func TestReapDeadLettersNoOpWhenClean(t *testing.T) {
+	t.Parallel()
+
+	stream := &fakeStream{}
+	w := newTestWorker(newFakeCounter(), newFakeCounts(), &fakeClicks{}, stream, &fakeCache{}, &fakeSweeper{})
+
+	if err := w.reapDeadLetters(t.Context()); err != nil {
+		t.Fatalf("没有毒消息时不该报错：%v", err)
+	}
+	if got := w.Stats().DeadLettered; got != 0 {
+		t.Fatalf("DeadLettered = %d, want 0", got)
+	}
+	if stream.reapCalls != 1 {
+		t.Fatalf("ReapDeadLetters 调用次数 = %d, want 1", stream.reapCalls)
+	}
+}
+
+// TestReapDeadLettersPropagatesError：清理本身失败必须冒给定时器，
+// 由它记 errors 并退避 —— 静默吞掉会让「PEL 里堆着毒消息」这件事彻底看不见。
+func TestReapDeadLettersPropagatesError(t *testing.T) {
+	t.Parallel()
+
+	stream := &fakeStream{reapErr: errors.New("redis: xpending failed")}
+	w := newTestWorker(newFakeCounter(), newFakeCounts(), &fakeClicks{}, stream, &fakeCache{}, &fakeSweeper{})
+
+	if err := w.reapDeadLetters(t.Context()); err == nil {
+		t.Fatal("清理失败时应返回错误")
+	}
+}
+
+// TestDeadLetterConfigDefaults：两个新配置必须有默认值 ——
+// 没显式配置时毒消息清理要照常工作（默认 5 次 / 5 分钟），而不是被 0 值关掉。
+func TestDeadLetterConfigDefaults(t *testing.T) {
+	t.Parallel()
+
+	got := Config{}.withDefaults()
+	if got.MaxDeliveryAttempts != DefaultMaxDeliveryAttempts {
+		t.Errorf("MaxDeliveryAttempts = %d, want %d", got.MaxDeliveryAttempts, DefaultMaxDeliveryAttempts)
+	}
+	if got.DeadLetterEvery != DefaultDeadLetterEvery {
+		t.Errorf("DeadLetterEvery = %v, want %v", got.DeadLetterEvery, DefaultDeadLetterEvery)
+	}
+	// 显式配置不能被默认值盖掉
+	explicit := Config{MaxDeliveryAttempts: 9, DeadLetterEvery: time.Minute}.withDefaults()
+	if explicit.MaxDeliveryAttempts != 9 || explicit.DeadLetterEvery != time.Minute {
+		t.Errorf("显式配置被默认值覆盖了：%d / %v", explicit.MaxDeliveryAttempts, explicit.DeadLetterEvery)
 	}
 }
 

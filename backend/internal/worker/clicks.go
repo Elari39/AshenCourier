@@ -6,6 +6,8 @@
 //	B · 计数同步  ：每 2s 把 Redis 增量刷进 links.click_count
 //	C · 兜底认领  ：每 30s XAUTOCLAIM 认领 idle > 60s 的 pending 消息
 //	D · 过期清理  ：每小时把过期短链置为 disabled 并清缓存
+//	E · 毒消息清理：每 5min 把重投次数超限的 pending 消息 ACK 丢弃
+//	   （否则一条「字段合法但数据库拒收」的消息会被无限重投）
 //
 // 投递语义是 at-least-once：极端情况下（处理完成但 ACK 前重启）明细会被重投，
 // 但两个口径都不会因此走样 —— 计数走 INCR 累加，重投不会多算；明细靠
@@ -34,6 +36,15 @@ const (
 	DefaultExpireEvery    = time.Hour
 	DefaultExpireBatch    = 500
 	DefaultErrorBackoff   = time.Second
+	// DefaultDeadLetterEvery 是毒消息清理周期。
+	//
+	// 比认领周期（30s）长得多是故意的：清理要扫一遍 PEL，而毒消息本身
+	// 不紧急 —— 它已经失败过 5 次了，再等几分钟也无所谓，没必要每 30 秒扫一次。
+	DefaultDeadLetterEvery = 5 * time.Minute
+	// DefaultMaxDeliveryAttempts 是一条消息被判为「毒消息」之前的重投次数上限。
+	// 与 store/redis 的 defaultMaxDeliveryAttempts 同值，这里单独定义是为了
+	// 让 worker 包不依赖 redis 包（它只依赖 domain 端口）。
+	DefaultMaxDeliveryAttempts = int64(5)
 )
 
 // Config 是 Worker 的运行参数。
@@ -54,6 +65,12 @@ type Config struct {
 	ExpireEvery time.Duration
 	// ExpireBatch 是单次过期清理的条数上限。
 	ExpireBatch int
+	// DeadLetterEvery 是毒消息（重投次数超限）的清理周期。
+	DeadLetterEvery time.Duration
+	// MaxDeliveryAttempts 是一条消息被判为毒消息之前的重投次数上限。
+	// 达到上限仍失败的消息会被 ACK 丢弃并记 WARN —— 否则它会被无限重投，
+	// 既刷屏日志，又把同批的正常消息一起卡住（见 domain.ClickStream.ReapDeadLetters）。
+	MaxDeliveryAttempts int64
 	// ErrorBackoff 是循环出错后的退避时长，避免故障时打爆日志。
 	ErrorBackoff time.Duration
 }
@@ -91,6 +108,12 @@ func (c Config) withDefaults() Config {
 	if c.ErrorBackoff <= 0 {
 		c.ErrorBackoff = DefaultErrorBackoff
 	}
+	if c.DeadLetterEvery <= 0 {
+		c.DeadLetterEvery = DefaultDeadLetterEvery
+	}
+	if c.MaxDeliveryAttempts <= 0 {
+		c.MaxDeliveryAttempts = DefaultMaxDeliveryAttempts
+	}
 	return c
 }
 
@@ -106,6 +129,9 @@ type Stats struct {
 	CountSynced int64
 	// Expired 是累计置为失效的短链数。
 	Expired int64
+	// DeadLettered 是累计丢弃的毒消息数（重投次数超限、仍写不进库）。
+	// 这个数**不该**长期增长：它只在出现「字段合法但数据库拒收」的消息时才动。
+	DeadLettered int64
 	// Errors 是累计错误次数。
 	Errors int64
 }
@@ -156,12 +182,13 @@ type Worker struct {
 	cfg Config
 	log *slog.Logger
 
-	consumed    atomic.Int64
-	malformed   atomic.Int64
-	claimed     atomic.Int64
-	countSynced atomic.Int64
-	expired     atomic.Int64
-	errors      atomic.Int64
+	consumed     atomic.Int64
+	malformed    atomic.Int64
+	claimed      atomic.Int64
+	countSynced  atomic.Int64
+	expired      atomic.Int64
+	deadLettered atomic.Int64
+	errors       atomic.Int64
 
 	wg sync.WaitGroup
 }
@@ -186,7 +213,7 @@ func New(deps Deps, cfg Config, logger *slog.Logger) *Worker {
 	}
 }
 
-// Start 启动四个后台循环。
+// Start 启动五个后台循环。
 func (w *Worker) Start(ctx context.Context) {
 	if err := w.stream.EnsureGroup(ctx); err != nil {
 		w.errors.Add(1)
@@ -199,6 +226,7 @@ func (w *Worker) Start(ctx context.Context) {
 	w.wg.Go(func() { w.countSyncLoop(ctx) })
 	w.wg.Go(func() { w.claimLoop(ctx) })
 	w.wg.Go(func() { w.expireLoop(ctx) })
+	w.wg.Go(func() { w.deadLetterLoop(ctx) })
 }
 
 // Stop 等待全部循环退出。调用前应先取消传给 Start 的 context。
@@ -207,12 +235,13 @@ func (w *Worker) Stop() { w.wg.Wait() }
 // Stats 返回运行计数快照。
 func (w *Worker) Stats() Stats {
 	return Stats{
-		Consumed:    w.consumed.Load(),
-		Malformed:   w.malformed.Load(),
-		Claimed:     w.claimed.Load(),
-		CountSynced: w.countSynced.Load(),
-		Expired:     w.expired.Load(),
-		Errors:      w.errors.Load(),
+		Consumed:     w.consumed.Load(),
+		Malformed:    w.malformed.Load(),
+		Claimed:      w.claimed.Load(),
+		CountSynced:  w.countSynced.Load(),
+		Expired:      w.expired.Load(),
+		DeadLettered: w.deadLettered.Load(),
+		Errors:       w.errors.Load(),
 	}
 }
 
@@ -258,6 +287,38 @@ func (w *Worker) claimPending(ctx context.Context) error {
 	w.log.Warn("认领到滞留的 pending 消息 —— 可能有消费者异常退出",
 		"count", len(result.Messages), "malformed", len(result.MalformedIDs))
 	w.handleBatch(ctx, result, "claim")
+	return nil
+}
+
+// deadLetterLoop 是 E · 毒消息清理循环。
+func (w *Worker) deadLetterLoop(ctx context.Context) {
+	w.log.Info("已启动毒消息清理循环",
+		"every", w.cfg.DeadLetterEvery, "max_attempts", w.cfg.MaxDeliveryAttempts)
+
+	w.everyFixed(ctx, "reap-dead-letters", w.cfg.DeadLetterEvery, w.reapDeadLetters)
+}
+
+// reapDeadLetters 清理一轮毒消息。
+//
+// 抽成方法而不是写在闭包里，单测才能直接驱动这一轮逻辑（与 claimPending 同理）。
+//
+// ⚠️ 丢消息是**不可逆**的，所以这里只丢「重投次数已达上限」的那些 —— 判定依据是
+// Redis PEL 自己记的 delivery count，跨进程重启依然成立。瞬时故障（PG 抖一下）
+// 一两轮就过去，撑不到上限；撑到上限的几乎一定是永久性失败（外键冲突之类）。
+func (w *Worker) reapDeadLetters(ctx context.Context) error {
+	dead, err := w.stream.ReapDeadLetters(ctx, w.cfg.MaxDeliveryAttempts, w.cfg.BatchSize)
+	if err != nil {
+		return err
+	}
+	if len(dead) == 0 {
+		return nil
+	}
+
+	w.deadLettered.Add(int64(len(dead)))
+	// 记 WARN 而不是 ERROR：这是预期内的兜底行为，不是故障。
+	// 把 ID 打出来，便于事后去 Stream 里把这条消息翻出来看它到底为什么写不进库。
+	w.log.Warn("丢弃重投次数超限的点击消息（疑似毒消息，明细不会入库）",
+		"count", len(dead), "max_attempts", w.cfg.MaxDeliveryAttempts, "ids", dead)
 	return nil
 }
 
