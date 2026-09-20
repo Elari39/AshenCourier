@@ -91,14 +91,16 @@ func TestGetByCodeInDomain(t *testing.T) {
 	}
 }
 
-// TestShortCodeStillGloballyUnique 钉住 N6-1 的**边界**。
+// TestShortCodeStillGloballyUnique 钉住「短码全局唯一」这条**已拍板的决定**。
 //
-// 这一批刻意不动 links.short_code 的全局唯一约束：所有按短码的既有查询
+// N6-1 刻意不动 links.short_code 的全局唯一约束：所有按短码的既有查询
 // （管理接口、口令校验、计数回刷）因此完全不受影响，风险被限制在「读路径多一个 Host」。
 //
-// 代价是「两个域名各自解析同一个短码」还做不到 —— 那需要把唯一键换成
-// (domain_id, short_code)，并连带改短码生成重试、保留字校验与每一处 GetByCode。
-// 那条断言属于下一批，届时**这条用例应当被反写**（从「必须冲突」变成「必须共存」）。
+// N6-2 曾把「改成 (domain_id, short_code)」列为待拍板项，2026-09-20 拍板为**不做**
+// （PLAN-NEXT §18.5，选 A）：收益不成立，而共享同一个 code 会把
+// 「短码到底指哪一条」的歧义塞进管理端、计数键与缓存的每一处调用点。
+// 所以这条用例不是「临时边界」，而是长期契约 —— 它红了就说明有人动了唯一约束，
+// 那必须连带改：短码生成重试按域、每一处 GetByCode、以及 §18.2 表里的 5 个管理端接口。
 func TestShortCodeStillGloballyUnique(t *testing.T) {
 	t.Parallel()
 
@@ -116,7 +118,7 @@ func TestShortCodeStillGloballyUnique(t *testing.T) {
 		DomainID:  &domA.ID,
 	})
 	if err == nil {
-		t.Fatal("短码在 N6-1 仍然全局唯一：同码不同域应当冲突。若这条失败，说明唯一约束已改成 (domain_id, short_code) —— 请同步反写本用例与相关查询")
+		t.Fatal("短码全局唯一（PLAN-NEXT §18.5 的拍板结论）：同码不同域应当冲突。若这条失败，说明唯一约束已被改成 (domain_id, short_code) —— 请同步反写本用例、每一处 GetByCode 与管理端接口（§18.2）")
 	}
 	var conflict *domain.ConflictError
 	if !errors.As(err, &conflict) {

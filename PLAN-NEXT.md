@@ -612,7 +612,7 @@ docker compose exec postgres dropdb -U ashen restore_check
 | 不做 | 原因 |
 | --- | --- |
 | 抓取目标页标题 | SSRF 风险（`PLAN.md` §1.2 已定） |
-| Prometheus + Grafana 全套 | 只做零依赖 `/metrics` 文本端点，且默认**不对外**（不进 nginx location） |
+| Prometheus + Grafana 全套 | **不做**：只做零依赖 `/metrics` 文本端点（§19.2 / N9），且默认**不对外** —— nginx 里那条 `location = /metrics { return 404; }` 就是这句话的可执行版本 |
 | A/B 分流 / 短链轮换 | 需要 `link_targets` 表 + 「目标页归属」的新语义，收益不明 |
 | 短码回收（已删除的 code 重新可用） | 品牌与安全上都更安全的是不回收：旧二维码/印刷品会指到新链接。要回收得把唯一约束改成 partial（`WHERE status <> 3`）并接受历史明细与新链接共享 `short_code` —— 默认**不做** |
 | 前端引入 Pinia / ECharts | 现有 composable + 手写 SVG 够用 |
@@ -676,8 +676,8 @@ docker compose exec postgres dropdb -U ashen restore_check
 
 | 项 | 现状 | 什么时候值得做 |
 | --- | --- | --- |
-| M4-3 **方案 B**：后端 `GET /api/links/{code}/qr.svg`（`skip2/go-qrcode`） | 只做了方案 A（前端 `qrcode` 画 canvas + 下载 1024×1024 PNG，零后端改动） | 需要「邮件 / 印刷品里直接引用一个图片 URL」时 |
-| **`/metrics` 零依赖文本端点** | 未做（§13 明确列为不做） | 要做必须①仅内网可达②把 `metrics` 加进 `pkg/shortcode/reserved.go` |
+| M4-3 **方案 B**：后端 `GET /api/links/{code}/qr.svg`（`skip2/go-qrcode`） | 只做了方案 A（前端 `qrcode` 画 canvas + 下载 1024×1024 PNG，零后端改动） | **已立项为 §19.1（批次 N8）** —— 2026-09-20 拍板要做 |
+| **`/metrics` 零依赖文本端点** | 未做（§13 明确列为不做） | **已立项为 §19.2（批次 N9）**；§13 的两个前置条件（仅内网可达 + 进保留字表）在那一节里逐条落实 |
 | **`POSTGRES_TEST_DSN` 的 store 集成测试** | **已立项为 §17.1（下一批次 N1）** | 越早越好 —— 迁移与 SQL 目前只有人工验收守着 |
 
 ### 16.3 三条自动化缺口（实施中的判断，不是原计划内容）
@@ -727,10 +727,11 @@ docker compose exec postgres dropdb -U ashen restore_check
 
 | 想了解 | 看哪 |
 | --- | --- |
-| 已完成到哪一步（12 个批次 + 实测验收 + commit） | §0 |
+| 已完成到哪一步（15 个批次 + 实测验收 + commit） | §0 |
 | **N1 / N2 的完整规格（落点 / SQL / 验收 / commit 边界）** | §17（两个批次均已落地） |
 | **N3–N6-1 的批次记录（含 11 条偏离）** | **§0** |
-| **N6-2（短码唯一约束按域）的决策点 —— 待拍板** | **§18** |
+| **N6-2（短码唯一约束按域）的决策点 —— 已拍板为「不做」** | **§18**（结论在 §18.5） |
+| **N7–N10 的队列，以及 N8 / N9 两个批次的完整规格** | **§19** |
 | M5 各批次的落点、契约、验收标准 | §8 |
 | 明确不做的事及理由 | §13 |
 | 需要拍板的六个点与当前状态 | §15 |
@@ -1022,18 +1023,22 @@ N1 / N2 已完成（`da6731d` / `566aa2b`），16.3 的三条缺口也全部补�
   - **M5-4 多租户** → 仍是计划里唯一建议「先别做」的大件（§8 结论），等真实多人协作需求。
 - **§15 的六个待拍板项**：现在只剩第 3 条（GeoIP 数据源）在事实上被定成了「两种库都支持」，
   其余五条都已按默认实现且写进 README。
-- ~~还欠一次 CI 验证~~：已完成 —— run `35424447615` 三个 job 全绿，`backend` 里
-  `internal/store/postgres` 跑了 **1.271s**（真 PG，不是跳过），`smoke` **27 / 27**。
-  ⚠️ **但 N3–N6-1 这四个批次还没有经过一次 CI 验证**（都只在本机跑过门禁）——
-  推上去之后要确认三件事：`frontend` job 的 `pnpm test` 能过（新增了 vitest 依赖）、
-  `smoke` job 里 `frontend/e2e/` 真能在 runner 自带的 Chrome 上跑起来（本机用 `CHROME_BIN` 探测）、
-  以及 `backend` job 的集成测试在加了 `000006` 之后仍全绿。
+- ~~还欠一次 CI 验证~~：全清了。
+  - N1 / N2：run `35424447615` 三个 job 全绿，`backend` 里 `internal/store/postgres` 跑了
+    **1.271s**（真 PG，不是跳过），`smoke` **27 / 27**。
+  - **N3–N6-1（含 N4 的浏览器脚本）**：run `35482195414`（推送 `ed5abed`）三个 job 全绿 ——
+    `backend` **1m59s** / `frontend` **41s** / `smoke` **1m41s**。上一段列的三件待确认事项逐条落地，
+    都是从 runner 日志里数出来的，不是推断：
+    - `frontend` job 的 `pnpm test`（vitest 31 用例）与 `typecheck` / `lint` / `build` 全过；
+    - `smoke` job 里 `frontend/e2e/` 在 runner 自带的 Chrome 上真跑起来：**19 / 19** ✓
+      （只在 `GOOGLE_CHROME_BIN` 缺失时才需要 `CHROME_BIN` 探测，本机与 runner 都命中前者）；
+    - 同一次 `smoke` 里的 `cmd/smoke` **27 / 27** ✓，两条相加正好是日志里 46 行 `✓`
+      （`19 + 27 = 46`，按 step 分组计数核对过）。
+      顺序也对：e2e 排在 `cmd/smoke` 之前，创建接口 10 次/分/IP 的硬配额没被前面吃掉。
+    - `backend` job 的集成测试在加了迁移 `000006` 之后仍全绿（`go test -race` 覆盖到
+      `internal/store/postgres` 与 `internal/store/geoip`）。
 
----
-
----
-
-## 18. N6-2 的决策点：短码唯一约束要不要改成按域（**待拍板**）
+## 18. N6-2 的决策点：短码唯一约束要不要改成按域（**已拍板：不做**）
 
 **N6-1 已经完成的部分**：`domains` 表、`links.domain_id`、`Host` 归一化与按域定位、
 按域分开的缓存键、`short_url` 按所属域拼。**唯一没动的是 `links.short_code` 的全局唯一约束** ——
@@ -1106,3 +1111,129 @@ CREATE UNIQUE INDEX links_domain_short_code_key
 - 验收：「同 code 在两个域下各建一条 → 各自跳自己的目标；管理端按 `?domain=` 分别拿到两条」，
   并且**补一条反向断言**：同一个域内重复短码仍然必须被拒（否则这次迁移就白做了）
 - 变异验证：把 `NULLS NOT DISTINCT` 去掉 → 「默认域名下同码被拒」这条断言必须变红
+
+### 18.5 拍板结果（2026-09-20）：选 **A —— 不做**
+
+**结论**：`links.short_code` 保持**全局唯一**，迁移 `000007` 不实施，管理端接口形状不变。
+`domains` 表与 `links.domain_id` 照旧（那是 N6-1 已经落地的部分），只是「同一个短码在两个域下
+各指一个目标」这个能力**明确不做**。
+
+理由不是「改动大」，而是**收益不成立**（§18.3 已经展开）：真正的场景是「一个目标页在多个域下各有短码」，
+那用两个短码就能表达；而共享同一个 code 会把「短码到底指哪一条」这条歧义塞进管理端、计数键与缓存的
+每一处调用点，是一次**长期的语义负担**而不是一次性迁移成本。N6-1 把 `GetByCode`（管理端）与
+`GetByCodeInDomain`（跳转）刻意拆成两个方法，保留的正是这个区分。
+
+**这个决定在三处留下痕迹**（改主意时按这三处一起改，别只改代码）：
+
+| 落点 | 内容 |
+| --- | --- |
+| `backend/internal/store/postgres/link.go` 的 `GetByCode` 注释 | 说明「短码全局唯一」是**拍板结论**而不是疏漏，并指向本节 |
+| `backend/internal/store/postgres/domain_integration_test.go` 的 `TestShortCodeStillGloballyUnique` | 把「同码跨域必须冲突」钉成**长期契约**（原注释写的是「属于下一批，届时应当反写」，已改掉） |
+| `README.md` 的 `links` 数据模型行 | `short_code` 标注全局唯一并注明是拍板结论 |
+
+**将来若要重开**：按 §18.4 的边界单开一批（迁移编号从 `000007` 起），
+并且**必须先做 §18.2 的管理端改造**——那张表里的 5 个接口 / 键全都按短码定位，
+短码一旦只在域内唯一，`/api/links/{code}` 就有歧义。先改 SQL 后改接口的顺序会把线上管理端打成 500。
+
+---
+
+## 19. 已定队列（2026-09-20 拍板后开工的两项）
+
+拍板结果（2026-09-20）：**N6-2 = A（不做，见 §18.5）**；§16.2 里两个「可选 / 有需要再做」的**都做**
+（后端二维码 SVG、`/metrics`），**M5-4 多租户维持 §8 的结论：先别做**（无真实多人协作需求）。
+于是队列是：
+
+| 批次 | 内容 | 类型 | 状态 |
+| --- | --- | --- | --- |
+| **N7** | 本节的拍板与 CI 验证记录（§17.3 / §18.5 / §19） | docs | ✅ |
+| **N8** | 后端二维码 SVG 端点（§19.1，M4-3 方案 B） | feat | ⏳ |
+| **N9** | `/metrics` 零依赖文本端点（§19.2） | feat | ⏳ |
+| **N10** | 收尾：§0 批次表 / README 验收记录补实测输出 | docs | ⏳ |
+
+### 19.1 批次 N8：后端二维码 SVG 端点（M4-3 方案 B）
+
+**为什么要它**：M4-3 方案 A（前端用 `qrcode` 画 canvas）解决的是「详情页上看到并下载二维码」，
+但**邮件模板 / 印刷品 / 第三方系统没法引用一个 canvas**。方案 B 给一个稳定的图片 URL，
+让这些场景能直接 `<img src="…">`。
+
+**落点**
+
+| 文件 | 动作 |
+| --- | --- |
+| `backend/internal/handler/qr.go` | 新建：SVG 生成 + `qrHandler` |
+| `backend/internal/handler/router.go` | 注册 `GET /api/links/{code}/qr.svg` |
+| `backend/go.mod` / `go.sum` | 新增 `github.com/skip2/go-qrcode`（编码用，纯 Go、无传递依赖） |
+| `backend/internal/handler/qr_test.go` | 新建：单测（形态 / 静默区 / 尺寸 / 转义） |
+| `backend/internal/handler/router_test.go` | 路由表补一行（无鉴权：公开可读） |
+| `README.md` | API 表 + 「二维码」小节 + 依赖说明 |
+
+**为什么新增依赖而不是手写编码器**：QR 的 Reed-Solomon 纠错、掩码选择与版本信息是**规范驱动**的
+一堆位运算 —— 手写一遍的收益只是「少一个依赖」，代价是任何一个位算错都会产出一个**看起来很像、
+扫不出来**的图形，而这类 bug 在肉眼下与正确输出没有区别。编码交给库，**SVG 序列化自己写**
+（库只提供 `Bitmap() [][]bool`，不产 SVG）——那部分只有几十行、且能被单测钉死。
+
+**关键决定（照此实现）**
+
+| 决定 | 理由 |
+| --- | --- |
+| **公开可读（无鉴权）** | 二维码的内容就是 `short_url` 本身，而 `GET /{code}` 本来就公开；要求所有者凭据会让「邮件/印刷品引用」这个唯一的使用场景无法实现 |
+| 只要求「短链存在且未被软删除」 | 与 `claim` 的判定一致。**不**要求 `Redirectable`：印刷好的二维码不该因为「链接临时过期/停用」就取不到图，而扫码时该 410 的仍然 410 |
+| 复用 `RateLimitStats`（IP + 该路径哈希） | 与统计/明细同一条规则：既防刷，又不会吃掉真实跳转的配额（scope 不同 → Redis 键独立） |
+| 4 模块静默区**由自己补** | `qrcode.Bitmap()` 返回的符号**不含** quiet zone，直接渲染成 SVG 会贴边，很多扫码器（尤其印刷品）读不出来 |
+| `viewBox` 用模块坐标，宽高用固定 256 | `viewBox="0 0 N N"` + `width/height="256"`：既能被 `<img width=64>` 缩小、也能被印刷放大到任意尺寸而不糊 |
+| `Cache-Control: public, max-age=300` | 图只依赖 `short_url`（域 + 短码），与目标地址无关；5 分钟够挡掉重复渲染，又不至于让「刚改的域名」长时间残留 |
+| `X-Content-Type-Options: nosniff` | 与 JSON 响应同一套思路 |
+
+**验收**
+
+1. 单测：`IsValidShape` / 保留字 → 404；不存在 → 404；已软删除 → 404；正常 → 200 + `image/svg+xml`；
+   SVG 里 `viewBox` 边长 = 模块数 + 8（两侧各 4 模块静默区）；短码含 `&` 之类不会逃逸出 XML（内容只进
+   `<svg>` 的属性/文本之前先转义）
+2. **真扫**（不能只看「生成没报错」）：把 SVG 光栅化后用 jsQR 解码 —— 与 M4-3 方案 A 的验收同一把尺子。
+   本机路径：用无头 Chrome 打开一个内联了该 SVG 的页面 → 截图 → jsQR 解码 → 断言等于 `short_url`；
+   解码值还要与 `GET /api/links/{code}` 的 `short_url` **逐字相等**（含自定义域名时也要对）
+3. 容器级：`curl -si localhost:8080/api/links/{code}/qr.svg` 首行 200 + 正确的 Content-Type；
+   经 nginx（`localhost:8080` 对外的短码 location 不覆盖 `/api/`，所以走 API 反代）同样 200
+4. 变异验证：把关掉静默区（`quiet=0`）→ 静默区断言必须变红；把 `code` 直接插进 SVG 不做转义 → 转义用例必须红
+
+### 19.2 批次 N9：`/metrics` 零依赖文本端点
+
+**为什么它现在可以做**：§13 把它列为「不做」的两个附加条件（① 仅内网可达 ② 进保留字表）都是配置 + 一行表项，
+成本可控；而 `/healthz` 已经把所有需要观测的数字都算好了（计数、队列、Stream 积压、回源次数、
+限流降级），缺的只是一个 Prometheus 能抓的**文本形态**。
+
+**落点**
+
+| 文件 | 动作 |
+| --- | --- |
+| `backend/internal/httpx/metrics.go` | 新建：`RenderMetrics(HealthReport) string`（纯函数，零依赖） |
+| `backend/internal/handler/router.go` | 注册 `GET /metrics` |
+| `backend/internal/pkg/shortcode/reserved.go` | 把 `metrics` 加进保留字表（**必须**，理由见下） |
+| `backend/internal/pkg/shortcode/shortcode_test.go` | `wantContains` 补 `metrics` 与本批新增的 `robots` 类条目（若补） |
+| `backend/internal/httpx/metrics_test.go` | 新建：格式断言 + 转义断言 |
+| `backend/internal/handler/router_test.go` | 路由表补一行 |
+| `deploy/nginx/nginx.conf` | `location = /metrics { return 404; }`（明确不对外） |
+| `README.md` | 「可观测性」小节 + 环境变量/端点说明 |
+
+**关键决定**
+
+| 决定 | 理由 |
+| --- | --- |
+| **`metrics` 必须进保留字表** | nginx 的短码正则是 `^/[A-Za-z0-9_-]{3,32}$`，而 `metrics` 正好 7 位 —— 不进保留字表，就有人能把它注册成短码：症状是「他的短链永远打不开 + 指标被公开」。这是 §10 的仓库不变量 |
+| nginx 里 `return 404` 而不是 `deny` | 对外要的语义是「这里什么都没有」，不是「403 暗示这里有东西」；`=` 精确匹配优先级最高，必然先于短码正则 |
+| 复用 `httpx.HealthProbe.Report` | **单一数据源**：`/metrics` 与 `/healthz` 的每个数字都出自同一次采集，不会出现「两套口径各说各话」。代价是每次抓取多一次 PG/Redis ping（scrape 间隔 15s 量级，可忽略） |
+| 只暴露计数器与瞬时 gauge，不引 Prometheus 客户端库 | 「零依赖」是 §13 的明确取舍；文本格式（0.0.4）本身就是给这个场景设计的 |
+| 名称用 `ashen_` 前缀，计数器带 `_total` | Prometheus 命名约定；带 `_total` 的才是 counter（只增），其余是 gauge |
+| `errors` 字段**不进标签** | 它是自由文本（含空格/引号/中文），做标签既会撑爆基数也没人查；故障用 `ashen_postgres_up{}=0` 表达 |
+
+**验收**
+
+1. 单测：`RenderMetrics` 对每个指标输出 `# HELP` / `# TYPE` / 值三行；`ashen_up 0` 当 `status=degraded`；
+   计数器为 0 时**仍然输出**（Prometheus 的 `rate()` 需要连续样本，值为 0 的计数器不能省略）；
+   标签值里的 `\` / `"` / 换行按规范转义
+2. 容器级：`curl -s localhost:8080/metrics | head` 能读；`curl -si` 的 Content-Type 是
+   `text/plain; version=0.0.4; charset=utf-8`；**经 nginx 访问同一路径是 404**（这才是「不对外」的证明）；
+   停 PG → `ashen_postgres_up 0` 且 `/healthz` 同时 503（两处口径一致）
+3. 保留字：`POST /api/links {"custom_code":"metrics"}` → 422 `invalid_code`（不是 409、不是静默成功）
+4. 变异验证：把保留字表里那行删掉 → 上一条必须变红；把 `aspen_up` 的判定从 `status` 改成恒 1 →
+   「停 PG 后为 0」必须红

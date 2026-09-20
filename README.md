@@ -141,7 +141,7 @@ Browser ──┬─ /api/*         ─┐
 
 | 对象 | 作用 | 关键约束 |
 | --- | --- | --- |
-| `links` | 短链主体 | `short_code` **全局唯一**（短码生成与所有管理端接口都按它定位，分域不改这一点）；`domain_id uuid`（000006 起，可空）指向所属自定义域名，`NULL` = 默认域名（`PUBLIC_BASE_URL` 指向的那个）；`status` 用 `smallint` 而非 PG enum（改状态机不用 `ALTER TYPE`）；`key_hash bytea` 存匿名管理密钥的 SHA-256；`tags text[]`（000003 起）配 GIN 索引做标签筛选 |
+| `links` | 短链主体 | `short_code` **全局唯一**（短码生成与所有管理端接口都按它定位；**这是一条拍板结论**——PLAN-NEXT §18.5 决定不做「同码跨域共存」，不是遗留项）；`domain_id uuid`（000006 起，可空）指向所属自定义域名，`NULL` = 默认域名（`PUBLIC_BASE_URL` 指向的那个）；`status` 用 `smallint` 而非 PG enum（改状态机不用 `ALTER TYPE`）；`key_hash bytea` 存匿名管理密钥的 SHA-256；`tags text[]`（000003 起）配 GIN 索引做标签筛选 |
 | `domains` | 自定义域名（000006 起） | `name` 唯一且**存归一化后的小写、无端口、无尾点**（`A.LOCAL:8080` 与 `a.local.` 是同一个域）；`is_active` 可关停而不删行（保留历史短链的归属）。**没有管理接口**：目前只能由运维写库登记，见「已知限制」 |
 | `users` | 账号 | `email` 存 `text` + `unique index (lower(email))` 做大小写不敏感唯一（不引入 `citext` 扩展，省掉一次 `CREATE EXTENSION`） |
 | `click_events` | 点击明细 | `ip inet`；`device` / `browser` / `os` 由 worker 解析 UA 后写入；`country` 由 worker 查 GeoIP 库文件后写入（未部署则恒为 NULL）；`event_uid`（000002 起）取自 Stream 消息 ID，配合部分唯一索引做幂等去重；`(link_id, occurred_at DESC, id DESC)`（000004 起）服务明细页的 keyset 翻页，旧的 `(link_id, occurred_at DESC)` 是被它覆盖的前缀索引，已删除 |

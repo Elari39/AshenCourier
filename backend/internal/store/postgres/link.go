@@ -138,7 +138,14 @@ RETURNING created_at, updated_at`
 // GetByCode 按短码精确查询（大小写敏感）。软删除的行也会返回，
 // 由调用方（domain.Link.Redirectable）决定是 404 还是 410。
 //
-// 不带域：短码全局唯一，管理端靠它唯一定位。
+// 不带域：短码**全局唯一**，管理端靠它唯一定位。
+//
+// 这是 PLAN-NEXT §18.5 的**拍板结论**（2026-09-20，选 A），不是「还没做」：
+// 「同一个短码在不同域下指向不同目标」这个能力明确不做，因此
+// links.short_code 的唯一约束保持全局 —— 管理端接口、计数键、口令校验
+// 全都继续按短码定位，不需要改成 (域, 短码) 二元组。
+// 配套痕迹另有两处：domain_integration_test.go 的 TestShortCodeStillGloballyUnique
+// （把「同码跨域必须冲突」钉成断言）与 README 的 links 数据模型行。
 func (s *LinkStore) GetByCode(ctx context.Context, code string) (*domain.Link, error) {
 	const q = `SELECT ` + linkColumns + ` FROM links WHERE short_code = $1`
 	return s.queryLink(ctx, q, code)
