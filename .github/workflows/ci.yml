@@ -121,6 +121,10 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test # 纯函数单测（vitest run，非 watch）
       - run: pnpm lint
+      # 零引用守卫：新加了 UI 组件却没接进视图、或照着 DESIGN.md 的字阶表把类补进
+      # main.css 而没有使用点，人眼很难发现但产物里真实多字节 —— 让它变成 CI 会红的事。
+      # 判定细节与「为什么不管 @theme token」见 frontend/scripts/check-zero-ref.mjs 的文件头。
+      - run: pnpm audit:refs
       - run: pnpm build
 
   smoke:

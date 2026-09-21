@@ -9,8 +9,10 @@
  *  2. 大标题一律衬线 font-display、字重 400、负字距；正文 Inter 400
  *  3. 珊瑚色只用于主 CTA 与整块珊瑚 callout，不做局部装饰色；不引入第四个色系
  *  4. 相邻区块不复用同一 surface 模式：奶油 → 奶油卡片 → 深色 mockup → 珊瑚 callout → 深色 footer
- *  5. 圆角层级：按钮/输入 md(8px) · 内容卡片 lg(12px) · hero 容器 xl(16px) · 徽章 pill
+ *  5. 圆角层级：按钮/输入 md(8px) · 内容卡片 lg(12px) · 徽章 pill
  *     交互态只有 default / active 两态，不做花哨 hover 动画
+ *     ⚠ 实测偏离：DESIGN.md 原表里还有一档「hero 容器 xl(16px)」，但全仓没有任何
+ *       元素用它（深色 mockup 走的是 lg）。那一档仍留在 @theme 备用 —— 不进产物。
  * ==========================================================================*/
 
 @theme {
@@ -193,19 +195,15 @@
     color: var(--color-ink);
   }
 
-  .title-sm {
-    font-size: 16px;
-    font-weight: 500;
-    line-height: 1.4;
-    color: var(--color-ink);
-  }
-
-  .caption {
-    font-size: 13px;
-    font-weight: 500;
-    line-height: 1.4;
-    color: var(--color-muted);
-  }
+  /* ⚠ 这里刻意**没有** .title-sm 与 .caption。
+     DESIGN.md 的字阶表里有这两档（16px/500 与 13px/500），但本仓库没有任何使用点。
+     两者在产物里各占约 80 字节 —— 关键差别是：@layer components 的规则**不会被剪枝**，
+     而 @theme 里未被引用的 token 根本不进产物。所以口径是「未使用的 token 保留、
+     未使用的类删除」。
+     ⚠️ 别在源码或注释里写出 token 的**全名**：Tailwind 判断一个 token 有没有被用到，
+     靠的是扫源码文本，注释里写一句就等于把它钉进产物（README「验收」表里有实测）。
+     要加回这两个类，请先确认有真实使用点 —— scripts/check-zero-ref.mjs 会拦住
+     「定义了没人用」。 */
 
   /* 全大写小字标签，字距 1.5px —— DESIGN.md 的 caption-uppercase */
   .eyebrow {
