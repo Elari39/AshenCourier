@@ -22,6 +22,7 @@ import SegmentedControl from '@/components/ui/SegmentedControl.vue'
 import Select from '@/components/ui/Select.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useAuth } from '@/composables/useAuth'
+import { useConfirm } from '@/composables/useConfirm'
 import { useCopy } from '@/composables/useCopy'
 import { useToast } from '@/composables/useToast'
 import type { DistributionItem } from '@/types/ui'
@@ -41,6 +42,7 @@ import { createRequestGuard, isAbortError } from '@/utils/request'
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
+const { confirm } = useConfirm()
 const { isAuthenticated, manageKeyFor, forgetManageKey } = useAuth()
 const { copied, copy } = useCopy()
 
@@ -355,7 +357,13 @@ async function clearPassword(): Promise<void> {
 
 async function handleDelete(): Promise<void> {
   if (!link.value) return
-  if (!window.confirm(`确定要删除 /${code.value} 吗？删除后短链立即失效。`)) return
+  const ok = await confirm({
+    title: '删除短链',
+    message: `确定要删除 /${code.value} 吗？删除后短链立即失效，这个短码也不会再复用。`,
+    confirmText: '删除',
+    variant: 'danger',
+  })
+  if (!ok) return
 
   deleting.value = true
   try {

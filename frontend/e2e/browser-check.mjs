@@ -18,6 +18,7 @@
  *    要么单独跑 —— CI 里就是「先本套件、后 smoke」，见 `.github/workflows/ci.yml`。
  */
 import { launchChrome } from './cdp.mjs'
+import { register as registerConfirmDialog } from './confirm-dialog.mjs'
 import { register as registerDetailPage } from './detail-page.mjs'
 import { register as registerPasswordGate } from './password-gate.mjs'
 import { Api, Checks, assert, createLink, hit, randomSuffix, waitForClicks } from './harness.mjs'
@@ -103,7 +104,11 @@ async function main() {
       expectedClicks: CLICKS_TO_SEED,
     })
 
-    // 放在最后：这样它覆盖的是上面所有页面（详情页 + 口令页 + 解锁后的跳转）的累计错误
+    // ⚠️ 必须排在最后（在「零 console 错误」之前）：它的最后一步会**真的删掉**这条短链。
+    //    上面两组检查都要用这条短链，顺序反了它们就会拿到 404。
+    await registerConfirmDialog({ checks, session, base, api, fixture })
+
+    // 放在最后：这样它覆盖的是上面所有页面（详情页 + 口令页 + 解锁后的跳转 + 确认框）的累计错误
     await checks.run('全程没有 console.error 与未捕获异常', async () => {
       assert(session.pageErrors.length === 0, `页面报错：\n      ${session.pageErrors.join('\n      ')}`)
     })
@@ -112,7 +117,7 @@ async function main() {
   }
 
   const failed = checks.summary()
-  console.log(`验收用的短链：${base}/${fixture.code}（${CLICKS_TO_SEED} 条明细）`)
+  console.log(`验收用的短链：${base}/${fixture.code}（${CLICKS_TO_SEED} 条明细，最后由确认框那一组删掉）`)
   process.exitCode = failed === 0 ? 0 : 1
 }
 

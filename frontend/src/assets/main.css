@@ -584,6 +584,93 @@
   .badge-action:active {
     background-color: var(--color-surface-cream-strong);
   }
+
+  /* ---------- 确认框 ----------
+   * 层次交给遮罩的色块对比，**不加阴影**：DESIGN.md 的 elevation 原则是
+   * "color-block first, shadow rare"，而它给的唯一阴影 token（0 1px 3px @8%）
+   * 是留给 hover 抬升的。遮罩已经把对话框从页面里分出来了，再叠阴影是多余的。
+   */
+  .dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    /* 高于 toast(50)：确认框必须压住提示 —— 否则「正在问你」和「刚弹的提示」
+     * 会在同一块地方抢注意力，而且提示会盖住确认按钮。 */
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background-color: color-mix(in srgb, var(--color-ink) 45%, transparent);
+  }
+
+  .dialog-panel {
+    width: 100%;
+    max-width: 440px;
+    border: 1px solid var(--color-hairline);
+    border-radius: var(--radius-lg);
+    background-color: var(--color-canvas);
+    padding: 28px;
+  }
+
+  .dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+    margin-top: 24px;
+  }
+
+  /* ---------- toast ----------
+   * 深色浮层承载 —— 这是少数几个「深色面板出现在奶油页面上」的合法位置
+   * （DESIGN.md 里 cookie-consent-card 就是这么用的）。
+   * 错误用实填的 error 色：它是唯一需要打断用户的一种提示。
+   */
+  .toast {
+    /* 外层容器是 pointer-events-none 的（免得挡住底下的页面），这里要单独放开 */
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+    max-width: 448px;
+    border-radius: var(--radius-lg);
+    padding: 16px 18px;
+  }
+
+  .toast-quiet {
+    background-color: var(--color-surface-dark);
+    color: var(--color-on-dark);
+  }
+
+  .toast-error {
+    background-color: var(--color-error);
+    color: var(--color-on-primary);
+  }
+
+  .toast-message {
+    flex: 1;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .toast-close {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    margin-top: 1px;
+    border: none;
+    border-radius: var(--radius-xs);
+    background-color: transparent;
+    /* 跟着 toast 的前景色走，不改透明度 —— 压对比度就是压可读性 */
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .toast-close:active {
+    background-color: color-mix(in srgb, currentColor 22%, transparent);
+  }
 }
 
 /* ============================================================================

@@ -20,12 +20,14 @@ import EmptyState from '@/components/ui/EmptyState.vue'
 import Input from '@/components/ui/Input.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import { useAuth } from '@/composables/useAuth'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { createRequestGuard, isAbortError } from '@/utils/request'
 
 const PAGE_SIZE = 20
 
 const toast = useToast()
+const { confirm } = useConfirm()
 const { refreshMe } = useAuth()
 
 const links = ref<Link[]>([])
@@ -136,7 +138,15 @@ async function loadMore(): Promise<void> {
 
 /** 删除一条（软删除）。 */
 async function handleDelete(code: string): Promise<void> {
-  if (!window.confirm(`确定要删除 /${code} 吗？删除后短链立即失效。`)) return
+  // 说清楚「短码不会再被复用」是必要的：用户以为删了就能把码腾出来，
+  // 是最容易产生误解的一点（见 README「已知限制」）。
+  const ok = await confirm({
+    title: '删除短链',
+    message: `确定要删除 /${code} 吗？删除后短链立即失效，这个短码也不会再复用。`,
+    confirmText: '删除',
+    variant: 'danger',
+  })
+  if (!ok) return
 
   deletingCode.value = code
   try {

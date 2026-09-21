@@ -8,6 +8,7 @@
 import { ref, useId, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
+import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
 import IconButton from '@/components/ui/IconButton.vue'
 import ToastHost from '@/components/ui/ToastHost.vue'
 import { useAuth } from '@/composables/useAuth'
@@ -112,8 +113,11 @@ function handleLogout(): void {
       </nav>
     </div>
 
-    <!-- ---------- 页面内容 ---------- -->
-    <main class="flex-1">
+    <!-- ---------- 页面内容 ----------
+         tabindex="-1" 不是给鼠标用的：确认框关闭时如果触发它的元素已经不在文档里
+         （例如「删除成功 → 那一行没了」），焦点要有个地方可去 —— 落到这里总好过
+         掉回 <body> 让键盘用户从页首重新 Tab 一遍。 -->
+    <main class="flex-1" tabindex="-1">
       <RouterView />
     </main>
 
@@ -159,5 +163,6 @@ function handleLogout(): void {
     </footer>
 
     <ToastHost />
+    <ConfirmDialog />
   </div>
 </template>
