@@ -14,6 +14,8 @@
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
+import BrandMark from '@/components/ui/BrandMark.vue'
+import Button from '@/components/ui/Button.vue'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
 import IconButton from '@/components/ui/IconButton.vue'
 import ToastHost from '@/components/ui/ToastHost.vue'
@@ -133,9 +135,7 @@ function handleLogout(): void {
       <div class="container-page flex h-full items-center gap-6">
         <RouterLink :to="{ name: 'landing' }" class="flex items-center gap-2.5">
           <!-- 品牌标记 + 字标。标记永远是深色，不反相 -->
-          <svg class="h-5 w-5" viewBox="0 0 32 32" aria-hidden="true">
-            <path d="M16 4l2.1 9.9L28 16l-9.9 2.1L16 28l-2.1-9.9L4 16l9.9-2.1z" fill="#141413" />
-          </svg>
+          <BrandMark class="h-5 w-5 text-ink" />
           <span class="text-[15px] font-medium tracking-tight text-ink">AshenCourier</span>
         </RouterLink>
 
@@ -162,11 +162,11 @@ function handleLogout(): void {
         <div class="ml-auto flex items-center gap-3">
           <template v-if="isAuthenticated">
             <span class="hidden text-[14px] text-muted sm:inline">{{ displayName }}</span>
-            <button type="button" class="btn btn-text" @click="handleLogout">退出</button>
+            <Button variant="text" @click="handleLogout">退出</Button>
           </template>
           <template v-else>
-            <RouterLink :to="{ name: 'login' }" class="btn btn-text">登录</RouterLink>
-            <RouterLink :to="{ name: 'register' }" class="btn btn-primary">免费开始</RouterLink>
+            <Button :to="{ name: 'login' }" variant="text">登录</Button>
+            <Button :to="{ name: 'register' }" variant="primary">免费开始</Button>
           </template>
 
           <!-- 移动端汉堡。label 随开合状态变：读屏听到的是「关闭菜单」而不是
@@ -228,9 +228,7 @@ function handleLogout(): void {
       <div class="container-page grid gap-10 py-16 md:grid-cols-4">
         <div class="md:col-span-2">
           <div class="flex items-center gap-2.5">
-            <svg class="h-5 w-5" viewBox="0 0 32 32" aria-hidden="true">
-              <path d="M16 4l2.1 9.9L28 16l-9.9 2.1L16 28l-2.1-9.9L4 16l9.9-2.1z" fill="#faf9f5" />
-            </svg>
+            <BrandMark class="h-5 w-5 text-on-dark" />
             <span class="text-[15px] font-medium text-on-dark">AshenCourier</span>
           </div>
           <p class="mt-4 max-w-sm text-[14px] leading-[1.55]">

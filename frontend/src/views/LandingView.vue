@@ -7,12 +7,14 @@
  * （深色 footer 由 DefaultLayout 收尾）
  */
 import { ref } from 'vue'
-import { RouterLink } from 'vue-router'
 
 import type { Link } from '@/api/types'
 import ResultCard from '@/components/ResultCard.vue'
 import ShortenForm from '@/components/ShortenForm.vue'
+import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
+import Card from '@/components/ui/Card.vue'
+import CodeWindow from '@/components/ui/CodeWindow.vue'
 import { useAuth } from '@/composables/useAuth'
 import { shortBase } from '@/utils/shortlink'
 
@@ -56,7 +58,7 @@ const features = [
     <div class="container-page grid items-start gap-12 lg:grid-cols-2 lg:gap-16">
       <!-- 左：衬线大标题 + 创建表单 -->
       <div>
-        <span class="badge badge-coral">Short Link</span>
+        <Badge variant="coral">Short Link</Badge>
         <h1 class="display-xl mt-6" tabindex="-1">把长链接，<br />收成一条短链。</h1>
         <p class="mt-6 max-w-lg text-[16px] leading-[1.55] text-body">
           粘贴任意 http/https 链接，立刻拿到短链。无需注册；登录后可集中管理所有链接，
@@ -78,38 +80,31 @@ const features = [
       <div class="lg:pt-14">
         <ResultCard v-if="latest" :link="latest.link" :manage-key="latest.manageKey" />
 
-        <div v-else class="code-window">
-          <div class="flex items-center gap-2 pb-4">
-            <span class="h-2.5 w-2.5 rounded-full bg-surface-dark-elevated" />
-            <span class="h-2.5 w-2.5 rounded-full bg-surface-dark-elevated" />
-            <span class="h-2.5 w-2.5 rounded-full bg-surface-dark-elevated" />
-            <span class="ml-2 text-[12px] text-on-dark-soft">ashen-courier — 短链预览</span>
-          </div>
+        <CodeWindow v-else label="ashen-courier — 短链预览">
+          <p class="text-on-dark-soft">$ ashen shorten https://example.com/2026/09/a-very-long-article</p>
+          <p class="mt-3 text-on-dark">
+            <span class="text-primary">✓</span> 短链已生成
+          </p>
+          <p class="mt-1 text-on-dark">{{ demoShortLink }}</p>
+          <p class="mt-1 text-on-dark-soft">→ 302 Location: https://example.com/2026/09/a-very-long-article</p>
 
-          <div class="code-window-inner">
-            <p class="text-on-dark-soft">$ ashen shorten https://example.com/2026/09/a-very-long-article</p>
-            <p class="mt-3 text-on-dark">
-              <span class="text-primary">✓</span> 短链已生成
-            </p>
-            <p class="mt-1 text-on-dark">{{ demoShortLink }}</p>
-            <p class="mt-1 text-on-dark-soft">→ 302 Location: https://example.com/2026/09/a-very-long-article</p>
-          </div>
-
-          <div class="mt-5 space-y-2.5 text-[13px]">
-            <div class="flex items-center justify-between">
-              <span class="text-on-dark-soft">总点击</span>
-              <span class="font-mono text-on-dark">1,284</span>
+          <template #footer>
+            <div class="mt-5 space-y-2.5 text-[13px]">
+              <div class="flex items-center justify-between">
+                <span class="text-on-dark-soft">总点击</span>
+                <span class="font-mono text-on-dark">1,284</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-on-dark-soft">近 30 天</span>
+                <span class="font-mono text-on-dark">342</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-on-dark-soft">缓存命中</span>
+                <span class="font-mono text-on-dark">99.2%</span>
+              </div>
             </div>
-            <div class="flex items-center justify-between">
-              <span class="text-on-dark-soft">近 30 天</span>
-              <span class="font-mono text-on-dark">342</span>
-            </div>
-            <div class="flex items-center justify-between">
-              <span class="text-on-dark-soft">缓存命中</span>
-              <span class="font-mono text-on-dark">99.2%</span>
-            </div>
-          </div>
-        </div>
+          </template>
+        </CodeWindow>
       </div>
     </div>
   </section>
@@ -117,17 +112,17 @@ const features = [
   <!-- ---------- ② 奶油功能卡 3-up ---------- -->
   <section class="bg-canvas pb-16 md:pb-24">
     <div class="container-page grid gap-6 md:grid-cols-3">
-      <article v-for="feature in features" :key="feature.title" class="card-feature">
+      <Card v-for="feature in features" :key="feature.title" tag="article" variant="feature">
         <h2 class="title-md">{{ feature.title }}</h2>
         <p class="mt-3 text-[15px] leading-[1.6] text-body">{{ feature.body }}</p>
-      </article>
+      </Card>
     </div>
   </section>
 
   <!-- ---------- ③ 深色 mockup：展示真实接口 ---------- -->
   <section class="bg-canvas pb-16 md:pb-24">
     <div class="container-page">
-      <div class="card-dark grid gap-10 lg:grid-cols-2">
+      <Card variant="dark" class="grid gap-10 lg:grid-cols-2">
         <div>
           <p class="eyebrow text-on-dark-soft">REST API</p>
           <h2 class="display-md mt-4 text-on-dark">一行 curl，就是一条短链。</h2>
@@ -142,11 +137,11 @@ const features = [
             <Button :to="{ name: isAuthenticated ? 'dashboard' : 'register' }" variant="primary">
               {{ isAuthenticated ? '进入控制台' : '免费注册' }}
             </Button>
-            <RouterLink :to="{ name: 'login' }" class="btn btn-secondary-dark">已有账号，登录</RouterLink>
+            <Button :to="{ name: 'login' }" variant="secondary-dark">已有账号，登录</Button>
           </div>
         </div>
 
-        <div class="code-window-inner self-start text-[13px]">
+        <CodeWindow class="self-start text-[13px]">
           <p class="text-on-dark-soft"># 创建（匿名也会返回一次性 manage_key）</p>
           <p class="mt-2 text-on-dark">$ curl -X POST /api/links \</p>
           <p class="pl-4 text-on-dark">-H 'Content-Type: application/json' \</p>
@@ -160,28 +155,32 @@ const features = [
           <p class="mt-4 text-on-dark-soft"># 统计</p>
           <p class="mt-2 text-on-dark">$ curl /api/links/7Kd2pQ/stats?days=30 \</p>
           <p class="pl-4 text-on-dark">-H 'X-Manage-Key: kQ8…'</p>
-        </div>
-      </div>
+        </CodeWindow>
+      </Card>
     </div>
   </section>
 
   <!-- ---------- ④ 珊瑚 callout band ---------- -->
   <section class="bg-canvas pb-16 md:pb-24">
     <div class="container-page">
-      <div class="card-coral flex flex-col items-start justify-between gap-6 md:flex-row md:items-center">
+      <Card
+        variant="coral"
+        class="flex flex-col items-start justify-between gap-6 md:flex-row md:items-center"
+      >
         <div>
           <h2 class="display-sm text-on-primary">准备好把你的第一条长链接收短了吗？</h2>
           <p class="mt-3 max-w-xl text-[15px] text-on-primary/85">
             匿名就能用，不需要信用卡，也不需要邮箱。
           </p>
         </div>
-        <RouterLink
+        <Button
           :to="{ name: isAuthenticated ? 'dashboard' : 'register' }"
-          class="btn btn-secondary shrink-0"
+          variant="secondary"
+          class="shrink-0"
         >
           {{ isAuthenticated ? '进入控制台' : '创建第一条短链' }}
-        </RouterLink>
-      </div>
+        </Button>
+      </Card>
     </div>
   </section>
 </template>

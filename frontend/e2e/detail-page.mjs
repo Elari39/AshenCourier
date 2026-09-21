@@ -64,6 +64,43 @@ const MEASURE_QR = `(() => {
   }
 })()`
 
+/**
+ * 量一次趋势图的配色。
+ *
+ * 为什么值得测：B5 把折线与渐变的颜色从内联 hex 改成了 token 类
+ * （`.chart-line { stroke: var(--color-primary) }`）。这是一次**纯视觉**的改动 ——
+ * 类没生效时 SVG 不会报错，折线只是变成默认的黑色、面积变成黑色渐变，
+ * 页面照样渲染、evaluate 照样返回值、console 照样干净。
+ * 所以只能靠读回**计算后的颜色**来判断，而不是「有没有报错」。
+ */
+const MEASURE_CHART = `(() => {
+  const svg = document.querySelector('svg[aria-label="按天点击趋势折线图"]')
+  if (!svg) return { found: false }
+
+  const stopColorOf = (el) => (el ? getComputedStyle(el).stopColor : null)
+  const area = svg.querySelector('path[fill]')
+  const gradient = svg.querySelector('linearGradient')
+
+  // url(#trend-fill-v3) -> trend-fill-v3，不用正则（模板串里写转义太容易出错）
+  const raw = area ? area.getAttribute('fill') || '' : ''
+  const refId = raw.startsWith('url(#') && raw.endsWith(')') ? raw.slice(5, -1) : ''
+
+  return {
+    found: true,
+    lineStroke: getComputedStyle(svg.querySelector('.chart-line')).stroke,
+    guideStroke: getComputedStyle(svg.querySelector('.chart-guide')).stroke,
+    tickFill: getComputedStyle(svg.querySelector('.chart-tick')).fill,
+    tickFontSize: getComputedStyle(svg.querySelector('.chart-tick')).fontSize,
+    stopColors: [...svg.querySelectorAll('.chart-stop')].map(stopColorOf),
+    areaFillRef: raw,
+    refId,
+    gradId: gradient ? gradient.id : null,
+    // 引用必须指向**本文档里真实存在**的那个渐变节点
+    refResolves: refId ? Boolean(document.getElementById(refId)) : false,
+    gradientIds: [...document.querySelectorAll('linearGradient')].map((g) => g.id),
+  }
+})()`
+
 /** 读一次明细表：行数、首行每个单元格的文本、以及整页可见文本。 */
 const READ_TABLE = `(() => {
   const rows = [...document.querySelectorAll('table.data-table tbody tr')]
@@ -159,6 +196,45 @@ export async function register({ checks, session, base, fixture, expectedClicks,
       `画布右边缘 ${qr.canvasRight} 压到了文字列左边缘 ${qr.textColumnLeft}`,
     )
     return `画布右边缘 ${qr.canvasRight.toFixed(1)} < 文字列左边缘 ${qr.textColumnLeft.toFixed(1)}`
+  })
+
+  console.log('\n详情页：趋势图配色')
+
+  const chart = await session.evaluate(MEASURE_CHART)
+
+  await checks.run('折线与面积渐变解析成主题主色 #cc785c（token 类真的生效，而不是回落到默认黑）', async () => {
+    assert(chart.found, '页面上找不到 svg[aria-label="按天点击趋势折线图"]')
+    // 主色 #cc785c = rgb(204, 120, 92)。回落成默认黑是 rgb(0, 0, 0)。
+    assertEqual(chart.lineStroke, 'rgb(204, 120, 92)', '折线描边不是主色（.chart-line 没生效？）')
+    assertEqual(chart.guideStroke, 'rgb(230, 223, 216)', '参考线不是 hairline 色（.chart-guide 没生效？）')
+    assertEqual(chart.tickFill, 'rgb(142, 139, 130)', '刻度文字不是 muted-soft 色（.chart-tick 没生效？）')
+    assertEqual(chart.stopColors.length, 2, '面积渐变应该有 2 个 stop')
+    for (const color of chart.stopColors) {
+      assertEqual(color, 'rgb(204, 120, 92)', `渐变 stop 不是主色：${color}`)
+    }
+    return `折线 ${chart.lineStroke} / 参考线 ${chart.guideStroke} / 刻度 ${chart.tickFill} / 刻度字号 ${chart.tickFontSize}`
+  })
+
+  await checks.run('面积渐变引用的是文档里真实存在的 id（写死 id 会在多实例时指向别人）', async () => {
+    assert(chart.found, '页面上找不到趋势图')
+    assert(
+      chart.areaFillRef.startsWith('url(#'),
+      `面积路径的 fill 不是渐变引用：${JSON.stringify(chart.areaFillRef)}`,
+    )
+    assert(chart.refResolves, `面积路径引用的 #${chart.refId} 在文档里不存在（渐变没渲染出来）`)
+    assertEqual(
+      chart.gradientIds.filter((id) => id === chart.refId).length,
+      1,
+      `文档里有多个节点的 id 都是 ${chart.refId} —— id 必须是组件级唯一的`,
+    )
+    // 这一条是**代理断言**：真正要防的是「同一页出现两张趋势图时互相顶掉」，
+    // 而当前页面上只有一张图，验不出来。能验的是「id 不是写死的常量」——
+    // id 一旦变回字面量，多实例碰撞就必然复现，所以拦住这一点就够用了。
+    assert(
+      chart.gradId !== 'trend-fill',
+      '渐变的 id 又变成写死的常量了：同一页出现两张趋势图时，url(#trend-fill) 会一律指向文档里第一个渐变',
+    )
+    return `${chart.areaFillRef} → 命中唯一节点（id=${chart.gradId}）`
   })
 
   console.log('\n详情页：点击明细')

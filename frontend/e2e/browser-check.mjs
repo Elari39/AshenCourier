@@ -13,9 +13,14 @@
  *   CHROME_BIN     指定 Chrome 可执行文件（默认按平台猜常见的几个位置）
  *   CHROME_FLAGS   追加启动参数，以空格分隔（例如以 root 运行的容器里需要 --no-sandbox）
  *
- * ⚠️ 只创建 **1 条** 短链：`POST /api/links` 是 10 次/分钟/IP 的硬配额，而 `cmd/smoke`
- *    的最后一项检查会故意把这配额打满（它要断言 429）。所以本套件要么排在 smoke 之前，
- *    要么单独跑 —— CI 里就是「先本套件、后 smoke」，见 `.github/workflows/ci.yml`。
+ * ⚠️ **本套件只创建 1 条短链，这个数字是算过的，别随手加。**
+ *    `POST /api/links` 是 10 次/分钟/IP 的硬配额，`cmd/smoke` 自己要用掉约 **7** 次
+ *    （匿名创建 / javascript 被拒 / 自定义短码 / 重复短码 / 保留字 / 登录用户创建 /
+ *    限流那一项的循环），最后还会故意把这配额打满来断言 429。
+ *    也就是说留给本套件的余量只有 2 次 —— 多创建一条，CI 就变成「时序稍有偏差就偶发 429」。
+ *    所以本套件里**不新增创建**：要验的行为优先用接口播种（那条短链在套件一开始就建好，
+ *    smoke 跑起来时它早已滚出限流窗口），验不到的一律下沉到 vitest。
+ *    所以本套件必须排在 smoke 之前，见 `.github/workflows/ci.yml`。
  */
 import { launchChrome } from './cdp.mjs'
 import { register as registerA11y } from './a11y.mjs'

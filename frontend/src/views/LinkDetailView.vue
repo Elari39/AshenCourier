@@ -14,8 +14,10 @@ import type { ClickEvent, Link, Stats } from '@/api/types'
 import DistributionList from '@/components/DistributionList.vue'
 import StatCard from '@/components/StatCard.vue'
 import TrendChart from '@/components/TrendChart.vue'
+import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
+import CopyButton from '@/components/ui/CopyButton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Input from '@/components/ui/Input.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
@@ -25,7 +27,6 @@ import Select from '@/components/ui/Select.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useConfirm } from '@/composables/useConfirm'
-import { useCopy } from '@/composables/useCopy'
 import { useToast } from '@/composables/useToast'
 import type { DistributionItem } from '@/types/ui'
 import {
@@ -46,7 +47,6 @@ const router = useRouter()
 const toast = useToast()
 const { confirm } = useConfirm()
 const { isAuthenticated, manageKeyFor, forgetManageKey } = useAuth()
-const { copied, copy } = useCopy()
 
 /** 路由参数可能是 string | string[]，这里收敛成 string。 */
 const code = computed(() => {
@@ -396,16 +396,6 @@ async function handleClaim(): Promise<void> {
   }
 }
 
-async function copyShortURL(): Promise<void> {
-  if (!link.value) return
-  const ok = await copy(link.value.short_url)
-  if (ok) {
-    toast.success('短链已复制')
-  } else {
-    toast.error('复制失败，请手动选中复制')
-  }
-}
-
 // 切换统计窗口时重拉统计与明细：两者共用同一个窗口，口径必须一致
 watch(statsDays, () => {
   void loadStats()
@@ -491,7 +481,7 @@ onUnmounted(() => {
           <div class="space-y-2.5">
             <p v-if="link.title" class="text-[16px] text-body">{{ link.title }}</p>
             <p v-if="link.tags?.length" class="flex flex-wrap gap-1.5">
-              <span v-for="tag in link.tags" :key="tag" class="badge badge-quiet">#{{ tag }}</span>
+              <Badge v-for="tag in link.tags" :key="tag" variant="quiet">#{{ tag }}</Badge>
             </p>
             <p class="break-anywhere font-mono text-[13px]">{{ link.target_url }}</p>
             <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px]">
@@ -504,7 +494,7 @@ onUnmounted(() => {
           </div>
 
           <template #actions>
-            <Button variant="secondary" @click="copyShortURL">{{ copied ? '已复制' : '复制短链' }}</Button>
+            <CopyButton variant="secondary" :value="link.short_url" label="复制短链" />
             <Button variant="secondary" :href="link.short_url">打开</Button>
             <Button variant="secondary" @click="editOpen = !editOpen">
               {{ editOpen ? '取消编辑' : '编辑' }}
@@ -546,7 +536,11 @@ onUnmounted(() => {
         </Card>
 
         <!-- 认领提示（珊瑚 callout：全站少数几个允许珊瑚满铺的位置） -->
-        <div v-if="canClaim" class="card-coral mt-8 flex flex-col items-start justify-between gap-5 md:flex-row md:items-center">
+        <Card
+          v-if="canClaim"
+          variant="coral"
+          class="mt-8 flex flex-col items-start justify-between gap-5 md:flex-row md:items-center"
+        >
           <div>
             <p class="title-md text-on-primary">这条短链还是匿名状态</p>
             <p class="mt-2 max-w-2xl text-[14px] leading-[1.55] text-on-primary/85">
@@ -556,7 +550,7 @@ onUnmounted(() => {
           <Button variant="secondary" :loading="claiming" class="shrink-0" @click="handleClaim">
             认领到我的账号
           </Button>
-        </div>
+        </Card>
 
         <!-- 编辑面板 -->
         <Card v-if="editOpen" class="mt-6 p-6 md:p-8">
@@ -711,14 +705,14 @@ onUnmounted(() => {
 
             <!-- 窄屏：卡片堆叠（不横向滚动表格，与链接列表同一策略） -->
             <ul class="mt-4 space-y-3 md:hidden">
-              <li v-for="click in clicks" :key="click.id" class="card-cream p-4">
+              <Card v-for="click in clicks" :key="click.id" tag="li" class="p-4">
                 <div class="flex items-start justify-between gap-3">
                   <span class="font-mono text-[13px] text-ink">
                     {{ formatDateTimeSeconds(click.occurred_at) }}
                   </span>
-                  <span class="badge badge-quiet shrink-0">
+                  <Badge variant="quiet" class="shrink-0">
                     {{ describeDevice(click.device ?? 'unknown') }}
-                  </span>
+                  </Badge>
                 </div>
                 <p class="mt-2 text-[13px] text-muted">
                   {{ describeClient(click.browser, click.os) }}
@@ -727,7 +721,7 @@ onUnmounted(() => {
                   来源：{{ describeReferer(click.referer ?? '') }}
                 </p>
                 <p class="mt-1 font-mono text-[12px] text-muted-soft">IP {{ click.ip || '—' }}</p>
-              </li>
+              </Card>
             </ul>
 
             <div class="mt-5 flex items-center gap-3">

@@ -5,14 +5,15 @@
  * 深色 code-window 承载短链本身 —— DESIGN.md 认为「深色面板就是产品 chrome」，
  * 短链在这里就是产品实物，不是营销插图。
  */
-import { ref } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import type { Link } from '@/api/types'
 import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
-import { useCopy } from '@/composables/useCopy'
-import { useToast } from '@/composables/useToast'
+import Card from '@/components/ui/Card.vue'
+import CodeWindow from '@/components/ui/CodeWindow.vue'
+import CopyButton from '@/components/ui/CopyButton.vue'
+import { useMaskedSecret } from '@/composables/useMaskedSecret'
 import { describeExpiry, formatDateTime, truncateMiddle } from '@/utils/format'
 
 const props = defineProps<{
@@ -21,41 +22,26 @@ const props = defineProps<{
   manageKey?: string
 }>()
 
-const { copied, copy } = useCopy()
-const toast = useToast()
-
-/** 管理密钥默认打码：肩窥风险比便利性更值得防。 */
-const revealKey = ref(false)
-
-async function copyShortURL(): Promise<void> {
-  const ok = await copy(props.link.short_url)
-  if (ok) {
-    toast.success('短链已复制')
-  } else {
-    toast.error('复制失败，请手动选中复制')
-  }
-}
-
-async function copyManageKey(): Promise<void> {
-  if (!props.manageKey) return
-  const ok = await copy(props.manageKey)
-  if (ok) {
-    toast.success('管理密钥已复制')
-  } else {
-    toast.error('复制失败，请手动选中复制')
-  }
-}
+/**
+ * 管理密钥默认打码：肩窥风险比便利性更值得防。
+ *
+ * 「换了一条短链就收起」这一条交给 useMaskedSecret —— 结果卡是**被复用**的
+ * （落地页与列表页都只把 `latest` 换成新 payload，同一位置的实例不重建），
+ * 少了这一步，第一次点过「显示」之后，下一条短链的密钥会默认明文摊在屏幕上。
+ * 单独抽出来是为了能被单测覆盖：细节见那个文件。
+ */
+const { revealed: revealKey, toggle: toggleKey } = useMaskedSecret(() => props.link.short_code)
 </script>
 
 <template>
-  <div class="card-dark">
+  <Card variant="dark">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <Badge variant="coral">已生成</Badge>
       <span class="text-[13px] text-on-dark-soft">{{ describeExpiry(link.expires_at) }}</span>
     </div>
 
     <!-- 短链本体：等宽字体 + 深色内嵌面板 -->
-    <div class="code-window-inner mt-5 flex flex-wrap items-center gap-3">
+    <CodeWindow class="mt-5 flex flex-wrap items-center gap-3">
       <a
         :href="link.short_url"
         target="_blank"
@@ -65,12 +51,10 @@ async function copyManageKey(): Promise<void> {
         {{ link.short_url }}
       </a>
       <div class="flex items-center gap-2">
-        <Button variant="secondary-dark" size="sm" @click="copyShortURL">
-          {{ copied ? '已复制' : '复制' }}
-        </Button>
+        <CopyButton :value="link.short_url" variant="secondary-dark" size="sm" />
         <Button variant="secondary-dark" size="sm" :href="link.short_url">打开</Button>
       </div>
-    </div>
+    </CodeWindow>
 
     <!-- 目标地址 -->
     <p class="mt-4 text-[13px] text-on-dark-soft">
@@ -88,10 +72,15 @@ async function copyManageKey(): Promise<void> {
         <code class="min-w-0 flex-1 break-anywhere rounded-sm bg-surface-dark-soft px-2.5 py-1.5 text-[12px] text-on-dark">
           {{ revealKey ? manageKey : '•••••••••••••••••••••••••••••••••••••••••••' }}
         </code>
-        <Button variant="secondary-dark" size="sm" @click="revealKey = !revealKey">
+        <Button variant="secondary-dark" size="sm" @click="toggleKey">
           {{ revealKey ? '隐藏' : '显示' }}
         </Button>
-        <Button variant="secondary-dark" size="sm" @click="copyManageKey">复制</Button>
+        <CopyButton
+          :value="manageKey"
+          variant="secondary-dark"
+          size="sm"
+          success-message="管理密钥已复制"
+        />
       </div>
     </div>
 
@@ -102,5 +91,5 @@ async function copyManageKey(): Promise<void> {
       <span class="text-on-dark-soft">短码 <code class="text-on-dark">{{ link.short_code }}</code></span>
       <span class="text-on-dark-soft">创建于 {{ formatDateTime(link.created_at) }}</span>
     </div>
-  </div>
+  </Card>
 </template>

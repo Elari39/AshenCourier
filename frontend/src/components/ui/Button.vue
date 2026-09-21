@@ -8,14 +8,14 @@
 import { computed } from 'vue'
 import { RouterLink, type RouteLocationRaw } from 'vue-router'
 
-import Spinner from './Spinner.vue'
+import type { ButtonSize, ButtonVariant } from '@/types/ui'
 
-type Variant = 'primary' | 'secondary' | 'secondary-dark' | 'text' | 'danger'
+import Spinner from './Spinner.vue'
 
 const props = withDefaults(
   defineProps<{
-    variant?: Variant
-    size?: 'md' | 'sm'
+    variant?: ButtonVariant
+    size?: ButtonSize
     type?: 'button' | 'submit'
     /** 传入则渲染成 RouterLink。 */
     to?: RouteLocationRaw
@@ -29,7 +29,7 @@ const props = withDefaults(
   { variant: 'primary', size: 'md', type: 'button' },
 )
 
-const VARIANT_CLASS: Record<Variant, string> = {
+const VARIANT_CLASS: Record<ButtonVariant, string> = {
   primary: 'btn-primary',
   secondary: 'btn-secondary',
   'secondary-dark': 'btn-secondary-dark',

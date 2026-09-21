@@ -8,7 +8,7 @@
  *
  * 移动端：整张图放进可横向滚动的容器，最小宽度 560px，保证折线不被压成锯齿。
  */
-import { computed } from 'vue'
+import { computed, useId } from 'vue'
 
 import type { DailyPoint } from '@/api/types'
 import EmptyState from '@/components/ui/EmptyState.vue'
@@ -27,6 +27,16 @@ const PAD_RIGHT = 8
 
 /** 绘图区高度。 */
 const plotHeight = VIEW_HEIGHT - PAD_TOP - PAD_BOTTOM
+
+/**
+ * 面积渐变的 id 必须**每个实例各不相同**。
+ *
+ * 原先写死 `id="trend-fill"`：一个页面上只有一张图时看不出问题，但 SVG 的 id
+ * 是文档级的 —— 两张图会拿到同一个 id，`url(#trend-fill)` 一律指向文档里第一个
+ * 渐变节点，后一张图的填充就跟着第一张走（同一份配色时连症状都没有，
+ * 改了一张的配色才会发现另一张跟着变）。useId 给的是组件级唯一值。
+ */
+const fillId = `trend-fill-${useId()}`
 
 const total = computed(() => props.points.reduce((sum, point) => sum + point.clicks, 0))
 
@@ -111,9 +121,9 @@ const yTicks = computed(() => [
         aria-label="按天点击趋势折线图"
       >
         <defs>
-          <linearGradient id="trend-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#cc785c" stop-opacity="0.22" />
-            <stop offset="100%" stop-color="#cc785c" stop-opacity="0.02" />
+          <linearGradient :id="fillId" x1="0" y1="0" x2="0" y2="1">
+            <stop class="chart-stop" offset="0%" stop-opacity="0.22" />
+            <stop class="chart-stop" offset="100%" stop-opacity="0.02" />
           </linearGradient>
         </defs>
 
@@ -125,15 +135,15 @@ const yTicks = computed(() => [
           :x2="VIEW_WIDTH - PAD_RIGHT"
           :y1="tick.y"
           :y2="tick.y"
-          stroke="#e6dfd8"
+          class="chart-guide"
           stroke-width="1"
         />
 
-        <path :d="areaPath" fill="url(#trend-fill)" />
+        <path :d="areaPath" :fill="`url(#${fillId})`" />
         <path
           :d="linePath"
+          class="chart-line"
           fill="none"
-          stroke="#cc785c"
           stroke-width="2"
           stroke-linejoin="round"
           stroke-linecap="round"
@@ -145,8 +155,7 @@ const yTicks = computed(() => [
           :key="`x-${tick.x}`"
           :x="tick.x"
           :y="VIEW_HEIGHT - 8"
-          fill="#8e8b82"
-          font-size="11"
+          class="chart-tick"
           text-anchor="middle"
         >
           {{ tick.label }}
@@ -158,8 +167,7 @@ const yTicks = computed(() => [
           :key="`yl-${tick.y}`"
           :x="VIEW_WIDTH - PAD_RIGHT"
           :y="tick.y - 4"
-          fill="#8e8b82"
-          font-size="11"
+          class="chart-tick"
           text-anchor="end"
         >
           {{ tick.label }}

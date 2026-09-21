@@ -585,6 +585,30 @@
     background-color: var(--color-surface-cream-strong);
   }
 
+  /* ---------- SVG 图表 ----------
+   * 图表颜色只能落在 SVG 元素上，而 `stroke="#cc785c"` 这种**呈现属性**引不到
+   * var()（CSS 变量不是合法的呈现属性值）。DESIGN.md 又明写 never inline hex ——
+   * 于是给它们具名类，颜色统一从 token 取。附带好处是换主色只需要改 @theme 一处。
+   */
+  .chart-line {
+    stroke: var(--color-primary);
+  }
+
+  /* 参考线与刻度刻意极淡：趋势图的主角是那条折线，网格一重就喧宾夺主 */
+  .chart-guide {
+    stroke: var(--color-hairline);
+  }
+
+  .chart-tick {
+    fill: var(--color-muted-soft);
+    font-size: 11px;
+  }
+
+  /* 面积渐变的两端：同一个主色，靠各 stop 自己的 stop-opacity 拉开层次 */
+  .chart-stop {
+    stop-color: var(--color-primary);
+  }
+
   /* ---------- 跳到主要内容 ----------
    * 全站第一个可聚焦元素。平时移出视口，但**不能**用 display:none 或 visibility:hidden ——
    * 那样它根本拿不到焦点，键盘用户永远 Tab 不到，跳过导航这件事就白做了。
