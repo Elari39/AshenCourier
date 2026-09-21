@@ -437,28 +437,32 @@ mmdb 查询虽然只是一次内存映射读，但它会引入文件句柄与页
 
 | 变量 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `POSTGRES_PASSWORD` | ✅ | — | 数据库口令 |
-| `REDIS_PASSWORD` | ✅ | — | Redis 口令 |
+| `POSTGRES_PASSWORD` | ✅ | — | 数据库口令。`.env.example` 里**留空**，`${VAR:?…}` 对空值与未设置一视同仁 → 不填就不让启动 |
+| `REDIS_PASSWORD` | ✅ | — | Redis 口令（同上，模板留空） |
 | `JWT_SECRET` | ✅ | — | ≥16 字节，拒绝占位值 |
 | `DATABASE_URL` | ✅ | — | `postgres://ashen:<pwd>@postgres:5432/ashen?sslmode=disable` |
 | `PUBLIC_BASE_URL` | | `http://localhost:8080` | 短链前缀 + CORS 允许来源 |
 | `FRONTEND_PORT` | | `8080` | 对外端口 |
 | `LOG_LEVEL` | | `info` | `debug` / `info` / `warn` / `error` |
+| `GEOIP_DB_PATH` | | 空 | 国家库在**容器内**的路径（如 `/geoip/dbip-country-lite.mmdb`）。留空或文件打不开都只是让 `country` 留空，见「GeoIP 国家维度」 |
 
-### 后端进程（compose 已注入，本地开发需自己 export）
+### 后端进程（本地开发需自己 export）
 
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `HTTP_ADDR` | `:8080` | 监听地址 |
-| `REDIS_ADDR` | `localhost:6379` | Redis 地址 |
-| `REDIS_DB` | `0` | 逻辑库编号 |
-| `WORKER_ENABLED` | `false` | `true` 时 api 进程内嵌同一套 worker 循环（本地开发用） |
-| `TRUST_PROXY` | `true` | 从 `X-Real-IP` 取客户端 IP；**不**信任 `X-Forwarded-For` |
-| `RATE_LIMIT_DISABLED` | `false` | `true` 时启动即全量放行（限流应急开关），状态见 `/healthz` 的 `rate_limit_disabled` |
-| `GEOIP_DB_PATH` | 空 | MaxMind DB 格式的国家库在**容器内**的路径（如 `/geoip/dbip-country-lite.mmdb`）。留空或文件打不开都只是让 `country` 留空，不影响跳转与统计，见「GeoIP 国家维度」 |
-| `POSTGRES_TEST_DSN` | 空 | **只给测试用，进程不读它**：store 集成测试的 DSN，未设置时整体跳过（见「store 层集成测试」） |
-| `GEOIP_TEST_DB` | 空 | **只给测试用，进程不读它**：`internal/store/geoip` 里唯一会真查库的用例的库文件路径，未设置时该用例 SKIP |
-| `REDIS_TEST_ADDR` | 空 | **只给测试用，进程不读它**：`internal/store/redis` 集成测试的 Redis 地址（形如 `localhost:6379`），未设置时整体跳过。配套口令用 `REDIS_TEST_PASSWORD`（无口令的本地 Redis 不用填）。那段结算逻辑是一段 Lua，只有跑在真 Redis 上才有意义 |
+下表是**二进制读取**的环境变量。中间一列写明它到底从哪里来 ——
+只有标了「compose」的那些才由 `docker-compose.yml` 的 `x-backend-env` 注入，
+其余在容器里取的是**进程默认值**（这一列原先没写清，对照 `docker compose config` 会对不上）。
+
+| 变量 | 默认 | 来自 | 说明 |
+| --- | --- | --- | --- |
+| `HTTP_ADDR` | `:8080` | compose（仅 backend） | 监听地址。worker 不开 HTTP，不需要它 |
+| `REDIS_ADDR` | `localhost:6379` | compose | Redis 地址 |
+| `REDIS_DB` | `0` | 进程默认值 | 逻辑库编号 |
+| `WORKER_ENABLED` | `false` | compose（仅 backend） | `true` 时 api 进程内嵌同一套 worker 循环（本地开发用） |
+| `TRUST_PROXY` | `true` | 进程默认值 | 从 `X-Real-IP` 取客户端 IP；**不**信任 `X-Forwarded-For` |
+| `RATE_LIMIT_DISABLED` | `false` | 进程默认值 | `true` 时启动即全量放行（限流应急开关），状态见 `/healthz` 的 `rate_limit_disabled` |
+| `POSTGRES_TEST_DSN` | 空 | 只给测试用 | 进程不读它：store 集成测试的 DSN，未设置时整体跳过（见「store 层集成测试」） |
+| `GEOIP_TEST_DB` | 空 | 只给测试用 | 进程不读它：`internal/store/geoip` 里唯一会真查库的用例的库文件路径，未设置时该用例 SKIP |
+| `REDIS_TEST_ADDR` | 空 | 只给测试用 | 进程不读它：`internal/store/redis` 集成测试的 Redis 地址（形如 `localhost:6379`），未设置时整体跳过。配套口令用 `REDIS_TEST_PASSWORD`（无口令的本地 Redis 不用填）。那段结算逻辑是一段 Lua，只有跑在真 Redis 上才有意义 |
 
 ### 前端（可选）
 
@@ -507,6 +511,20 @@ docker compose logs worker | grep '毒消息'
 # 最近失败的请求
 docker compose logs backend | grep '"level":"ERROR"'
 ```
+
+> **`docker compose ps` 里出现 `unhealthy`、但容器并没有被重启时，先看是不是「启动期还在等依赖」。**
+>
+> api / worker 启动时会对 PG、Redis 各做一次探测；探测失败**不再立刻退出**，而是在进程内退避重试
+> （起步 250ms 翻倍、封顶 2s，总窗口 30 秒）。这与原先「直接退出，交给 `restart: unless-stopped`
+> 一轮轮重启」的区别是：日志从每条依赖失败一条 `ERROR` 降级成 `WARN`，收敛窗口也可控了
+> —— 否则编排层自己的退避会一路翻倍到 1 分钟，而每轮都盖住真正的根因。
+>
+> 代价是**「进程活着但还没开始监听」的窗口最长 30 秒**，所以 api 镜像的 `HEALTHCHECK`
+> `start-period` 已相应从 5s 提到 35s：否则每 10 秒一次的探针会在这个窗口里攒够 3 次失败，
+> 报出一个假的 `unhealthy`（容器其实正在正常等依赖，`docker compose ps` 却显示不健康）。
+>
+> 窗口用尽**仍然会退出**并打出带根因的错误 —— 「口令写错 / 端口填错」这类永久性失败
+> 不会变成无限等待。实现与设计取舍见 `backend/internal/startup`。
 
 `/healthz` 关键字段：
 
@@ -620,6 +638,14 @@ docker compose exec postgres dropdb -U ashen restore_check
 漏掉第 2 步 → 别人可以注册 `settings` 当短码，把真实页面吃掉；
 漏掉第 4 步 → 开发环境刷新该页面会 404。
 
+> **这三条现在有自动化守卫了**：`backend/internal/pkg/shortcode/routes_sync_test.go`
+> 同时读 `nginx.conf`、`frontend/vite.config.ts` 与保留字表做交叉比对
+> （nginx 的 `location = /xxx` 清单 == vite 的 `SPA_ROUTES`，两者并集 ⊆ 保留字表），
+> 漏改哪一处 `go test ./...` 就会红并打印差异。
+> 加它的原因不是「防患于未然」，是真的漂移过：`terms` / `privacy` 在 nginx 与保留字表里
+> 都有，只有 vite 那份漏了 —— 表现是本地 `pnpm dev` 刷新 `/terms` 被当成短码打到后端 404，
+> 而生产 nginx 返回 200。靠注释提醒是拦不住的。
+
 > **同一个坑的反面：新增「不是 SPA 页面但对外存在」的路径，也要动第 1、2 步。**
 > `/metrics` 就是例子 —— 它 7 位、形状与短码完全一致，于是同时踩两头：
 > 不在 nginx 里显式处理，它会被短码正则截走转发到后端（「后端能出指标、公网也能读」的最坏组合）；
@@ -692,6 +718,16 @@ entrypoint: ["/app/worker"]     # ✅
 （`/app/api` 忽略多余的位置参数照常启动），只是恰好没报错。
 **判断方法**：看 worker 容器的日志 —— 如果出现 `"msg":"http"` 的访问日志，
 说明它跑的是 API 而不是 worker。
+
+> **同一份 Dockerfile 的两个服务各自持有一个镜像 tag，只 build 一个会让另一个继续跑旧二进制。**
+> backend 与 worker 的 `build` 定义完全相同（都是 `context: ./backend`，无 build args），
+> 但 compose 会产出两个 tag：`ashencourier-backend` 与 `ashencourier-worker`。
+> `docker compose up -d --build backend` 只重建前者，`up -d` 又只会重建**镜像 ID 变了**的容器
+> —— 于是 worker 会毫无提示地继续跑旧代码（2026-09-21 实测到：worker 镜像停在两天前，
+> 中间修掉的结算 Lua 与毒消息清理根本没在运行中的容器里生效，而 `docker compose ps`
+> 显示 `healthy`，看不出任何异常）。
+> **判断方法**：`docker inspect -f '{{.RepoTags}} {{.Created}}' ashencourier-backend ashencourier-worker`
+> —— 两个时间戳应当一致。要重建就重建两个，或者直接用文首那条 `docker compose up -d --build`（不带服务名）。
 
 ### 5. nginx 必须用运行时 DNS 解析上游
 
@@ -856,7 +892,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | --- | --- | --- |
 | `gofmt -l .`（backend） | 无输出 | 本机 + CI `backend` |
 | `go vet ./...` | 通过 | 本机 + CI `backend` |
-| `go test ./...` | 通过（config / domain / httpx / base62 / ipmask / shortcode / ua / validator / service / store.postgres / worker） | 本机 |
+| `go test ./...` | 通过（config / domain / httpx / base62 / ipmask / shortcode / ua / validator / service / **startup** / store.postgres / worker） | 本机 |
 | `go test -race ./...` | 通过。⚠️ 本机需 `CGO_LDFLAGS=-static`：mingw-w64 8.1.0 的运行时 DLL 与 Go 1.27 的 race runtime 不匹配，裸跑会得到 `exit status 0xc0000139`（环境问题，不是代码问题） | 本机（带 `-static`）+ CI `backend`（ubuntu 原生） |
 | `pnpm typecheck` / `pnpm lint` / `pnpm build` | 通过（lint 0 error 0 warning） | 本机 + CI `frontend` |
 | `docker compose up -d --build` | 5 个容器全部 healthy（PG / Redis / backend / worker / frontend） | 本机 + CI `smoke` |
@@ -886,8 +922,26 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **集成 ㉑**：计数结算脚本（真 Redis） | 新增 `internal/store/redis/counter_integration_test.go`。`SettleDelta` 是一段 Lua，语义全在 Redis 里执行，纯 Go 单测只能断言脚本源码的字符串形状 —— 改坏了也未必红。三个用例覆盖正常路径 / **有残留** / `delta=0`。有残留那一条钉住本次修掉的缺陷：结算窗口内来了新点击时，dirty 标记必须保留给下一轮。**变异验证**：把 `SREM` 改回无条件 → 报「有残留时 dirty 不该被摘掉」；还原后自证为绿。门控沿用 `REDIS_TEST_ADDR`（未设置则 SKIP），CI 的 backend job 加了 redis service | 本机（真 Redis 8.10 容器） |
 | **集成 ㉒**：毒消息清理（真 Redis） | 新增 `internal/store/redis/stream_integration_test.go`。`ReapDeadLetters` 靠 XPENDING 翻页，游标推不动是死循环、推过头就漏消息，两种错在 fake 上都看不出来。用 `XCLAIM` 反复认领把重投次数抬上去，断言的是 **Redis 自己记的** delivery count。三个用例：达上限被丢弃且 PEL 归零 / 未达上限必须留着（不误杀，一次长 PG 故障不该丢正常消息）/ 单轮上限 2 时每轮都有进展。**变异验证两条都被真实断言抓住**：阈值 `>=` 改成 `>` → 「丢弃了 0 条，期望 5 条」；只掐掉计数 → `DeadLettered = 0, want 2` | 本机（真 Redis 8.10 容器） |
 | **前端 ㉓**：并发守卫与趋势图时区 | vitest **43** 个用例全绿（新增 `utils/request.ts` 9 个、`formatShortDate` 3 个）。**变异验证三条**：去掉 `abort` → 「发起新一轮会取消上一轮」红；`isStale` 恒 false → 三条过期判定全红；`formatShortDate` 改回 `Date` 解析 → `expected '08-31' to be '09-01'`（America/New_York 下纯日期串提前一天）。最后这条尤其值得记 —— 老用例给的是带时间的串，那种串在任何时区下都是绿的，**真正会踩的恰恰是后端实际返回的纯日期串** | 本机 |
+| **前端 ㉔**：Dashboard 分页卡死 + 「四处同步」守卫（N18 之后的一轮审计） | ① `reload` 与 `loadMore` 共用并发守卫，`reload` 的 `begin()` 会把在飞的 `loadMore` 判成 stale，于是后者唯一复位 `loadingMore` 的 `finally` 不执行 → 按钮永久转圈且再点无效。**真 Chrome + CDP 实测**：撤掉那行复位 → 按钮 `disabled + aria-busy + spinner` 不再恢复、行数停在 20、再点「加载更多」无效（2 项断言红）；恢复后 → 20 → 25，5 项断言全绿。② 详情页补上 `watch(route.params.code)`（`links/:code` 在 `/links/A → /links/B` 时会复用组件实例，原来只有 `onMounted`）。③ 新增 `routes_sync_test.go` 把「新增顶级路由四处同步」变成断言：把 `terms`/`privacy` 从 vite 白名单去掉 → 用例红并打印「只在 nginx.conf 里：[privacy terms]」；还原后绿。④ ⚠️ 复现脚本第一次跑出的是**假绿**：本机 frontend 容器跑的是 2 小时前的旧构建（镜像创建 10:31，早于引入并发守卫的 `2afdecd` 12:40，产物里 `AbortController` 出现 **0** 次），**验证前端行为前必须先 `docker compose build frontend` + `up -d frontend`**，否则测的是旧代码 | 本机（Docker + 无头 Chrome） |
+| **后端 ㉕**：启动期退避重试（N18 之后那一轮审计的 P2 项） | api / worker 启动时对 PG、Redis 的探测，从「失败即 `return err` → 进程退出」改成**进程内**退避重试（新增 `backend/internal/startup`：首轮立即执行，之后 250ms → 500ms → 1s → 2s 封顶，窗口 30 秒）。**容器实测**（拿一个必然连不通的 PG 地址跑 `docker compose run --rm --no-deps backend`）：17 条 `WARN`（都带 `dependency=postgres` / `attempt` / 可读的 `backoff`）+ 1 条最终 `ERROR`，`backoff` 序列实测为 `250ms, 500ms, 1s, 2s, 2s…`，重试循环耗时 **29.8s**（窗口 30s）、**尝试 18 次**、退出码 1，错误链里带根因：`startup: postgres 在 30s 内未就绪（尝试 18 次）: store.postgres: ping: … dial tcp 172.20.0.6:1: connect: connection refused`。**语义仍是 fail fast**：窗口用尽照旧退出，只是把「依赖暂时没起来」与「根本连不上」区分开了。**变异验证三条**：去掉封顶（`min(d*2,maxBackoff)` → `d*2`）→ 两条封顶用例红；去掉 `window<=0` 回落 `DefaultWindow` → 「第 3 次已就绪却仍返回错误」红；去掉 `ctx.Err() != nil` 的提前返回 → 「ctx 取消后不该再记 WARN」红；三条还原后均绿。**顺带修掉两处**：① `backoff` 原本按 slog 对 `time.Duration` 的默认编码输出纳秒整数（实测就是 `"backoff":250000000`），改为 `.String()` 输出 `"250ms"` 并加断言；② api 镜像 `HEALTHCHECK --start-period` 5s → **35s** —— 否则每 10s 一次的探针会在「进程活着但还没开始监听」的 30s 窗口里攒够 3 次失败，报出一个假的 `unhealthy`。重建后 5 个容器全 healthy、冒烟 **28 / 28** | 本机（Docker + `go test`） |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
+
+⚠️ **「计数一致性 = 0」这条要这样读**：它指的是**只经过跳转路径**（`GET /{code}`）产生的点击。
+`容器级 ⑰` 的 GeoIP 验收是**手工往 Stream 投显式 ID 的消息**，那条路径绕过了跳转里的
+`INCR clicks:cnt:{code}`，于是那些明细永远追不上基线 —— 那个库现在能查到 1 条
+`base_count = 0 / event_count = 4` 的 `geoacc1`，就是这个手工注入留下的。**它不是缺陷**：
+补偿式计数的方向是「宁可重复累加也不丢」，所以不变式是 `base_count >= event_count`，
+`base_count < event_count` 只可能来自「绕过跳转路径的写入」。复跑这条验收时请手工排除
+这类造出来的行，否则会假报红。
+
+⚠️ **做变异验证时，基线必须每次从「当前代码」取。** 2026-09-21 实测到一个更隐蔽的假结论：
+复跑变异脚本时它复用了上一次留下的源码快照当基线，而那份快照**早于当轮的改动** ——
+于是「变异后仍然绿」其实是基线自己过期了；更糟的是脚本还原时**把当轮的真实改动覆盖掉了**
+（`delay.String()` 那两处就是这么丢过一次，靠新加的断言才发现）。
+两条对策：① 基线每次都从工作区当前文件刷新；② 刷新前先校验所有变异锚点都在场，
+防「上次崩在变异中途、把变异体当成了基线」。
+这与本表 ㉔④ 那条是同一类错误（拿旧产物/旧基线去做验证），值得放在一起看。
 
 **自定义域名的本机验收**不需要真域名与证书：`curl -H 'Host: a.local' localhost:8080/{code}` 就能走到后端，因为 nginx 的短码规则是按**路径**匹配的，`Host` 只影响后端把请求算到哪个域上。域名记录目前只能用一条
 `INSERT INTO domains (domain) VALUES ('a.local')` 登记（没有管理接口，见「已知限制」）。真上线时除了登记域名，还要在 `deploy/nginx/nginx.conf` 里为该域名加 `server_name` 与证书 —— 那是配置工作，代码侧不用改。
