@@ -74,6 +74,17 @@ async function reload(): Promise<void> {
   const { signal, isStale } = listGuard.begin()
   loading.value = true
   loadError.value = ''
+  // ⚠️ 必须在这里把 loadMore 的 loading 复位。
+  //
+  // begin() 会把在飞的 loadMore 判成 stale（这是共用守卫的目的：新查询必须能取消
+  // 旧的翻页），于是 loadMore 的 `finally { if (!isStale()) ... }` 不会执行 ——
+  // 而它那句正是唯一复位 loadingMore 的地方。漏了这一步的效果是：
+  // loadingMore 永久为 true，而 loadMore() 开头的守卫直接 return，
+  // 「加载更多」按钮一直转圈且再也点不动，只能刷新页面。
+  //
+  // 这里复位不会掐掉别人的 loading：reload 与 loadMore 抢的是同一份列表，
+  // 被取消的那一轮已经是最后一个 loadMore，不存在「更新的一轮」需要保护。
+  loadingMore.value = false
   try {
     const result = await linksApi.list(
       {

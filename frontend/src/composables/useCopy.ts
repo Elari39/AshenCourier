@@ -5,7 +5,7 @@
  * navigator.clipboard 不可用，退回到隐藏 textarea + execCommand 的老办法。
  */
 
-import { ref } from 'vue'
+import { onUnmounted, ref } from 'vue'
 
 /** 复制能力的返回结构。 */
 export function useCopy() {
@@ -24,6 +24,10 @@ export function useCopy() {
     }
     return ok
   }
+
+  // 卸载时清掉还没触发的复位定时器。留着的话它会在 1.8 秒后于已销毁的组件上写 ref
+  // （无害，但属于「组件走了定时器还在」这类不该留的悬挂回调）。
+  onUnmounted(() => window.clearTimeout(resetTimer))
 
   return { copied, copy }
 }

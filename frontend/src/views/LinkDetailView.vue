@@ -141,26 +141,36 @@ const canClaim = computed(
   () => isAuthenticated.value && link.value?.anonymous === true && manageKey.value !== null,
 )
 
+/**
+ * 详情主体的并发守卫。与下面两个分开：link 决定整页骨架（404 / 编辑表单 / 二维码），
+ * 它一旦错位，「保存 / 删除 / 认领」就会打到错的短码上，所以它必须能取消在飞的那一轮。
+ */
+const linkGuard = createRequestGuard()
+
 async function loadLink(): Promise<void> {
+  const { signal, isStale } = linkGuard.begin()
   loading.value = true
   notFound.value = false
   loadError.value = ''
 
   try {
-    link.value = await linksApi.get(code.value, manageKey.value)
-    editTitle.value = link.value.title ?? ''
-    editTarget.value = link.value.target_url
-    editTags.value = (link.value.tags ?? []).join(', ')
-    editStatus.value = link.value.status === 'disabled' ? 'disabled' : 'active'
+    const data = await linksApi.get(code.value, manageKey.value, signal)
+    if (isStale()) return
+    link.value = data
+    editTitle.value = data.title ?? ''
+    editTarget.value = data.target_url
+    editTags.value = (data.tags ?? []).join(', ')
+    editStatus.value = data.status === 'disabled' ? 'disabled' : 'active'
     editPassword.value = ''
   } catch (cause) {
+    if (isStale() || isAbortError(cause)) return
     if (cause instanceof ApiError && cause.status === 404) {
       notFound.value = true
     } else {
       loadError.value = cause instanceof ApiError ? cause.friendly : '加载失败，请稍后重试'
     }
   } finally {
-    loading.value = false
+    if (!isStale()) loading.value = false
   }
 }
 
@@ -378,15 +388,52 @@ watch(statsDays, () => {
   void loadClicks()
 })
 
-onMounted(async () => {
+/** 加载整页：先拿 link（它决定渲染哪一支分支），再并行拉统计、明细与二维码。 */
+async function loadAll(): Promise<void> {
   await loadLink()
   if (link.value) {
     await Promise.all([loadStats(), loadClicks(), renderQR()])
   }
+}
+
+/**
+ * 路由参数变化（/links/A → /links/B）时把上一条短链的痕迹清干净。
+ *
+ * `statsDays` 刻意不重置：它是用户的阅读偏好，不是某条短链的属性，带过去更顺手。
+ * 清空后 `statsDays` 的 watcher 仍可能跑一次 `loadStats()`，但那时 `link` 还是 null，
+ * 两个加载函数开头的 `if (!link.value) return` 会直接返回，不会发出多余请求。
+ */
+function resetForLinkChange(): void {
+  link.value = null
+  stats.value = null
+  clicks.value = []
+  clicksCursor.value = ''
+  notFound.value = false
+  loadError.value = ''
+  clicksError.value = ''
+  editOpen.value = false
+  editError.value = ''
+  editPassword.value = ''
+}
+
+onMounted(loadAll)
+
+/**
+ * ⚠️ 必须监听路由参数，不能只靠 onMounted。
+ *
+ * 路由是 `links/:code`，`/links/A` 与 `/links/B` 的路由名与参数形状都相同，
+ * 而本组件的 `<RouterView>` 没有 `:key` —— Vue 会**复用同一个组件实例**，
+ * onMounted 不会再跑。于是页面继续显示 A 的标题、统计、明细与二维码，
+ * 更糟的是「保存 / 删除 / 认领」都会打到 A 的短码上。
+ */
+watch(code, () => {
+  resetForLinkChange()
+  void loadAll()
 })
 
 // 离开页面时取消在飞的请求：响应回来时组件已经卸载，写状态既无意义也易出错
 onUnmounted(() => {
+  linkGuard.cancel()
   statsGuard.cancel()
   clicksGuard.cancel()
 })
