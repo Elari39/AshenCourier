@@ -45,7 +45,12 @@ EXPOSE 8080
 
 # distroless 里没有 shell 也没有 curl，所以健康检查只能靠二进制自己：
 # -healthcheck 会请求本机 /healthz 并按其结果决定退出码
-HEALTHCHECK --interval=10s --timeout=4s --start-period=5s --retries=3 \
+#
+# start-period=35s 而不是 5s：启动时若 PG / Redis 还没就绪，进程会在内部退避重试
+# 最多 30 秒（见 internal/startup），这期间它**活着但还没开始监听**。
+# 用 5s 的话，每 10s 一次的探针会在这个窗口里攒够 3 次失败，报出一个假的 unhealthy。
+# 这里只需盖住「启动到能服务」的上限，不影响常驻期的探活灵敏度。
+HEALTHCHECK --interval=10s --timeout=4s --start-period=35s --retries=3 \
     CMD ["/app/api", "-healthcheck"]
 
 ENTRYPOINT ["/app/api"]

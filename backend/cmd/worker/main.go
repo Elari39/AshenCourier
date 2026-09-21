@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"ashen-courier/internal/config"
+	"ashen-courier/internal/startup"
 	"ashen-courier/internal/store/geoip"
 	"ashen-courier/internal/store/postgres"
 	"ashen-courier/internal/store/redis"
@@ -101,22 +102,31 @@ func run() error {
 	logger.Info("启动 AshenCourier worker",
 		"version", version, "consumer", consumer, "redis", cfg.RedisAddr)
 
-	pg, err := postgres.Open(ctx, postgres.Options{
-		DSN:       cfg.DatabaseURL,
-		MaxConns:  8,
-		OpTimeout: cfg.PGTimeout,
-	})
+	// 与 cmd/api 同一套启动期退避重试，理由见 internal/startup。
+	// 注意 `-healthcheck` 那条路径**不**重试：它要的是「现在就回答能不能用」，
+	// 失败了由 Docker 按自己的节奏重探，不该在探针里再等 30 秒。
+	pg, err := startup.Retry(ctx, logger, "postgres", startup.DefaultWindow,
+		func(ctx context.Context) (*postgres.DB, error) {
+			return postgres.Open(ctx, postgres.Options{
+				DSN:       cfg.DatabaseURL,
+				MaxConns:  8,
+				OpTimeout: cfg.PGTimeout,
+			})
+		})
 	if err != nil {
 		return err
 	}
 	defer pg.Close()
 
-	rdb, err := redis.Open(ctx, redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-		DB:       cfg.RedisDB,
-		Timeout:  cfg.RedisTimeout,
-	})
+	rdb, err := startup.Retry(ctx, logger, "redis", startup.DefaultWindow,
+		func(ctx context.Context) (*redis.Client, error) {
+			return redis.Open(ctx, redis.Options{
+				Addr:     cfg.RedisAddr,
+				Password: cfg.RedisPassword,
+				DB:       cfg.RedisDB,
+				Timeout:  cfg.RedisTimeout,
+			})
+		})
 	if err != nil {
 		return err
 	}

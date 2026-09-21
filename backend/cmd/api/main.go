@@ -26,6 +26,7 @@ import (
 	"ashen-courier/internal/handler"
 	"ashen-courier/internal/httpx"
 	"ashen-courier/internal/service"
+	"ashen-courier/internal/startup"
 	"ashen-courier/internal/store/geoip"
 	"ashen-courier/internal/store/postgres"
 	"ashen-courier/internal/store/redis"
@@ -92,22 +93,35 @@ func run() error {
 	defer stop()
 
 	// ---- 依赖 ----
-	pg, err := postgres.Open(ctx, postgres.Options{
-		DSN:       cfg.DatabaseURL,
-		MaxConns:  16,
-		OpTimeout: cfg.PGTimeout,
-	})
+	//
+	// 两处都走启动期退避重试而不是「失败即退出」。直接返回错误会让容器变成 crash-loop：
+	// PG 还在初始化时服务端回 SQLSTATE 57P03，进程一次次起不来，只能靠编排层
+	// （100ms→…→1min 翻倍退避）空转，每一轮还往日志里写一条 ERROR 盖住真正的根因。
+	//
+	// 窗口取值与「这不等于把启动失败藏起来」的说明见 internal/startup。
+	// 用泛型让它直接把依赖本身交出来，省掉「先声明变量再在里面赋值」的写法。
+	pg, err := startup.Retry(ctx, logger, "postgres", startup.DefaultWindow,
+		func(ctx context.Context) (*postgres.DB, error) {
+			return postgres.Open(ctx, postgres.Options{
+				DSN:       cfg.DatabaseURL,
+				MaxConns:  16,
+				OpTimeout: cfg.PGTimeout,
+			})
+		})
 	if err != nil {
 		return err
 	}
 	defer pg.Close()
 
-	rdb, err := redis.Open(ctx, redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-		DB:       cfg.RedisDB,
-		Timeout:  cfg.RedisTimeout,
-	})
+	rdb, err := startup.Retry(ctx, logger, "redis", startup.DefaultWindow,
+		func(ctx context.Context) (*redis.Client, error) {
+			return redis.Open(ctx, redis.Options{
+				Addr:     cfg.RedisAddr,
+				Password: cfg.RedisPassword,
+				DB:       cfg.RedisDB,
+				Timeout:  cfg.RedisTimeout,
+			})
+		})
 	if err != nil {
 		return err
 	}
