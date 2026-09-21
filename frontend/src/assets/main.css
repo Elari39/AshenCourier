@@ -585,6 +585,29 @@
     background-color: var(--color-surface-cream-strong);
   }
 
+  /* ---------- 跳到主要内容 ----------
+   * 全站第一个可聚焦元素。平时移出视口，但**不能**用 display:none 或 visibility:hidden ——
+   * 那样它根本拿不到焦点，键盘用户永远 Tab 不到，跳过导航这件事就白做了。
+   * z-index 高于确认框(60)：它是页面的第一个可聚焦元素，任何时候都该看得见。
+   * 不用过渡动画（DESIGN.md：不做花哨动画），它出现得越干脆越好。
+   */
+  .skip-link {
+    position: fixed;
+    top: -100px;
+    left: 12px;
+    z-index: 70;
+    padding: 10px 16px;
+    border-radius: var(--radius-md);
+    background-color: var(--color-surface-dark);
+    color: var(--color-on-dark);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .skip-link:focus {
+    top: 12px;
+  }
+
   /* ---------- 确认框 ----------
    * 层次交给遮罩的色块对比，**不加阴影**：DESIGN.md 的 elevation 原则是
    * "color-block first, shadow rare"，而它给的唯一阴影 token（0 1px 3px @8%）

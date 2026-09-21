@@ -18,6 +18,7 @@
  *    要么单独跑 —— CI 里就是「先本套件、后 smoke」，见 `.github/workflows/ci.yml`。
  */
 import { launchChrome } from './cdp.mjs'
+import { register as registerA11y } from './a11y.mjs'
 import { register as registerConfirmDialog } from './confirm-dialog.mjs'
 import { register as registerDetailPage } from './detail-page.mjs'
 import { register as registerPasswordGate } from './password-gate.mjs'
@@ -87,6 +88,9 @@ async function main() {
     )
 
     // ---- 3. 各项检查 -------------------------------------------------------
+    // 不需要短链，所以放在依赖短链的那几组之前 —— 它只用首页、注册页与顶栏
+    await registerA11y({ checks, session, base })
+
     await registerDetailPage({
       checks,
       session,

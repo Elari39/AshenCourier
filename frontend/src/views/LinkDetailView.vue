@@ -18,6 +18,8 @@ import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Input from '@/components/ui/Input.vue'
+import PageHeader from '@/components/ui/PageHeader.vue'
+import Section from '@/components/ui/Section.vue'
 import SegmentedControl from '@/components/ui/SegmentedControl.vue'
 import Select from '@/components/ui/Select.vue'
 import Spinner from '@/components/ui/Spinner.vue'
@@ -481,18 +483,18 @@ onUnmounted(() => {
 
       <template v-else-if="link">
         <!-- 页头 -->
-        <div class="flex flex-wrap items-start justify-between gap-6">
-          <div class="min-w-0">
-            <p class="eyebrow">Link detail</p>
-            <h1 class="display-lg mt-3 break-anywhere font-mono text-[32px] md:text-[40px]">
-              /{{ link.short_code }}
-            </h1>
-            <p v-if="link.title" class="mt-2 text-[16px] text-body">{{ link.title }}</p>
-            <p v-if="link.tags?.length" class="mt-2 flex flex-wrap gap-1.5">
+        <PageHeader
+          eyebrow="Link detail"
+          :title="`/${link.short_code}`"
+          title-class="font-mono text-[32px] md:text-[40px]"
+        >
+          <div class="space-y-2.5">
+            <p v-if="link.title" class="text-[16px] text-body">{{ link.title }}</p>
+            <p v-if="link.tags?.length" class="flex flex-wrap gap-1.5">
               <span v-for="tag in link.tags" :key="tag" class="badge badge-quiet">#{{ tag }}</span>
             </p>
-            <p class="mt-3 break-anywhere font-mono text-[13px] text-muted">{{ link.target_url }}</p>
-            <div class="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px] text-muted">
+            <p class="break-anywhere font-mono text-[13px]">{{ link.target_url }}</p>
+            <div class="flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px]">
               <span>{{ describeStatus(link.status).label }}</span>
               <span>{{ describeExpiry(link.expires_at) }}</span>
               <span>创建于 {{ formatDateTime(link.created_at) }}</span>
@@ -501,15 +503,15 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="flex flex-wrap items-center gap-2">
+          <template #actions>
             <Button variant="secondary" @click="copyShortURL">{{ copied ? '已复制' : '复制短链' }}</Button>
             <Button variant="secondary" :href="link.short_url">打开</Button>
             <Button variant="secondary" @click="editOpen = !editOpen">
               {{ editOpen ? '取消编辑' : '编辑' }}
             </Button>
             <Button variant="danger" :loading="deleting" @click="handleDelete">删除</Button>
-          </div>
-        </div>
+          </template>
+        </PageHeader>
 
         <!-- 二维码：扫码打开（深墨前景 + 暖奶油底，对比度 ≈19:1） -->
         <Card class="mt-8 p-6 md:p-8">
@@ -611,33 +613,29 @@ onUnmounted(() => {
         </div>
 
         <!-- 趋势图 -->
-        <Card class="mt-6 p-6 md:p-8">
-          <div class="flex flex-wrap items-center justify-between gap-4">
-            <p class="eyebrow">Trend</p>
+        <Section eyebrow="Trend">
+          <template #actions>
             <SegmentedControl v-model="statsDays" :options="dayOptions" label="统计时间窗口" />
-          </div>
+          </template>
 
-          <div class="mt-2">
-            <Spinner v-if="loadingStats" :size="16">正在更新…</Spinner>
-            <template v-else-if="stats">
-              <TrendChart :points="stats.daily" />
-              <p v-if="peakDay.clicks > 0" class="mt-3 text-[13px] text-muted">
-                峰值出现在 {{ peakDay.date }}，共 {{ formatNumber(peakDay.clicks) }} 次点击。
-              </p>
-            </template>
-          </div>
-        </Card>
+          <Spinner v-if="loadingStats" :size="16">正在更新…</Spinner>
+          <template v-else-if="stats">
+            <TrendChart :points="stats.daily" />
+            <p v-if="peakDay.clicks > 0" class="mt-3 text-[13px] text-muted">
+              峰值出现在 {{ peakDay.date }}，共 {{ formatNumber(peakDay.clicks) }} 次点击。
+            </p>
+          </template>
+        </Section>
 
         <!-- 分布（同一奶油卡片内并排，维度少不需要拆卡） -->
-        <Card class="mt-6 p-6 md:p-8">
-          <p class="eyebrow">Distribution</p>
+        <Section eyebrow="Distribution">
           <!--
             国家这一维只在部署了 GeoIP（且这段时间内确实解析出过国家）时才出现，
             于是栅格列数要跟着变：xl 下 4 列还是 3 列。
             不改默认的 md:grid-cols-3，是为了让「没开 GeoIP」的部署版式与改动前逐字一致。
           -->
           <div
-            class="mt-6 grid gap-10 md:grid-cols-3"
+            class="grid gap-10 md:grid-cols-3"
             :class="countryItems.length > 0 ? 'xl:grid-cols-4' : ''"
           >
             <DistributionList
@@ -653,21 +651,18 @@ onUnmounted(() => {
               :items="countryItems"
             />
           </div>
-        </Card>
+        </Section>
 
         <!-- 点击明细：与统计同窗口，时间倒序，keyset 分页 -->
-        <Card class="mt-6 p-6 md:p-8">
-          <div class="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <p class="eyebrow">Recent clicks</p>
-              <p class="mt-2 text-[13px] text-muted">
-                最近 {{ stats?.days ?? statsDays }} 天，时间倒序；IP 只显示到网段（IPv4 /24、IPv6 /64）。
-              </p>
-            </div>
+        <Section eyebrow="Recent clicks">
+          <template #description>
+            最近 {{ stats?.days ?? statsDays }} 天，时间倒序；IP 只显示到网段（IPv4 /24、IPv6 /64）。
+          </template>
+          <template #actions>
             <span v-if="clicks.length" class="text-[13px] text-muted">
               已加载 {{ formatNumber(clicks.length) }} 条
             </span>
-          </div>
+          </template>
 
           <Spinner v-if="loadingClicks && clicks.length === 0" :size="16" class="mt-6">
             正在加载…
@@ -747,7 +742,7 @@ onUnmounted(() => {
               <span v-else class="text-[13px] text-muted">已经到底了。</span>
             </div>
           </template>
-        </Card>
+        </Section>
 
         <p class="mt-6 text-[13px] text-muted">
           数字口径：总点击 = 数据库基线 + 待同步增量（worker 每 2 秒回刷）；分布与趋势基于点击明细表。

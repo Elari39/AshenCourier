@@ -17,8 +17,10 @@ import { nextTick, ref, useId, watch } from 'vue'
 
 import Button from './Button.vue'
 import { useConfirm } from '@/composables/useConfirm'
+import { useScrollLock } from '@/composables/useScrollLock'
 
 const { pending, settle } = useConfirm()
+const { lock, unlock } = useScrollLock()
 
 const titleId = useId()
 const messageId = useId()
@@ -34,8 +36,6 @@ const FOCUSABLE =
 
 /** 打开前的焦点位置，关闭后还给它。 */
 let returnFocusTo: HTMLElement | null = null
-/** 打开前的 body overflow，关掉时原样写回（可能是空串）。 */
-let previousOverflow = ''
 
 function focusCancel(): void {
   const el = cancelRef.value?.$el as HTMLElement | undefined
@@ -86,9 +86,10 @@ watch(pending, async (now, before) => {
     // capture：确认框开着的时候，Esc 必须先归它处理
     document.addEventListener('keydown', onKeydown, true)
 
-    // 滚动锁：遮罩盖住了页面，但滚轮照样会滚底下那一层
-    previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
+    // 滚动锁：遮罩盖住了页面，但滚轮照样会滚底下那一层。
+    // 走共享的计数锁，而不是在这里自己存一份 overflow —— 移动端菜单也会锁，
+    // 各自存一份的话，先解锁的那个会把另一个的锁一起放掉。
+    lock()
 
     await nextTick()
     focusCancel()
@@ -97,7 +98,7 @@ watch(pending, async (now, before) => {
 
   if (!now && before) {
     document.removeEventListener('keydown', onKeydown, true)
-    document.body.style.overflow = previousOverflow
+    unlock()
 
     const target = returnFocusTo
     returnFocusTo = null

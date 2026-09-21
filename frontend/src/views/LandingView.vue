@@ -57,7 +57,7 @@ const features = [
       <!-- 左：衬线大标题 + 创建表单 -->
       <div>
         <span class="badge badge-coral">Short Link</span>
-        <h1 class="display-xl mt-6">把长链接，<br />收成一条短链。</h1>
+        <h1 class="display-xl mt-6" tabindex="-1">把长链接，<br />收成一条短链。</h1>
         <p class="mt-6 max-w-lg text-[16px] leading-[1.55] text-body">
           粘贴任意 http/https 链接，立刻拿到短链。无需注册；登录后可集中管理所有链接，
           并查看按天趋势、来源与设备分布。

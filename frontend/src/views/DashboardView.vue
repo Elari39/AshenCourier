@@ -18,6 +18,7 @@ import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Input from '@/components/ui/Input.vue'
+import PageHeader from '@/components/ui/PageHeader.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useConfirm } from '@/composables/useConfirm'
@@ -192,13 +193,11 @@ onUnmounted(() => {
   <div class="bg-canvas py-12 md:py-16">
     <div class="container-page">
       <!-- 页头 -->
-      <div class="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p class="eyebrow">Dashboard</p>
-          <h1 class="display-lg mt-3">我的链接</h1>
-        </div>
-        <p class="text-[13px] text-muted">共加载 {{ totalLinks }} 条</p>
-      </div>
+      <PageHeader eyebrow="Dashboard" title="我的链接">
+        <template #actions>
+          <p class="text-[13px] text-muted">共加载 {{ totalLinks }} 条</p>
+        </template>
+      </PageHeader>
 
       <!-- 创建区（奶油卡片） -->
       <Card class="mt-8 p-6 md:p-8">

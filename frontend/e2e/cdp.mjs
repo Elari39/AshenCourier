@@ -199,6 +199,16 @@ export async function launchChrome({ port = 9333, windowSize = '1440,1100' } = {
   const session = await connect(target.webSocketDebuggerUrl)
   await session.send('Page.enable')
   await session.send('Runtime.enable')
+  /**
+   * 让无头页面表现得像「窗口真的拿到了焦点」。
+   *
+   * 不加这一句，无头 Chrome 里 `document.hasFocus()` 是 false，`:focus` 这个伪类
+   * 根本不会匹配 —— 而「跳到主要内容」那条链接平时藏在视口外、**聚焦时靠 `:focus`
+   * 移进来**，于是断言会得到「已经 focus() 了，top 却还是 -100」这种看着像
+   * 代码写错、其实是环境没配好的结果（2026-09-21 实际踩到）。
+   * CDP 专门有这个开关：Emulation.setFocusEmulationEnabled。
+   */
+  await session.send('Emulation.setFocusEmulationEnabled', { enabled: true })
 
   return {
     session,

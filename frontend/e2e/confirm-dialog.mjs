@@ -7,11 +7,9 @@
  * 而它们恰恰是「从 window.confirm 换成自绘对话框」最容易丢的东西：
  * 原生确认框的焦点归位与 Esc 是浏览器白送的，换成自己的 div 之后全部得自己实现。
  *
- * ⚠️ 两条工程细节（都踩过）：
- *  ① 点击用 CDP 合成鼠标事件，不用 `element.click()` —— 后者**不移动焦点**，
- *     而「关闭后焦点还给触发元素」这条断言的前提，就是焦点真的到过那个按钮。
- *  ② 定位前先 `scrollIntoView({behavior:'instant'})`：全局 CSS 里 scroll-behavior
- *     是 smooth，平滑滚动途中量到的矩形是错的（会点到别的元素上）。
+ * ⚠️ 点击与按键都走 `input.mjs` 那套 CDP 合成输入（为什么不能用 `element.click()` 与
+ *    页面里造的 KeyboardEvent，见那个文件的头注释）—— 这里要断言的「焦点在哪」，
+ *    恰恰是程序化点击不会产生的东西。
  *
  * ⚠️ 本模块**最后一步真的会删掉这条短链**（DELETE 本身就是要验的路径之一），
  *    所以它必须排在 browser-check.mjs 里「零 console 错误」那一条之前、
@@ -19,6 +17,7 @@
  */
 import { sleep } from './cdp.mjs'
 import { assert, assertEqual } from './harness.mjs'
+import { ESCAPE, SHIFT_TAB, TAB, pressKey, realClick } from './input.mjs'
 
 /** 页面里那个「删除」按钮 —— 要排除对话框里的同名按钮。 */
 const PAGE_DELETE = `[...document.querySelectorAll('button')].find(
@@ -42,40 +41,6 @@ const ACTIVE_INFO = `(() => {
     isPageDelete: active === (${PAGE_DELETE}),
   }
 })()`
-
-/** 用 CDP 合成鼠标事件真的点一下（会移动焦点，与真人点击一致）。 */
-async function realClick(session, locateExpr, label, { x, y } = {}) {
-  let point = null
-  if (x === undefined) {
-    point = await session.evaluate(`(() => {
-      const el = (${locateExpr})
-      if (!el) return null
-      // behavior:'instant' 覆盖全局的 scroll-behavior: smooth
-      el.scrollIntoView({ block: 'center', behavior: 'instant' })
-      const rect = el.getBoundingClientRect()
-      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, w: rect.width, h: rect.height }
-    })()`)
-    assert(point && point.w > 0 && point.h > 0, `点不到「${label}」：元素不存在或尺寸为 0`)
-    x = Math.round(point.x)
-    y = Math.round(point.y)
-  }
-
-  const common = { x, y, button: 'left', clickCount: 1 }
-  await session.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...common, button: 'none' })
-  await session.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...common })
-  await session.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...common })
-}
-
-/** 发一次真实的按键（走浏览器同一条输入管线，不是页面里造 KeyboardEvent）。 */
-async function pressKey(session, { key, code, keyCode, modifiers = 0 }) {
-  const base = { key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers }
-  await session.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base })
-  await session.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
-}
-
-const TAB = { key: 'Tab', code: 'Tab', keyCode: 9 }
-const SHIFT_TAB = { ...TAB, modifiers: 8 }
-const ESCAPE = { key: 'Escape', code: 'Escape', keyCode: 27 }
 
 /** 等某个 toast 消失。 */
 async function waitForToastGone(session, { timeoutMs = 8000 } = {}) {

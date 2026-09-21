@@ -13,6 +13,7 @@ import { ApiError } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import Input from '@/components/ui/Input.vue'
+import PageHeader from '@/components/ui/PageHeader.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useToast } from '@/composables/useToast'
 
@@ -65,11 +66,9 @@ async function submit(): Promise<void> {
   <div class="bg-canvas py-16 md:py-24">
     <div class="container-page">
       <div class="mx-auto w-full max-w-md">
-        <p class="eyebrow text-center">Welcome back</p>
-        <h1 class="display-lg mt-4 text-center">登录</h1>
-        <p class="mt-4 text-center text-[15px] text-muted">
+        <PageHeader eyebrow="Welcome back" title="登录" align="center">
           登录后即可集中管理短链并查看点击统计。
-        </p>
+        </PageHeader>
 
         <Card class="mt-8 p-6 md:p-8">
           <form class="space-y-5" novalidate @submit.prevent="submit">
