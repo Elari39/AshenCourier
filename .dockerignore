@@ -35,6 +35,12 @@ PLAN.md
 docker-compose.yml
 docker-compose.dev.yml
 
+# README 用的界面截图：与构建无关的纯静态图片（7 张，704KB）。
+# 同一条理由 —— 别让跟构建无关的大文件进上下文。实测（scratch 探针）：
+# 当前上下文 841.71kB；往 docs/ 塞 1MiB 后 COPY 层仍命中缓存（上下文摘要未变），
+# 而同样 1MiB 放进 deploy/ 会让上下文涨到 1.06MB 并重建该层。
+docs
+
 *.log
 *.exe
 *.test

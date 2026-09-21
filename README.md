@@ -33,8 +33,57 @@
   明文只在创建响应里出现一次）。登录后可以用它把链接**认领**到自己账号下。
 - **限流降级而不是熔断。** Redis 挂了就全量放行并累计降级次数，绝不因为限流组件故障把整站打成 5xx。
 
+## 界面
+
+下面这些截图取自 `docker compose up -d --build` 起来的**真实实例**（不是设计稿）：
+数据经 API 播种，页面由无头 Chrome 经 CDP 采集 —— 采集脚本用的就是
+`frontend/e2e/` 里那套零依赖工具链（Node 内置 `fetch` + `WebSocket` 直连 CDP）。
+
+### 落地页：粘贴即得短链
+
+<img src="docs/screenshots/landing.png" alt="落地页" width="880">
+
+### 创建成功：一次性管理密钥默认打码
+
+匿名创建会返回一次性管理密钥，**默认打码**，需要时手动点「显示」。
+早期版本在这里有个真实缺陷：结果卡被复用后密钥会默认明文摊在屏幕上
+（原因与修法见「验收记录」B5）。
+
+<img src="docs/screenshots/create-result.png" alt="创建成功的结果卡" width="880">
+
+### 看板：标签筛选、搜索、窄屏换卡片列表
+
+<img src="docs/screenshots/dashboard.png" alt="链接看板" width="880">
+
+### 链接详情：二维码、按天趋势、来源 / 设备 / 浏览器分布
+
+IP 只显示到网段（IPv4 `/24`、IPv6 `/64`），原始地址不出库。
+趋势图是真实数据 —— 采集时所有点击都发生在当天，所以折线是单点跃升，不是示意曲线。
+
+<img src="docs/screenshots/link-detail.png" alt="链接详情与点击明细" width="760">
+
+### 确认框：自绘 `alertdialog`，不是 `window.confirm`
+
+焦点陷阱、`aria-modal`、Esc 关闭、标题与正文都通过 `aria-labelledby` / `aria-describedby` 关联。
+
+<img src="docs/screenshots/confirm-dialog.png" alt="删除确认框" width="820">
+
+### 移动端 390px
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/mobile-dashboard.png" alt="移动端看板" width="260"></td>
+<td width="50%"><img src="docs/screenshots/mobile-menu.png" alt="移动端全屏菜单" width="260"></td>
+</tr>
+<tr>
+<td align="center"><sub>看板：表格换成卡片列表</sub></td>
+<td align="center"><sub>菜单：整屏铺满，不再留边</sub></td>
+</tr>
+</table>
+
 ## 目录
 
+- [界面](#界面)
 - [快速开始](#快速开始)
 - [技术栈](#技术栈)
 - [架构](#架构)
@@ -898,7 +947,8 @@ MVP 有意不做的部分：
 
 ## 验收记录
 
-以下都是实测结果，不是设计意图。基线快照：**2026-09-18**（⑫ 起为 2026-09-19 / ⑲ 起为 2026-09-20 的增量），Windows 本机 + Docker Desktop
+以下都是实测结果，不是设计意图。基线快照：**2026-09-18**（⑫ 起为 2026-09-19 / ⑲ 起为 2026-09-20 /
+㉔ 起为 2026-09-21 的增量），Windows 本机 + Docker Desktop
 （Go 1.27.1 / Node 24.19.0 / pnpm 11.15.1）。
 
 「在哪跑过」一列区分**本机实测**与 **CI 实测**——两者会得出同一结论，但覆盖面不同：
@@ -946,6 +996,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **前端 ㉙**：版式收敛 + 可访问性（B4） | 三件事，都不是「多写几个组件」，而是把散在视图里的版式与浏览器默认行为收回一处。① **版式件**：新增 `PageHeader`（eyebrow + 标题 + 三种字号 + `#actions` 插槽，详情页的短码用 `titleClass` 走等宽）与 `Section`（eyebrow 落地成 `<h2>` 而不是 `div`，页面大纲连得上），把 Dashboard / LinkDetail / Login / Register / NotFound 五个视图里各自手写的标题块与分区标题迁过去。② **跳过导航**：`.skip-link` 平时 `top:-100px` 藏在视口上方、靠 `:focus` 移进视口 —— 用 `display:none` 会让它**无法聚焦**，等于把键盘用户的第一个落点也删了。③ **焦点与当前位置**：客户端路由切换后把焦点送到新页面的 `h1`（`tabindex="-1"` + `preventScroll`），读屏才会念出「这是哪一页」；判定用 `route.path` 而非 `route.fullPath` —— 只改 hash（比如点跳过链接）绝不该抢走焦点。导航的当前项用 `aria-current="page"`，且**只打给一个链接**（详情页算在「我的链接」这一组里，不再出现两处同时高亮）。④ **顺带修掉一个真缺陷**：移动端菜单面板原本写的是 `inset-16 top-16`，等于在 390px 的视口上四周各留 64px（不是「铺满」而是「悬空一块」），改成 `inset-x-0 top-16 bottom-0`；滚动锁也从两处各存一个 `previousOverflow` 改成 `useScrollLock` 的计数器式 `lock()/unlock()`（对话框与移动菜单叠在一起时，后者解锁不该把前者的锁也解掉），并且**恢复的是原始内联值而不是硬编码的 `visible`**。**容器实测**：e2e 从 30 项涨到 **37 / 37**（新增 7 项：单 h1 且可聚焦 / 跳过链接平时在视口外、聚焦后进到 `top=12` / 激活后焦点落到 `<main>` / `aria-current` 只打一处 / 路由切换后焦点落到新 h1 / 390px 下面板 0…390 × 64…844 真的铺满 / Esc 关菜单并把焦点还给汉堡），冒烟 **28 / 28**；改动源码后重建镜像，容器 `.Image` == 镜像 tag `.Id` == 构建日志 manifest 摘要（三者一致） | 本机（Docker + 无头 Chrome） |
 | **前端 ㉚**：视图改用组件层 + 图表 token 化（B5） | 这一轮的主线是**消双轨**：同一个设计 token 之前有两套写法，一套是 `ui/` 组件、另一套是视图里直接写 CSS 类。① 视图侧：`LandingView` 的裸 `card-dark`/`card-coral`/`card-feature`/`badge badge-coral`/`btn btn-secondary*`、`LinkTable` 与 `LinkDetailView` 的裸 `btn`/`card-cream`/`badge` 全部收回 `Card` / `Button` / `Badge`。`Card` 为此开了一个 `tag` 逃生口（列表项得渲染成 `<li>` 才语义正确），只换标签不换外观。② 补三个基础件，都是「同一段东西抄了三遍」：`BrandMark`（4 辐星的路径数据在顶栏 / footer / 空态各一份，颜色还各写一个内联 hex —— 现在颜色走 `currentColor`，由调用方的 `text-ink` / `text-on-dark` / `text-primary` 决定，组件自己一个色值都不碰）、`CodeWindow`（`.code-window-inner` 那层深色内嵌面板在三个地方各写一遍，带 `label` 时才渲染外框与三个圆点）、`CopyButton`（「写剪贴板 → 成功/失败提示 + 文案回闪 1.8 秒」这段**行为**原先在三个组件里各写一遍，其中 `LinkTable` 的桌面与窄屏是同一份逻辑写了两遍）。③ 顺带修掉一个静默缺陷：`LinkTable` 原先整张表共用一份 `useCopy()`，`copied` 也就是共享的 —— **点任意一行的「复制」，所有行的按钮文案都会变成「已复制」**；`CopyButton` 每个实例自带状态，这个问题由构造方式消灭。④ 图表 token 化：`TrendChart` 的 `#cc785c` / `#e6dfd8` / `#8e8b82` 换成 `.chart-line` / `.chart-guide` / `.chart-tick` / `.chart-stop`（SVG 的 `stroke`/`fill`/`stop-color` 写在**呈现属性**里引不到 `var()`，所以必须落成组件层的具名类，这同时也让「换主色只改 `@theme` 一处」成立）；`id="trend-fill"` 是**文档级**的全局 id，两张趋势图会互相顶掉，改成 `useId()`。⑤ 修掉 `ResultCard` 的密钥泄漏：`revealKey` 是组件内部状态，而结果卡是**被复用**的（落地页与列表页都只把 `latest` 换成新 payload，同一位置的实例不重建），于是第一次点过「显示」之后，下一条短链的一次性管理密钥会**默认明文**摊在屏幕上 —— 与「默认打码」的注释意图正相反且毫无报错。抽出 `useMaskedSecret`（默认收起 + 换来源自动收起）并补 5 个单测。**为什么没走 e2e**：那一组至少要再创建 2 条短链，而创建接口是 10 次/分钟/IP 的硬配额、`cmd/smoke` 自己要用掉约 7 次，余量本来只有 2 —— 为验一个纯状态规则吃掉余量，换来的是 CI 一旦时序偏移就偶发 429，不划算。**遗留**：`DESIGN.md` 的 never-inline-hex 现在只剩一处例外 —— 详情页二维码的前景/底色（`#141413` / `#faf9f5`），那是交给 `qrcode` 库的画布渲染器用的，读不到 CSS 变量，只能给字面量，代码里已注明。**验收**：eslint / vue-tsc / build 均 0，vitest **56**（+5），e2e **39 / 39**（+2：折线与渐变解析成 `rgb(204, 120, 92)` 而**不是**回落的黑、渐变引用命中唯一节点且 id 不是写死的常量），冒烟 **28 / 28**；镜像内容摘要（单平台 manifest）`566c45b9`，容器 `.Image` == 镜像 tag `.Id` == `992007d7`。⚠️ 两条工程细节：**e2e 的点击与按键用 CDP 合成事件**，而页面里 `element.click()` 不移动焦点、造的 `KeyboardEvent` 不触发浏览器默认行为；**变异验证 4 条全部只红对应的那一条**（`useMaskedSecret` 去掉 watch / 默认值翻成 true 走 vitest；`.chart-stop` 换成写死的黑、渐变 id 退回常量走 e2e，各自只红 1 项）| 本机（Docker + 无头 Chrome） |
 | **前端 ㉛**：零引用清仓 + 把「清一次」变成 CI 守卫（B6） | ① **清仓清单**：组件 31 个**全部有引用**；`main.css` 具名类 52 个里 **2 个零引用**（`.title-sm` 与 `.caption` —— DESIGN.md 的字阶表里有这两档，但本仓库从没用过）；npm 依赖无孤儿。另有 11 个「零引用**类型导出**」逐个核对后**全部不是死码**：`RequestTicket` / `RequestGuard` 是 `createRequestGuard()` 的返回类型，`ConfirmOptions` / `PendingConfirm` / `ConfirmVariant` 被 `useConfirm` 的签名用着，`ToastKind` 被 `Toast` 与 `Record<ToastKind, number>` 用着，`LinkStatus` 与四个 bucket 接口是 `Link` / `Stats` 的字段类型 —— 删掉 `export` 只会让调用方再也引用不到这些字段类型，属倒退，故保留。② **删两个类省 161 字节**（对照构建：HEAD 源码 31491 → 改后 31330，逐字节可控）。③ 顺带查出**两个反直觉事实**，都写进了 `main.css` 的行内注释：**(a)** Tailwind v4 会把**未引用**的 `@theme` 变量从产物里剪掉，所以「标着却没人用的 token」留着成本是 **0**，删它反而是纯改动；**(b)** 但它判断「一个 token 有没有被用到」靠的是**扫源码文本**，于是**在 JS/TS 的注释里写出 token 全名就等于把它钉进 `:root`** —— 本轮我自己在新建的守卫脚本头部为了举例写了三个 token 名，产物就凭空多出 **68 字节**。这条是**用「把 `frontend/scripts/` 整个移出 Vite 根再构建」隔离出来的**：移出后恰好那三个变量从产物消失、移回来又复现，完全可逆（`--radius-sm` 与 `--color-success` 因为在用而始终在场，作为对照）。④ **纠正两条被旧产物误导的结论**：本机磁盘上的 `frontend/dist/` 是**陈旧构建**（27615 字节），而同一份源码在本机重建是 31491 字节 —— 差 3.8KB，说明那份 dist 早于好几轮改动，拿它做的测量都不可信；以后测产物一律先重建。⑤ **把清扫变成守卫**：新增 `frontend/scripts/check-zero-ref.mjs`（零 npm 依赖）+ `pnpm audit:refs` + CI `frontend` job 里的一步，查三类：零引用组件、零引用的 `main.css` 具名类、「未引用的 token 被非 CSS 源码提到」；**刻意不判**未引用 token 本身（零成本）与类型导出（不是死码）。判定口径也写清：类的「使用」只认非 CSS 文件**且不含 `scripts/`**（否则守卫会被自己的注释糊住），token 的「被用到」则要**连 `scripts/` 一起看**（Tailwind 也扫它）。⑥ **变异验证 5 条，只红对应的那一条**：注入零引用类 / 新增零引用组件 / 断开 `ToastHost` 对 `ToastItem` 的**相对导入**（这条专门钉住历史盲区 —— 第一版审计只匹配 `ui/ToastItem.vue` 字面量，于是把还在用的 `ToastItem` 误报成零引用）/ 在 `.ts` 里提及未引用的 token / 一条负对照（同样加一个类但模板里用上 → 必须仍然绿）。**M5 第一次跑是红的，原因是守卫自己真有缺陷**：扫描集漏了 `scripts/` —— 恰恰是泄漏发生的那一个目录；补上后转红。**验收**：eslint / vue-tsc / audit:refs / build 均 0，vitest **56**；镜像重建后三方一致（容器 `.Image` == tag `.Id` == 构建 manifest list `f2d4b9e9`），e2e **39 / 39**、冒烟 **28 / 28**；**从容器里读那份被服务的 CSS** 确认：31240 字节、六个未引用 token 一个都不在、`.title-sm` 与 `.caption` 已消失。⚠️ 容器是 31240、本机是 31262 —— 差的 22 字节来自 `.dockerignore` 排除了 `frontend/e2e`（容器扫不到它），本地测产物时要记得这个差。⚠️ 另记三条本机工程坑：**(a)** 变异脚本「写-还原」的自证这次**撒过谎**（脚本自己的 sha 比对报告还原成功，文件里其实还留着变异内容），所以现在除 sha 外还**独立读文件找残留标记** —— 正是这一步抓到了残留的探针文件；**(b)** 变异脚本若把「探针文件」算进基线，`restore()` 会在每个变异前后都把它**写回来**，越跑越脏（已改成探针一律按「基线不存在」处理）；**(c)** 本机 Git Bash 的 `rm` 是个 shim，内部调 `dirname` 而 PATH 里没带 coreutils —— 它**报错却返回 0、文件根本没删**，删除后必须独立读回复核。 | 本机（Docker + 无头 Chrome）+ CI `frontend` |
+| **文档 ㉜**：界面截图与 README（B6 之后） | 7 张截图全部采自**运行中的实例**（Docker 全栈，frontend 镜像是当前源码的构建），落在 `docs/screenshots/`：`landing.png` 1440×1978 / `create-result.png` 1440×652（裁 hero 块）/ `dashboard.png` 1440×1595 / `link-detail.png` 1440×3117 / `confirm-dialog.png` 1440×900 / `mobile-dashboard.png` 390×2174 / `mobile-menu.png` 390×470，合计 **704KB**。采集用无头 Chrome + CDP（**零 npm 依赖**，只复用 `frontend/e2e/cdp.mjs` 的 `launchChrome`，另补 `Page.captureScreenshot` / `Emulation.setDeviceMetricsOverride` / `setScrollbarsHidden` 与 `Input.dispatch*`）。**图里的数据是真的**：演示账号建 4 条带标签短链、真打 30 次跳转，趋势图与明细就是这些点击，不是 mock 数字。两处刻意为之：`create-result` 必须在**未登录态**采（登录态后端不回 `manage_key`，结果卡根本不渲染）；`confirm-dialog` 只按 Esc、不点确认（不真删演示链接）。顺手复核了 B5 那两处修复在真实页面上的样子：一次性管理密钥默认打码（点「显示」才明文）、明细 IP 只到 `/24` 网段；`mobile-menu` 用的是 B4 修好的面板（390px 视口下 0…390 × 64…844 铺满，不是悬空一块）。另加 `.dockerignore` 的 `docs` 一行，并用 scratch 探针**实测**排除生效：当前构建上下文 **841.71kB**（`docs/screenshots` 自己就有 704KB，可见它确实不在其中）；往 `docs/` 塞 1MiB 后 `COPY` 层**仍命中缓存**（上下文摘要未变），而同样 1MiB 放进 `deploy/` 会让上下文涨到 **1.06MB** 且该层重建 —— 正反对照。**门禁**：eslint / vue-tsc / audit:refs / build 全 0，vitest **56**，e2e **39 / 39**，冒烟 **28 / 28**；重建 frontend 镜像后，容器里被服务的 **25** 个资源与重建前**逐字节一致**（三方一致：容器 `.Image` == tag `.Id` == manifest list `d5a598fb`） | 本机（Docker + 无头 Chrome） |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 
@@ -992,16 +1043,19 @@ PR 只跑 `backend` 与 `frontend` 两个快 job（约 1 分钟），因为 `doc
 这一条影响面不止跳过链接：任何「聚焦后才变样式 / 才进视口」的断言在无头下都会假红，
 而任何「聚焦后不该发生什么」的断言则可能假绿。
 
-最近的实测：[run 35485587539](https://github.com/Elari39/AshenCourier/actions/runs/35485587539)
-三个 job 全绿（`backend` 57s / `frontend` 37s / `smoke` 2m6s）。三个关键证据：`backend` 里
-`internal/store/postgres` 跑了 **1.364s**（未设置 `POSTGRES_TEST_DSN` 时集成测试会整体跳过，
-那时只有零点几秒 —— 所以它是真的连上了 service 容器里的 PG）；`smoke` 里 **`frontend/e2e/` 19/19
-之后紧接 `cmd/smoke` 28/28**（在 runner 自带的 Chrome 上真跑，不靠本机的 `CHROME_BIN` 探测），
-按 step 分组计数 19 + 28 = 47，与日志里的 ✓ 行数相等；`frontend` 的 vitest **31 个用例**全绿。
+最近的实测：[run 35564212221](https://github.com/Elari39/AshenCourier/actions/runs/35564212221)
+—— B0–B6 六批推上 `main` 之后的验证，三个 job 全绿（`backend` 1m1s / `frontend` 38s / `smoke` 1m29s）。
+四个关键证据：`backend` 里 `internal/store/postgres` 跑了 **1.287s**（未设置 `POSTGRES_TEST_DSN` 时
+集成测试会整体跳过，那时只有零点几秒 —— 所以它是真的连上了 service 容器里的 PG）；`smoke` 里
+**`frontend/e2e/` 39/39 之后紧接 `cmd/smoke` 28/28**（在 runner 自带的 Chrome 上真跑，不靠本机的
+`CHROME_BIN` 探测），按 step 分组计数 **39 + 28 = 67**，与日志里那两个 step 的 ✓ 行数相等；
+`frontend` 的 vitest **56 个用例 / 6 个文件**全绿；B6 新增的零引用守卫在 CI 里真跑过 ——
+日志里是 `✓ 没有零引用的组件 / 样式类，也没有未引用的 token 被源码提到`。
 
-（前两次分别是 [run 35484563846](https://github.com/Elari39/AshenCourier/actions/runs/35484563846)
+（再往前依次是 [run 35485587539](https://github.com/Elari39/AshenCourier/actions/runs/35485587539)
+—— 那时 e2e 还是 19/19、vitest 31 个用例；[run 35484563846](https://github.com/Elari39/AshenCourier/actions/runs/35484563846)
 —— N9 `/metrics` 落地的验证；[run 35483953065](https://github.com/Elari39/AshenCourier/actions/runs/35483953065)
-—— N8 二维码端点的验证。这三次都是三个 job 全绿。）
+—— N8 二维码端点的验证。这四次都是三个 job 全绿。）
 
 **CI 自身也实测过「会红」**（不是只看过绿灯）：其中两次是故意造出来的 —— 故意破坏一个文件的
 gofmt → `backend` job 红并列出文件名；故意改错冒烟工具的期望值 → `smoke` job 红、日志里能看到
