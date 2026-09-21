@@ -673,7 +673,7 @@ onUnmounted(() => {
 
           <template v-else>
             <!-- 桌面端：表格 -->
-            <div class="mt-4 hidden overflow-hidden md:block">
+            <div class="mt-4 hidden overflow-x-auto md:block">
               <table class="data-table">
                 <thead>
                   <tr>

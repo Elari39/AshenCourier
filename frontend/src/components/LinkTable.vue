@@ -56,7 +56,7 @@ function statusClass(status: string): string {
 <template>
   <div>
     <!-- ---------- 桌面端：表格 ---------- -->
-    <div class="hidden overflow-hidden md:block">
+    <div class="hidden overflow-x-auto md:block">
       <table class="data-table">
         <thead>
           <tr>

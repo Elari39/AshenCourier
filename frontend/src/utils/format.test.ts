@@ -17,14 +17,12 @@ import {
   describeExpiry,
   describeReferer,
   describeStatus,
-  formatCompact,
   formatDateTime,
   formatDateTimeSeconds,
   formatNumber,
   formatShortDate,
   hostOf,
   isExpired,
-  toISODate,
   truncateMiddle,
 } from '@/utils/format'
 
@@ -96,24 +94,10 @@ describe('formatShortDate', () => {
   })
 })
 
-describe('formatNumber / formatCompact', () => {
+describe('formatNumber', () => {
   it('千分位', () => {
     expect(formatNumber(1234567)).toBe('1,234,567')
     expect(formatNumber(0)).toBe('0')
-  })
-
-  it('压缩的阈值是 <1000 / <1e6 / 其余', () => {
-    expect(formatCompact(0)).toBe('0')
-    expect(formatCompact(999)).toBe('999')
-    expect(formatCompact(1000)).toBe('1.0k')
-    expect(formatCompact(1284)).toBe('1.3k')
-    expect(formatCompact(999_999)).toBe('1000.0k')
-    expect(formatCompact(1_000_000)).toBe('1.0M')
-    expect(formatCompact(1_234_567)).toBe('1.2M')
-  })
-
-  it('负数按绝对值分档（不写成 -0.5k 之外的怪样子）', () => {
-    expect(formatCompact(-1500)).toBe('-1.5k')
   })
 })
 
@@ -211,12 +195,5 @@ describe('describeReferer / describeDevice / describeClient', () => {
     expect(describeClient('unknown', 'unknown')).toBe('未知')
     expect(describeClient(undefined, undefined)).toBe('未知')
     expect(describeClient('', '')).toBe('未知')
-  })
-})
-
-describe('toISODate', () => {
-  it('按本地时区补零成 YYYY-MM-DD', () => {
-    expect(toISODate(new Date(2026, 8, 8))).toBe('2026-09-08')
-    expect(toISODate(new Date(2026, 11, 31))).toBe('2026-12-31')
   })
 })

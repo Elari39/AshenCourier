@@ -64,13 +64,6 @@ export function formatNumber(value: number): string {
   return new Intl.NumberFormat('zh-CN').format(value)
 }
 
-/** 大数压缩：1284 → 1.3k，1234567 → 1.2M。 */
-export function formatCompact(value: number): string {
-  if (Math.abs(value) < 1000) return String(value)
-  if (Math.abs(value) < 1_000_000) return `${(value / 1000).toFixed(1)}k`
-  return `${(value / 1_000_000).toFixed(1)}M`
-}
-
 /** 从 URL 里取出主机名，用于列表里紧凑展示目标地址。 */
 export function hostOf(url: string): string {
   try {
@@ -153,12 +146,4 @@ export function describeDevice(device: string): string {
 export function describeClient(browser?: string, os?: string): string {
   const parts = [browser, os].filter((part): part is string => Boolean(part) && part !== 'unknown')
   return parts.length > 0 ? parts.join(' / ') : '未知'
-}
-
-/** 把日期字符串转成本地时区的 `YYYY-MM-DD`（趋势图 x 轴用）。 */
-export function toISODate(date: Date): string {
-  const year = date.getFullYear()
-  const month = `${date.getMonth() + 1}`.padStart(2, '0')
-  const day = `${date.getDate()}`.padStart(2, '0')
-  return `${year}-${month}-${day}`
 }

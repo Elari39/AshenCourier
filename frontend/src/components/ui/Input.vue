@@ -26,8 +26,6 @@ const props = withDefaults(
     hint?: string
     disabled?: boolean
     autocomplete?: string
-    /** 前置等宽前缀文案，例如 "ashen.cc/"。 */
-    prefix?: string
     maxlength?: number
   }>(),
   { type: 'text' },
@@ -57,28 +55,20 @@ const inputAttrs = computed(() => {
   <div v-bind="wrapperAttrs">
     <label v-if="label" :for="id" class="field-label">{{ label }}</label>
 
-    <div class="relative">
-      <span
-        v-if="prefix"
-        class="pointer-events-none absolute inset-y-0 left-3.5 flex items-center font-mono text-[13px] text-muted"
-      >
-        {{ prefix }}
-      </span>
-      <input
-        :id="id"
-        v-model="model"
-        v-bind="inputAttrs"
-        :type="type"
-        :placeholder="placeholder"
-        :disabled="disabled"
-        :autocomplete="autocomplete"
-        :maxlength="maxlength"
-        :aria-invalid="error ? 'true' : undefined"
-        :aria-describedby="hasDesc ? descId : undefined"
-        class="text-input"
-        :class="[prefix ? 'pl-16' : '', error ? 'border-error' : '']"
-      />
-    </div>
+    <input
+      :id="id"
+      v-model="model"
+      v-bind="inputAttrs"
+      :type="type"
+      :placeholder="placeholder"
+      :disabled="disabled"
+      :autocomplete="autocomplete"
+      :maxlength="maxlength"
+      :aria-invalid="error ? 'true' : undefined"
+      :aria-describedby="hasDesc ? descId : undefined"
+      class="text-input"
+      :class="error ? 'border-error' : ''"
+    />
 
     <p v-if="error" :id="descId" class="mt-1.5 text-[13px] text-error">{{ error }}</p>
     <p v-else-if="hint" :id="descId" class="mt-1.5 text-[13px] text-muted">{{ hint }}</p>

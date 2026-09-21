@@ -3,15 +3,10 @@
  * 空态。MVP 也不允许出现「白屏 + 无反馈」，
  * 所以每个列表/图表都必须在无数据时渲染这个组件。
  */
-withDefaults(
-  defineProps<{
-    title: string
-    description?: string
-    /** 深色面板上的空态需要反相的文字色。 */
-    onDark?: boolean
-  }>(),
-  { onDark: false },
-)
+defineProps<{
+  title: string
+  description?: string
+}>()
 </script>
 
 <template>
@@ -26,8 +21,8 @@ withDefaults(
       />
     </svg>
 
-    <p class="title-md" :class="onDark ? 'text-on-dark' : ''">{{ title }}</p>
-    <p v-if="description" class="mt-2 max-w-sm text-[14px]" :class="onDark ? 'text-on-dark-soft' : 'text-muted'">
+    <p class="title-md">{{ title }}</p>
+    <p v-if="description" class="mt-2 max-w-sm text-[14px] text-muted">
       {{ description }}
     </p>
 

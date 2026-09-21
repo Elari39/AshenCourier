@@ -75,6 +75,9 @@
  * ==========================================================================*/
 @layer base {
   html {
+    /* 与 index.html 的 <meta name="color-scheme"> 同义：本页只有浅色形态。
+       不给它的话，Chrome 的「自动深色」会给表单控件套上深色皮肤、并可能反相奶油底。 */
+    color-scheme: light;
     -webkit-text-size-adjust: 100%;
     scroll-behavior: smooth;
   }
@@ -507,7 +510,10 @@
     scroll-behavior: auto;
   }
 
-  .animate-breathe {
+  /* Spinner 也要停：它虽然只是转圈，但持续动效对前庭敏感的用户同样不友好。
+     这段在 @layer 之外，优先级高于 @layer utilities 里的 .animate-spin。 */
+  .animate-breathe,
+  .animate-spin {
     animation: none;
   }
 }
