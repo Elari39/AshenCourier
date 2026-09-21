@@ -44,12 +44,18 @@ async function copyShortURL(link: Link): Promise<void> {
   }
 }
 
-/** 状态徽章的语气 → 样式类。 */
-function statusClass(status: string): string {
+/**
+ * 状态 → 徽章形态。
+ *
+ * 桌面表格与窄屏卡片**共用这一个映射**：原先桌面分支用 statusClass() 拼 class 字符串、
+ * 窄屏分支直接写 <Badge>，同一个语义有两份实现 —— 加一个状态就得想起两处，
+ * 而且「text-error」根本用不上 badge-error 的底色。
+ */
+function statusVariant(status: string): 'pill' | 'quiet' | 'error' {
   const { tone } = describeStatus(status)
-  if (tone === 'muted') return 'badge badge-quiet'
-  if (tone === 'error') return 'badge text-error'
-  return 'badge'
+  if (tone === 'error') return 'error'
+  if (tone === 'muted') return 'quiet'
+  return 'pill'
 }
 </script>
 
@@ -73,7 +79,7 @@ function statusClass(status: string): string {
             <td>
               <RouterLink
                 :to="{ name: 'link-detail', params: { code: link.short_code } }"
-                class="font-mono text-[13px] text-ink underline-offset-4 hover:underline"
+                class="link-quiet font-mono text-[13px] text-ink"
               >
                 /{{ link.short_code }}
               </RouterLink>
@@ -83,7 +89,7 @@ function statusClass(status: string): string {
                   v-for="tag in link.tags"
                   :key="tag"
                   type="button"
-                  class="badge badge-quiet hover:text-ink"
+                  class="badge badge-quiet badge-action"
                   :title="`按标签「${tag}」筛选`"
                   @click="emit('filter-tag', tag)"
                 >
@@ -100,7 +106,9 @@ function statusClass(status: string): string {
               </p>
             </td>
             <td>
-              <span :class="statusClass(link.status)">{{ describeStatus(link.status).label }}</span>
+              <Badge :variant="statusVariant(link.status)">
+                {{ describeStatus(link.status).label }}
+              </Badge>
               <p class="mt-1 text-[12px] text-muted-soft">{{ describeExpiry(link.expires_at) }}</p>
             </td>
             <td class="text-right font-mono text-[13px] text-ink">
@@ -145,7 +153,7 @@ function statusClass(status: string): string {
           >
             /{{ link.short_code }}
           </RouterLink>
-          <Badge :variant="link.status === 'active' ? 'pill' : 'quiet'">
+          <Badge :variant="statusVariant(link.status)">
             {{ describeStatus(link.status).label }}
           </Badge>
         </div>
@@ -156,7 +164,7 @@ function statusClass(status: string): string {
             v-for="tag in link.tags"
             :key="tag"
             type="button"
-            class="badge badge-quiet"
+            class="badge badge-quiet badge-action"
             @click="emit('filter-tag', tag)"
           >
             #{{ tag }}

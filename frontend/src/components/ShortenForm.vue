@@ -5,7 +5,7 @@
  * 设计意图：默认只露一个输入框（「粘贴长链接」是唯一的心智负担），
  * 自定义短码 / 标题 / 有效期收在「高级选项」里，需要的人再展开。
  */
-import { computed, ref } from 'vue'
+import { computed, ref, useId } from 'vue'
 
 import { ApiError, linksApi } from '@/api/client'
 import type { Link } from '@/api/types'
@@ -27,6 +27,9 @@ const tags = ref('')
 const expiresAt = ref('')
 const password = ref('')
 const advancedOpen = ref(false)
+
+/** 高级选项面板的 id：只为了给展开开关的 aria-controls 一个目标。 */
+const advancedId = useId()
 
 const submitting = ref(false)
 const formError = ref('')
@@ -130,8 +133,9 @@ async function submit(): Promise<void> {
     <div class="mt-3 flex items-center gap-3">
       <button
         type="button"
-        class="text-[13px] text-muted underline-offset-4 hover:text-ink hover:underline"
+        class="link-quiet text-[13px] text-muted"
         :aria-expanded="advancedOpen"
+        :aria-controls="advancedOpen ? advancedId : undefined"
         @click="advancedOpen = !advancedOpen"
       >
         {{ advancedOpen ? '收起高级选项' : '高级选项：自定义短码 / 标题 / 标签 / 有效期 / 访问口令' }}
@@ -139,7 +143,7 @@ async function submit(): Promise<void> {
       <span v-if="!isAuthenticated" class="text-[13px] text-muted-soft">匿名创建，无需注册</span>
     </div>
 
-    <div v-if="advancedOpen" class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div v-if="advancedOpen" :id="advancedId" class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <Input
         v-model="customCode"
         label="自定义短码"

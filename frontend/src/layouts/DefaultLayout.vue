@@ -5,9 +5,10 @@
  * 顶栏 / footer 是全站唯二固定出现的区块，其余页面的「奶油 → 奶油卡片 →
  * 深色 mockup → 珊瑚 callout」节奏由各 view 自己安排。
  */
-import { ref, watch } from 'vue'
+import { ref, useId, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 
+import IconButton from '@/components/ui/IconButton.vue'
 import ToastHost from '@/components/ui/ToastHost.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useToast } from '@/composables/useToast'
@@ -18,6 +19,8 @@ const { isAuthenticated, displayName, logout } = useAuth()
 const toast = useToast()
 
 const menuOpen = ref(false)
+/** 菜单面板的 id：给汉堡按钮的 aria-controls 一个目标。 */
+const menuId = useId()
 
 // 路由变化时收起移动端菜单，否则点完链接菜单还盖着页面
 watch(
@@ -75,12 +78,13 @@ function handleLogout(): void {
             <RouterLink :to="{ name: 'register' }" class="btn btn-primary">免费开始</RouterLink>
           </template>
 
-          <!-- 移动端汉堡 -->
-          <button
-            type="button"
-            class="btn-icon md:hidden"
+          <!-- 移动端汉堡。label 随开合状态变：读屏听到的是「关闭菜单」而不是
+               「打开菜单」—— 同一个按钮在两种状态下的下一步动作是相反的。 -->
+          <IconButton
+            class="md:hidden"
+            :label="menuOpen ? '关闭菜单' : '打开菜单'"
             :aria-expanded="menuOpen"
-            aria-label="打开菜单"
+            :aria-controls="menuId"
             @click="menuOpen = !menuOpen"
           >
             <svg class="h-4 w-4" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -91,13 +95,13 @@ function handleLogout(): void {
                 stroke-linecap="round"
               />
             </svg>
-          </button>
+          </IconButton>
         </div>
       </div>
     </header>
 
     <!-- 移动端菜单：整屏奶油面板 -->
-    <div v-if="menuOpen" class="fixed inset-16 top-16 z-30 bg-canvas md:hidden">
+    <div v-if="menuOpen" :id="menuId" class="fixed inset-16 top-16 z-30 bg-canvas md:hidden">
       <nav class="container-page flex flex-col gap-1 py-6">
         <RouterLink :to="{ name: 'landing' }" class="rounded-md px-3 py-3 text-[16px] text-ink">
           首页

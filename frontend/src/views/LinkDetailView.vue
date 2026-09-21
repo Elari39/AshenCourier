@@ -18,6 +18,8 @@ import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Input from '@/components/ui/Input.vue'
+import SegmentedControl from '@/components/ui/SegmentedControl.vue'
+import Select from '@/components/ui/Select.vue'
 import Spinner from '@/components/ui/Spinner.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useCopy } from '@/composables/useCopy'
@@ -57,6 +59,13 @@ const loadError = ref('')
 const statsDays = ref(30)
 const loadingStats = ref(false)
 
+/** 统计窗口。值是数字 —— 直接喂给接口的 days 参数，label 才带单位。 */
+const dayOptions = [
+  { value: 7, label: '7 天' },
+  { value: 30, label: '30 天' },
+  { value: 90, label: '90 天' },
+]
+
 // 点击明细（keyset 分页：游标为空 = 已到底）
 const clicks = ref<ClickEvent[]>([])
 const clicksCursor = ref('')
@@ -81,6 +90,11 @@ const editTitle = ref('')
 const editTarget = ref('')
 const editTags = ref('')
 const editStatus = ref<'active' | 'disabled'>('active')
+/** 只暴露两种可编辑状态：status=3（已删除）是不可逆的，编辑面板里不给它入口。 */
+const statusOptions = [
+  { value: 'active', label: '正常' },
+  { value: 'disabled', label: '停用（跳转返回 410）' },
+]
 /**
  * 新口令输入。刻意**不回填**现有口令：后端只存 bcrypt 摘要，回填等于把摘要
  * 送给前端；留空即「不改口令」。
@@ -546,13 +560,12 @@ onUnmounted(() => {
               placeholder="ops, docs"
               hint="逗号分隔；清空即删除全部标签"
             />
-            <div>
-              <label class="field-label" for="detail-status">状态</label>
-              <select id="detail-status" v-model="editStatus" class="text-input">
-                <option value="active">正常</option>
-                <option value="disabled">停用（跳转返回 410）</option>
-              </select>
-            </div>
+            <Select
+              v-model="editStatus"
+              label="状态"
+              :options="statusOptions"
+              hint="停用后跳转返回 410，短链本身仍然保留"
+            />
             <Input
               v-model="editPassword"
               label="访问口令"
@@ -593,18 +606,7 @@ onUnmounted(() => {
         <Card class="mt-6 p-6 md:p-8">
           <div class="flex flex-wrap items-center justify-between gap-4">
             <p class="eyebrow">Trend</p>
-            <div class="flex items-center gap-1">
-              <button
-                v-for="option in [7, 30, 90]"
-                :key="option"
-                type="button"
-                class="rounded-md px-3.5 py-2 text-[14px] font-medium"
-                :class="statsDays === option ? 'bg-surface-card text-ink' : 'text-muted'"
-                @click="statsDays = option"
-              >
-                {{ option }} 天
-              </button>
-            </div>
+            <SegmentedControl v-model="statsDays" :options="dayOptions" label="统计时间窗口" />
           </div>
 
           <div class="mt-2">

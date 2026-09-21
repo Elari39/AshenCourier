@@ -443,6 +443,13 @@
     color: var(--color-muted);
   }
 
+  /* 错误态（已删除 / 校验失败）。用 error 色的极淡底而不是实填：
+     它在表格里是「一行状态」，实填会压过行内容本身。 */
+  .badge-error {
+    background-color: color-mix(in srgb, var(--color-error) 10%, transparent);
+    color: var(--color-error);
+  }
+
   /* ---------- 分隔线 ---------- */
   .hairline {
     border-color: var(--color-hairline);
@@ -475,6 +482,107 @@
 
   .data-table tbody tr:last-child td {
     border-bottom: none;
+  }
+
+  /* ---------- 分段控件 ----------
+   * DESIGN.md 的 category-tab / category-tab-active 的落地。
+   * 选中态直接绑在 [aria-pressed='true'] 上：视觉与语义同源，
+   * 于是「看着选中了、读屏说没选中」这种漂移不可能发生。
+   */
+  .segmented {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .segmented-item {
+    border: none;
+    border-radius: var(--radius-md);
+    background-color: transparent;
+    padding: 8px 14px;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--color-muted);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .segmented-item[aria-pressed='true'] {
+    background-color: var(--color-surface-card);
+    color: var(--color-ink);
+  }
+
+  /* 交互态只有 default / active 两态（DESIGN.md），这里不为 hover 单开一档 */
+  .segmented-item:not(:disabled):active {
+    color: var(--color-ink);
+  }
+
+  .segmented-item:disabled {
+    cursor: not-allowed;
+    color: var(--color-muted-soft);
+  }
+
+  /* ---------- 下拉选择 ---------- */
+  .select-input {
+    width: 100%;
+    height: 40px;
+    /* 右侧留出 36px 给自绘的箭头 */
+    padding: 0 36px 0 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-hairline);
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.55;
+    /* 原生箭头由浏览器绘制、颜色不受 token 控制，一律关掉改用自绘的那个 */
+    appearance: none;
+  }
+
+  .select-input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-primary) 15%, transparent);
+  }
+
+  .select-input:disabled {
+    background-color: var(--color-surface-soft);
+    color: var(--color-muted);
+    cursor: not-allowed;
+  }
+
+  /* ---------- 可点击的弱链接 ----------
+   * 列表里的短码、表单里的「高级选项」展开开关共用。
+   * 刻意不写颜色：调用方用 text-muted / text-ink 决定强调程度。
+   * DESIGN.md 没有规定 hover 变体（它只定义 default / active 两态），
+   * 所以这里沿用 .text-link 的既有做法 —— 把 hover 收敛成一个具名类，
+   * 而不是在模板里散着写 hover:underline / hover:text-ink。
+   */
+  .link-quiet {
+    text-underline-offset: 4px;
+  }
+
+  .link-quiet:hover {
+    text-decoration: underline;
+  }
+
+  .link-quiet:active {
+    color: var(--color-primary);
+  }
+
+  /* ---------- 徽章形态的按钮（标签筛选） ---------- */
+  .badge-action {
+    cursor: pointer;
+  }
+
+  .badge-action:hover {
+    color: var(--color-ink);
+  }
+
+  .badge-action:active {
+    background-color: var(--color-surface-cream-strong);
   }
 }
 

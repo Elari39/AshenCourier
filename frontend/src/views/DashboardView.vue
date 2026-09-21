@@ -18,7 +18,7 @@ import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Input from '@/components/ui/Input.vue'
-import Spinner from '@/components/ui/Spinner.vue'
+import Skeleton from '@/components/ui/Skeleton.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useToast } from '@/composables/useToast'
 import { createRequestGuard, isAbortError } from '@/utils/request'
@@ -230,7 +230,7 @@ onUnmounted(() => {
         </div>
 
         <div class="mt-6">
-          <Spinner v-if="loading" :size="18">正在加载…</Spinner>
+          <Skeleton v-if="loading" :lines="4" height="h-14" />
 
           <p v-else-if="loadError" class="text-[14px] text-error">{{ loadError }}</p>
 
