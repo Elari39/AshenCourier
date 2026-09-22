@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -158,13 +159,51 @@ func pgErrCode(err error) string {
 	return ""
 }
 
+// pgUnavailableCode 判断一个 SQLSTATE 是否表示「数据库**暂时**不可用」。
+//
+// 这条界线是整个 storageError 的关键：带 SQLSTATE 只是一个信号，不是结论。
+// 「数据库暂时不可用」该回 503 + Retry-After（客户端与上游据此退避），
+// 「数据库健康、是这次请求/数据的问题」该回 4xx/500（重试无用）。
+//
+// 判断按**类**而不是逐个码枚举：类里每个码同属一种故障，逐码枚举会在服务端
+// 新增码时悄悄退回 500 —— 那正是这个分类要修的毛病。三类：
+//
+//   - 类 08 connection_exception：连接建立 / 断开 / 协议错（08000 / 08001 /
+//     08003 / 08004 / 08006 / 08007 / 08P01）。库多半只是重启了一下。
+//   - 类 53 insufficient_resources：服务端资源耗尽（53300 连接数打满、
+//     53100 磁盘满、53200 OOM、53400 触到配置上限）。过载期最需要退避，
+//     也恰恰是最容易被回成 500 的时刻。
+//   - 57P01 admin_shutdown / 57P02 crash_shutdown / 57P03 cannot_connect_now：
+//     服务端正在关停或还没起来（57P03 就是启动期探测遇到的那个码）。
+//     ⚠️ 只认这三个而**不是整类 57** —— 57014 query_canceled（多半是
+//     statement_timeout）、57P04 database_dropped 的成因与「暂时不可用」不同。
+//
+// 刻意**不含** 40001 serialization_failure / 40P01 deadlock_detected：那是
+// 「库健康、这次事务撞车了」，正确做法是应用层重试**整个请求**，而不是把服务
+// 标记成不可用 —— 回 503 会让上游连累同一实例上与之无关的其它请求一起退避。
+func pgUnavailableCode(code string) bool {
+	switch {
+	case code == "":
+		return false
+	case strings.HasPrefix(code, "08"), strings.HasPrefix(code, "53"):
+		return true
+	case code == "57P01", code == "57P02", code == "57P03":
+		return true
+	default:
+		return false
+	}
+}
+
 // storageError 把「不是数据库给出的业务错误」归类为依赖不可用（可重试）。
 //
 // 判定规则：
-//   - 拿得到 SQLSTATE（*pgconn.PgError：约束冲突、语法错误……）说明数据库本体是健康的，
-//     属于请求或数据问题，原样上抛（响应仍是 4xx/500，而不是 503）
-//   - 拿不到 SQLSTATE 的失败才是「依赖不可用」——拨号失败、连接被断、池已关闭、
-//     context 超时——包上 domain.ErrUnavailable，由 httpx 映射成 503 + Retry-After
+//   - 拿得到 SQLSTATE 且码属于 pgUnavailableCode（连接异常 / 资源耗尽 / 服务端
+//     正在关停-启动）→ 数据库暂时不可用，包上 domain.ErrUnavailable，
+//     由 httpx 映射成 503 + Retry-After
+//   - 拿得到 SQLSTATE 但码不在其中（约束冲突、语法错误、数据异常……）→
+//     数据库本体是健康的，属于请求或数据问题，原样上抛（4xx/500）
+//   - 拿不到 SQLSTATE 的失败也是「依赖不可用」——拨号失败、连接被断、池已关闭、
+//     context 超时——同样包上 domain.ErrUnavailable
 //   - pgx.ErrNoRows 是「查无此行」的正常分支，不算故障
 //   - context.Canceled（客户端断连 / 进程关停）也算可重试：此刻没有调用方在读响应，
 //     503 不会产生副作用，却避免了把「客户端跑了」记成 500 的错误日志噪音
@@ -172,7 +211,10 @@ func pgErrCode(err error) string {
 // 用双 %w 同时保留哨兵与底层错误：errors.Is(err, domain.ErrUnavailable) 与
 // errors.Is(err, 原始错误) 都成立，日志里也不会丢掉根因。
 func storageError(err error) error {
-	if err == nil || errors.Is(err, pgx.ErrNoRows) || pgErrCode(err) != "" {
+	if err == nil || errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if code := pgErrCode(err); code != "" && !pgUnavailableCode(code) {
 		return err
 	}
 	return fmt.Errorf("%w: %w", domain.ErrUnavailable, err)

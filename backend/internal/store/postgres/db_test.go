@@ -36,6 +36,26 @@ func TestStorageError(t *testing.T) {
 		{"连接池已关闭是依赖不可用", puddle.ErrClosedPool, true},
 		{"操作超时是依赖不可用", context.DeadlineExceeded, true},
 		{"上游取消也算可重试", context.Canceled, true},
+
+		// ---- 带 SQLSTATE 的「数据库暂时不可用」（审计 B3/B6）----
+		// 这四条过去会被 pgErrCode != "" 一律当作「库健康」→ 500，于是过载或
+		// PG 重启的窗口里客户端拿到 500、不会退避，反而加重拥堵 —— 恰恰发生在
+		// 最需要退避的时刻。现在它们必须与「拨号失败」同一档（→ 503 + Retry-After）。
+		{"连接失败类（08006）是依赖不可用", &pgconn.PgError{Code: "08006"}, true},
+		{"连接不存在（08003）是依赖不可用", &pgconn.PgError{Code: "08003"}, true},
+		{"连接数打满（53300）是依赖不可用", &pgconn.PgError{Code: "53300"}, true},
+		{"服务端正在关停（57P01）是依赖不可用", &pgconn.PgError{Code: "57P01"}, true},
+		{"服务端正在启动（57P03）是依赖不可用", &pgconn.PgError{Code: "57P03"}, true},
+		{"被 %w 包住的连接失败仍是依赖不可用", fmt.Errorf("store: %w", &pgconn.PgError{Code: "08006"}), true},
+
+		// ---- 负对照：带 SQLSTATE 但「库是健康的」，不能顺手也归成 503 ----
+		// 少了这几条，一个「凡带 SQLSTATE 就 503」的粗暴改法会是绿的 ——
+		// 而那会把每次用户输错邮箱（23505）都变成 503，上游开始无谓退避。
+		{"数据异常（22012 除零）仍是业务错误", &pgconn.PgError{Code: "22012"}, false},
+		{"约束名不存在（42P01）仍是业务错误", &pgconn.PgError{Code: "42P01"}, false},
+		{"序列化失败不是依赖不可用（库健康，该由应用层重试整个请求）", &pgconn.PgError{Code: "40001"}, false},
+		{"死锁不是依赖不可用（同上）", &pgconn.PgError{Code: "40P01"}, false},
+		{"查询被取消（57014）不是依赖不可用（类 57 里只认 57P0x）", &pgconn.PgError{Code: "57014"}, false},
 	}
 
 	for _, tc := range tests {
@@ -56,6 +76,50 @@ func TestStorageError(t *testing.T) {
 			// 归类不能吃掉根因，否则日志与排障都失去线索
 			if !errors.Is(got, tc.err) {
 				t.Fatalf("归类后仍应能 errors.Is 到原始错误：got %v, want 匹配 %v", got, tc.err)
+			}
+		})
+	}
+}
+
+// TestPgUnavailableCode 把「哪些 SQLSTATE 算数据库暂时不可用」这张表本身钉住。
+//
+// 与 TestStorageError 的分工：那一条测的是「storageError 有没有按这张表行事」，
+// 这一条测的是「表的内容对不对」—— 两者都要有，否则改表与改调用会互相掩护。
+// 尤其是**类前缀**的判定：只该按两字符类匹配，不能因为码里含 "08"/"53" 子串
+// 就命中（例如 "08006" 命中类 08 是对的，但把匹配写成 strings.Contains 会让
+// 任何含这两个字符的码都中招），也不能被顺手扩成整类 57。
+func TestPgUnavailableCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		code string
+		want bool
+	}{
+		// 类 08 connection_exception
+		{"08000", true}, {"08001", true}, {"08003", true}, {"08004", true},
+		{"08006", true}, {"08007", true}, {"08P01", true},
+		// 类 53 insufficient_resources
+		{"53000", true}, {"53100", true}, {"53200", true},
+		{"53400", true}, // 53300 单列在 TestStorageError 里，这里补类内其它码
+		// 服务端关停 / 启动
+		{"57P02", true}, {"57P03", true},
+		// 边界：类 57 只认那三个码，整类纳入是错的
+		{"57P01", true},
+		{"57014", false}, {"57000", false}, {"57P04", false},
+		// 其它类一律不动
+		{"", false},
+		{"23505", false}, {"23514", false}, {"42601", false}, {"42P01", false},
+		{"22012", false}, {"40001", false}, {"40P01", false},
+		{"22008", false}, // datetime_field_overflow：含 "08" 但类不是 08，
+		//                   子串匹配式的实现（strings.Contains）会在这里误伤
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.code, func(t *testing.T) {
+			t.Parallel()
+
+			if got := pgUnavailableCode(tc.code); got != tc.want {
+				t.Fatalf("pgUnavailableCode(%q) = %v, want %v", tc.code, got, tc.want)
 			}
 		})
 	}
