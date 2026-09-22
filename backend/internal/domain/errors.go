@@ -21,8 +21,12 @@ var (
 	ErrGone = errors.New("gone")
 	// ErrInvalidInput 表示入参不满足领域约束。
 	ErrInvalidInput = errors.New("invalid input")
-	// ErrUnauthorized 表示未认证或凭证无效。
+	// ErrUnauthorized 表示未认证、或所持凭证无效（缺令牌、令牌过期/签名不符、口令页未解锁）。
 	ErrUnauthorized = errors.New("unauthorized")
+	// ErrInvalidCredentials 表示「这次提交的登录凭据不对」，与 ErrUnauthorized 分开：
+	// 前者要告诉用户去检查邮箱和密码，后者要把他送回登录页 —— 前端只能靠错误码区分这两件事，
+	// 靠文案猜是不可靠的。邮箱不存在与口令错误刻意归为同一个错误，否则登录页就成了账号枚举器。
+	ErrInvalidCredentials = errors.New("invalid credentials")
 	// ErrUnavailable 表示依赖组件（PG / Redis）不可用，请求可重试。
 	ErrUnavailable = errors.New("dependency unavailable")
 	// ErrInternal 表示服务端内部错误（如脏数据），请求本身没有问题。

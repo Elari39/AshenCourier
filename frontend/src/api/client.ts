@@ -130,16 +130,22 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const payload: unknown = text ? safeParse(text) : null
 
   if (!response.ok) {
+    const error = toApiError(response, payload)
+
     // 401 = 令牌失效：通知 useAuth 清空会话（router 里注册的处理器会送回登录页）。
     // 放在这里而不是各处 view：只要有一处忘了判断就会留下「半登录」的脏状态。
     //
-    // 但只有「本次请求确实带了令牌」时才算令牌失效。登录/注册接口在口令错误时
-    // 同样返回 401，那是凭据不对而不是会话过期 —— 不能因为输错一次密码就去清空
-    // 本地会话（否则将来往 clearSession 里加任何清理逻辑都会连带误伤）。
-    if (response.status === 401 && token !== null) {
+    // 但有两个例外，都不算「会话过期」，否则会把用户手里的有效令牌清掉：
+    //  - 本次请求根本没带令牌（匿名浏览时的 401）；
+    //  - 后端明确回了 invalid_credentials —— 那是登录接口在说「邮箱或密码不对」，
+    //    该做的是改输入，不是登出。按 code 判定，别靠文案猜。
+    //    （这条原先只靠「/login 有 guestOnly 守卫、登录页进不去」间接成立，
+    //    也就是说注释描述的保护并没有真的写在代码里；改成按 code 判之后，
+    //    将来去掉那个守卫、或加一个「重新验证身份」的流程都不会踩坑。）
+    if (error.isUnauthorized && token !== null && error.code !== 'invalid_credentials') {
       notifyUnauthorized()
     }
-    throw toApiError(response, payload)
+    throw error
   }
   if (payload === null) {
     // 2xx 但没有 body：属于后端异常，明确报错而不是悄悄返回 undefined

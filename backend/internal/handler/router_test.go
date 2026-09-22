@@ -20,6 +20,14 @@ import (
 func newTestRouter(t *testing.T, links map[string]*domain.Link) http.Handler {
 	t.Helper()
 
+	return newTestRouterWith(t, links, newStubUsers())
+}
+
+// newTestRouterWith 是 newTestRouter 的可注入版本：需要登录成功（或需要
+// 已有账号来验证「凭据错误」）的用例从它入手。
+func newTestRouterWith(t *testing.T, links map[string]*domain.Link, users domain.UserRepository) http.Handler {
+	t.Helper()
+
 	repo := &stubLinkRepo{getByCode: func(_ context.Context, code string) (*domain.Link, error) {
 		if l, ok := links[code]; ok {
 			return l, nil
@@ -29,7 +37,7 @@ func newTestRouter(t *testing.T, links map[string]*domain.Link) http.Handler {
 
 	return Router(Options{
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Auth:        service.NewAuth(&stubUsers{}, "test-secret-0123456789", time.Hour),
+		Auth:        service.NewAuth(users, "test-secret-0123456789", time.Hour),
 		Shortener:   newTestShortener(repo),
 		Stats:       service.NewStats(&stubClicks{}, stubDelta{}),
 		Health:      okProbe{},

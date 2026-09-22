@@ -110,11 +110,9 @@ func (okProbe) Report(context.Context) httpx.HealthReport {
 	return httpx.HealthReport{Status: "ok", Postgres: "ok", Redis: "ok"}
 }
 
-// stubUsers 供 service.NewAuth 使用。路由表用例刻意都不带有效令牌
-// （带令牌的鉴权语义由 service/auth 的单测覆盖），因此这些方法不会被调用。
-type stubUsers struct {
-	domain.UserRepository
-}
+// stubUsers 见 auth_test.go —— 它现在是内存版账号仓储（登录用例真的会查它），
+// 不再是「方法不会被调用」的占位。路由用例默认给一份空库：
+// 它们刻意都不带有效令牌，登录相关语义由 auth_test.go 覆盖。
 
 // newTestShortener 造一个只依赖仓储与空缓存的 Shortener。
 //

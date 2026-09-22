@@ -100,21 +100,41 @@ func (a *Auth) Register(ctx context.Context, in RegisterInput) (*Session, error)
 }
 
 // Login 校验口令并签发令牌。
-// 无论「邮箱不存在」还是「口令错误」都返回同一个 domain.ErrUnauthorized，
-// 避免账号枚举。口令比对在邮箱不存在时也走一次 bcrypt，抹平时间差。
+//
+// 失败分三类，每一类的下游动作都不同，所以刻意用不同的错误表达：
+//
+//	邮箱格式不合法 / 口令为空 → *InvalidInputError（422 字段级，与 Register 同一套口径）
+//	邮箱不存在 或 口令不对     → domain.ErrInvalidCredentials（401，文案「邮箱或密码不正确」）
+//	依赖不可用                → 原样上抛（503）
+//
+// 「邮箱不存在」与「口令不对」必须归为同一个错误：分开就等于把登录页做成账号枚举器。
+// 口令比对在邮箱不存在时也走一次 bcrypt（dummyCompare），抹平时间差。
+//
+// 前置的字段校验（邮箱格式、口令非空）在**任何**数据库与 bcrypt 动作之前返回，
+// 所以它不会引入新的侧信道 —— 这两条判定与「账号是否存在」无关。
+// 反过来说，这里刻意**不**校验口令强度（长度/复杂度）：登录不是注册，
+// 策略是注册侧的事；将来若上调 MinPasswordLength，在登录侧也校验会让
+// 老用户直接登不进来。
 func (a *Auth) Login(ctx context.Context, email, password string) (*Session, error) {
 	normalized := domain.NormalizeEmail(email)
+	if !domain.IsValidEmail(normalized) {
+		return nil, domain.Invalid("email", "请输入合法的邮箱地址")
+	}
+	if strings.TrimSpace(password) == "" {
+		return nil, domain.Invalid("password", "请输入密码")
+	}
+
 	user, err := a.users.GetByEmail(ctx, normalized)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			// dummyCompare 消耗与真实比对相当的时间，抵御计时侧信道
 			dummyCompare(password)
-			return nil, fmt.Errorf("service.auth: login %q: %w", normalized, domain.ErrUnauthorized)
+			return nil, fmt.Errorf("service.auth: login %q: %w", normalized, domain.ErrInvalidCredentials)
 		}
 		return nil, err
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return nil, fmt.Errorf("service.auth: login %q: %w", normalized, domain.ErrUnauthorized)
+		return nil, fmt.Errorf("service.auth: login %q: %w", normalized, domain.ErrInvalidCredentials)
 	}
 	return a.issue(user)
 }

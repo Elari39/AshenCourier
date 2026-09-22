@@ -344,6 +344,58 @@ func (s *suite) runAll(ctx context.Context) error {
 		})
 	}
 
+	// ---------- 1d. /api 命名空间的错误体契约 ----------
+	// 这两条盯的是「契约」而不是功能：ServeMux 会绕过应用的 WriteError 自己回
+	// 一句纯文本（未注册路径 404、方法不对 405），于是 README 承诺的
+	// 「失败响应统一为 {"error":{…}}」在 /api 下会破功 —— 而前端的错误处理
+	// 正是按 error.code 分支的，拿到 text/plain 只会在解析处失败。
+	// 它们不消耗任何配额，但必须排在所有创建动作之前：契约一旦不成立，
+	// 后面那些断言的可信度也无从谈起。
+	s.check("/api 下未注册路径回统一 JSON 404（不是 net/http 的纯文本）", func(ctx context.Context) error {
+		got, err := s.do(ctx, http.MethodGet, "/api/does-not-exist", nil, nil)
+		if err != nil {
+			return err
+		}
+		if got.status != http.StatusNotFound {
+			return fmt.Errorf("期望 404，实际 %d", got.status)
+		}
+		if ct := got.header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			return fmt.Errorf("Content-Type=%q，期望 application/json", ct)
+		}
+		body, err := decodeErrorBody(got)
+		if err != nil {
+			return err
+		}
+		if body.Code != "not_found" {
+			return fmt.Errorf("error.code=%q，期望 not_found", body.Code)
+		}
+		return nil
+	})
+
+	s.check("/api 下方法不对回统一 JSON 405，且 Allow 头保留", func(ctx context.Context) error {
+		// 用 PUT：它不在任何路由的方法集里（与 go test 的 TestRouterMethodAwareness 同一理由）。
+		// Allow 必须活着 —— 它是客户端唯一能知道「该用哪个方法」的地方，
+		// 也正是「改注册一条 /api/ 兜底模式」那种改法会顺手弄丢的东西。
+		got, err := s.do(ctx, http.MethodPut, "/api/links", nil, nil)
+		if err != nil {
+			return err
+		}
+		if got.status != http.StatusMethodNotAllowed {
+			return fmt.Errorf("期望 405，实际 %d", got.status)
+		}
+		if allow := got.header.Get("Allow"); !strings.Contains(allow, "GET") || !strings.Contains(allow, "POST") {
+			return fmt.Errorf("Allow=%q，期望同时含 GET 与 POST", allow)
+		}
+		body, err := decodeErrorBody(got)
+		if err != nil {
+			return err
+		}
+		if body.Code != "method_not_allowed" {
+			return fmt.Errorf("error.code=%q，期望 method_not_allowed", body.Code)
+		}
+		return nil
+	})
+
 	// ---------- 2. 匿名创建 ----------
 	var created struct {
 		Link struct {
@@ -781,7 +833,7 @@ func (s *suite) runAll(ctx context.Context) error {
 		return nil
 	})
 
-	s.check("错误口令登录返回 401", func(ctx context.Context) error {
+	s.check("错误口令登录返回 401 invalid_credentials，文案是「邮箱或密码不正确」", func(ctx context.Context) error {
 		got, err := s.do(ctx, http.MethodPost, "/api/auth/login", map[string]any{
 			"email": emailA, "password": "wrong-password",
 		}, nil)
@@ -790,6 +842,46 @@ func (s *suite) runAll(ctx context.Context) error {
 		}
 		if got.status != http.StatusUnauthorized {
 			return fmt.Errorf("期望 401，实际 %d", got.status)
+		}
+		body, err := decodeErrorBody(got)
+		if err != nil {
+			return err
+		}
+		if body.Code != "invalid_credentials" {
+			return fmt.Errorf("error.code=%q，期望 invalid_credentials —— 与「未认证」的 unauthorized "+
+				"分开，前端才知道该改输入还是该回登录页", body.Code)
+		}
+		if body.Message != "邮箱或密码不正确" {
+			return fmt.Errorf("message=%q，期望「邮箱或密码不正确」——"+
+				"原先是「登录状态无效，请重新登录」，会把改密码的人引去清 cookie", body.Message)
+		}
+		return nil
+	})
+
+	s.check("登录的字段级校验与注册同口径（422 + field）", func(ctx context.Context) error {
+		cases := []struct {
+			name  string
+			body  map[string]any
+			field string
+		}{
+			{"邮箱格式不合法", map[string]any{"email": "bad", "password": passwordA}, "email"},
+			{"口令为空", map[string]any{"email": emailA, "password": ""}, "password"},
+		}
+		for _, c := range cases {
+			got, err := s.do(ctx, http.MethodPost, "/api/auth/login", c.body, nil)
+			if err != nil {
+				return err
+			}
+			if got.status != http.StatusUnprocessableEntity {
+				return fmt.Errorf("%s：期望 422（字段级校验），实际 %d：%s", c.name, got.status, truncate(string(got.body), 160))
+			}
+			body, err := decodeErrorBody(got)
+			if err != nil {
+				return err
+			}
+			if body.Field != c.field {
+				return fmt.Errorf("%s：error.field=%q，期望 %q（前端靠它把提示挂到输入框）", c.name, body.Field, c.field)
+			}
 		}
 		return nil
 	})
@@ -815,13 +907,20 @@ func (s *suite) runAll(ctx context.Context) error {
 		return nil
 	})
 
-	s.check("无 token 访问 /api/auth/me 返回 401", func(ctx context.Context) error {
+	s.check("无 token 访问 /api/auth/me 返回 401 unauthorized（与凭据错误分开）", func(ctx context.Context) error {
 		got, err := s.do(ctx, http.MethodGet, "/api/auth/me", nil, nil)
 		if err != nil {
 			return err
 		}
 		if got.status != http.StatusUnauthorized {
 			return fmt.Errorf("期望 401，实际 %d", got.status)
+		}
+		body, err := decodeErrorBody(got)
+		if err != nil {
+			return err
+		}
+		if body.Code != "unauthorized" {
+			return fmt.Errorf("error.code=%q，期望 unauthorized —— 前端据此清空本地会话并送回登录页", body.Code)
 		}
 		return nil
 	})
@@ -1171,6 +1270,31 @@ var requiredSecurityHeaders = map[string]string{
 	"X-Content-Type-Options":    "nosniff",
 	"Referrer-Policy":           "strict-origin-when-cross-origin",
 	"Content-Security-Policy":   "frame-ancestors 'none'",
+}
+
+// errorBody 是统一错误体里被断言的那几个字段。
+type errorBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Field   string `json:"field"`
+}
+
+// decodeErrorBody 解析统一错误体。
+//
+// 刻意在这里硬编码结构、不 import internal/httpx：冒烟工具是黑盒端到端，
+// 它该独立表达「契约长什么样」；引了内部结构就等于把「实现改了、断言跟着改」
+// 的通道打开（同一理由见文件顶部关于 unlockCookieName 的注释）。
+func decodeErrorBody(r *resp) (errorBody, error) {
+	var wrapper struct {
+		Error errorBody `json:"error"`
+	}
+	if err := r.decode(&wrapper); err != nil {
+		return errorBody{}, fmt.Errorf("响应不是统一错误体（%q）：%w", truncate(string(r.body), 160), err)
+	}
+	if wrapper.Error.Code == "" {
+		return errorBody{}, fmt.Errorf("错误体里缺 code：%q", truncate(string(r.body), 160))
+	}
+	return wrapper.Error, nil
 }
 
 // assertSecurityHeaders 断言一次响应上安全头齐全。

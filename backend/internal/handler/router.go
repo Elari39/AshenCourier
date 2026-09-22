@@ -75,6 +75,12 @@ type Options struct {
 //
 // 关于 /{code}：ServeMux 会优先匹配「更具体」的模式，因此 /api/... 与
 // /healthz 天然胜过 /{code}，无需手动排序。handler 内部再排一次保留字做双保险。
+//
+// 未命中的路径有两套表现，刻意不同：
+//   - `/api` 命名空间内 → 统一 JSON 错误体（未注册路径 404、方法不对 405），
+//     由 httpx.APIErrorContract 在响应侧改写 ServeMux 内建的纯文本错误；
+//   - 其余路径 → 落到 `GET /{code}` 兜底，按短码语义回「这条短链不存在」
+//     或「页面不存在」（保留字），非 GET 则是 ServeMux 内建的 405 纯文本。
 func Router(opts Options) http.Handler {
 	authAPI := &authHandler{auth: opts.Auth}
 	linkAPI := &linkHandler{
@@ -162,7 +168,11 @@ func Router(opts Options) http.Handler {
 	// 限流按 IP 防在线爆破；scope 与 login/redirect 不同 ⇒ Redis 键独立，不会互相吃配额。
 	mux.Handle("POST /{code}", limit(opts.RateLimitUnlock)(http.HandlerFunc(redirectAPI.unlock)))
 
-	return httpx.Chain(mux,
+	// APIErrorContract 贴在 mux 内侧：ServeMux 只在「路径没注册」时回 404、
+	// 在「路径注册了但方法不对」时回 405，两者都是纯文本，绕过了统一错误体。
+	// 它只改响应形态，不参与路由决策 —— 明确不注册 `/api/` 兜底模式，
+	// 那样会把 405 降级成 404（见该函数注释）。
+	return httpx.Chain(httpx.APIErrorContract(mux),
 		httpx.Recover(opts.Logger),
 		httpx.RequestID,
 		httpx.AccessLog(opts.Logger, opts.TrustProxy),

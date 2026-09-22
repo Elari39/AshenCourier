@@ -214,11 +214,37 @@ Browser ──┬─ /api/*         ─┐
 > 忽略未知成员，字段名拼错（`titel` / `targetUrl`）会「成功但没生效」，所以这里显式打开了
 > `RejectUnknownMembers`。重复键、非法 UTF-8、类型不匹配同样是 400；请求体超过 64 KiB 是 413。
 
+**错误码**
+
+| code | 状态 | 含义 / 客户端该怎么做 |
+| --- | --- | --- |
+| `invalid_<字段>` | 422 | 字段级校验失败，带 `field`（`target_url` 用更短的 `invalid_url`）。前端据此把提示挂到对应输入框 |
+| `invalid_json` | 400 | 请求体不是合法 JSON，或含未知字段 / 类型不匹配 / 重复键 / 非法 UTF-8 |
+| `body_too_large` | 413 | 请求体超过 64 KiB |
+| `unauthorized` | 401 | 未认证、或所持令牌失效 → **清空本地会话并送回登录页** |
+| `invalid_credentials` | 401 | 登录的邮箱或密码不对 → **只提示改输入，不要登出**。它与 `unauthorized` 是**分开的两个 code**，判定靠 code 而不是文案 |
+| `forbidden` | 403 | 无权限操作该资源（改 / 删走 403，查询类走 404 —— 分工见各 handler 注释） |
+| `not_found` | 404 | 资源不存在，或 `/api` 下该路径未注册 |
+| `method_not_allowed` | 405 | `/api` 下路径存在但方法不对，响应带 `Allow` |
+| `conflict` | 409 | 唯一约束冲突（邮箱已注册、短码被占） |
+| `gone` | 410 | 短链已失效 |
+| `unavailable` | 503 | 依赖（PG / Redis）不可用，带 `Retry-After`，可重试 |
+| `internal` | 500 | 服务端内部错误（并打 error 日志，可用 `request_id` 定位） |
+
+> **这条契约覆盖整个 `/api` 命名空间**，包括两条由 `net/http` 内建产生的错误：
+> 未注册路径的 404（`404 page not found`）与方法不对的 405（`Method Not Allowed`）。
+> 它们默认都是 `text/plain`，会绕过统一错误体 —— 由 `internal/httpx/APIErrorContract`
+> 在**响应侧**改写。**刻意不注册 `/api/` 兜底模式**：不带方法前缀的模式匹配任意方法，
+> 会把 405 降级成 404，而 405 携带的 `Allow` 头正是客户端唯一能知道「该用哪个方法」
+> 的地方（`router_test.go` 的 `TestRouterMethodAwareness` 盯着这一点）。
+> `/api` 之外的路径保持 `net/http` 原样：那里的 404 / 405 面向浏览器，
+> 而短码失效页是本项目的 HTML 页面。
+
 | # | Method | Path | 鉴权 | 说明 |
 | --- | --- | --- | --- | --- |
 | 1 | GET | `/healthz` | — | 存活 + 就绪（PG / Redis / Stream 积压 / 丢弃计数） |
 | 2 | POST | `/api/auth/register` | — | 注册，返回 user + token |
-| 3 | POST | `/api/auth/login` | — | 登录（限流 20 次 / 10 分钟 / IP） |
+| 3 | POST | `/api/auth/login` | — | 登录（限流 20 次 / 10 分钟 / IP）。字段级校验与注册**同一套口径**（邮箱格式 / 口令为空 → 422 `invalid_email` / `invalid_password` + `field`）；凭据不对 → 401 `invalid_credentials` +「邮箱或密码不正确」，与「未认证」的 `unauthorized` 分开。「邮箱不存在」与「口令错误」刻意**不可区分**（防账号枚举，且在邮箱不存在时也走一次 bcrypt 抹平时间差） |
 | 4 | GET | `/api/auth/me` | JWT | 当前用户 |
 | 5 | POST | `/api/links` | 可选 JWT | 创建短链；匿名会返回一次性 `manage_key`（限流 10 次 / 分钟 / IP）。可选 `tags`（≤10 个、每个 ≤32 字符）、`password`（≥8 位，只落 bcrypt 摘要）与 `domain`（**必须已在 `domains` 表登记**，否则 422 `invalid_domain`；不传 = 默认域名） |
 | 6 | GET | `/api/links` | JWT | 我的链接列表，游标分页 `?limit=20&cursor=&q=&tag=`（`tag` 按小写比较，走 GIN 索引） |
@@ -391,9 +417,11 @@ node e2e/browser-check.mjs --base http://localhost:8080
 | `CHROME_BIN` | 指定 Chrome 可执行文件（默认按平台猜常见位置；CI 用 runner 预装的 `/usr/bin/google-chrome`） |
 | `CHROME_FLAGS` | 追加启动参数，空格分隔（以 root 运行的容器里需要 `--no-sandbox`） |
 
-冒烟工具覆盖：健康检查 → **SPA 顶级路由** → 匿名创建 → 302 跳转 → 统计收敛
+冒烟工具覆盖：健康检查 → **SPA 顶级路由** → **缓存头 / 安全响应头** → **`/api` 错误体契约**
+（未注册路径的 404 与方法不对的 405 都必须是 JSON）→ 匿名创建 → 302 跳转 → 统计收敛
 （同时校验 Redis 计数与落库明细）→ 鉴权边界 → 修改后缓存失效 → 保留字与开放重定向防护
-→ 注册/登录 → 认领 → 分页 → 限流。**用 Go 写而不是 shell**：跨平台，且能做真正的 JSON 断言。
+→ 注册/登录（含字段级校验与 `invalid_credentials`）→ 认领 → 分页 → 限流。
+**用 Go 写而不是 shell**：跨平台，且能做真正的 JSON 断言。
 
 ### store 层集成测试（迁移与手写 SQL）
 
@@ -1123,6 +1151,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **部署 ㉞**：删掉 10 条幽灵 SPA 路由，并让保留字的 404 说实话（本轮审计修复） | 审计发现 nginx 与 vite **各预留 10 条前端并不存在**的顶级路由（`/logout` `/settings` `/account` `/profile` `/admin` `/about` `/help` `/docs` `/terms` `/privacy`），它们被 `try_files` 兜到 `index.html` ⇒ **「不存在的页面」以 200 返回**，掩盖真实的 404。修法：清单收敛到前端真实存在的 4 条（login / register / dashboard / links），并给守卫加一条「**不多不少**」的不变量（`routes_sync_test.go` 现在同时读 `src/router/index.ts`、`nginx.conf` 与 `vite.config.ts` 做三向比对）。**容器实测**（全部重建镜像后）：4 条真实路由仍 **200** + SPA 外壳（含 `/links/AbCdEf`）；10 条幽灵路由全部 **404**；`/metrics` 仍由 nginx 回 404、`/healthz` 仍 200；形态非法的 `/zzzzzzz` 仍是「这条短链不存在」—— 幽灵路由返回码不正确的条数 = **0**。**顺带**：删掉占位后保留字会真的落到后端，而那里原本对保留字也说「这条短链不存在」—— 改成「页面不存在」（访问者找的是页面，不是短链）。**⚠️ 同时纠正了自己的一条审计结论**：`reserved.go` 分两组，`admin`/`about`/`terms` 等属「**易被误用 / 品牌与合规页**」的**刻意预留**，不是「白占短码」—— 所以本轮**只删 nginx/vite 的占位，保留字表一条没动**。**变异验证 3 条 + 1 条负对照**：加回一条幽灵路由 → 红；删掉一条真实路由 → 红（下限探针）；vite 白名单少一条 → 红；只改注释 → 绿；还原后两文件逐字节一致。e2e **39 / 39** 紧接冒烟 **28 / 28**。⚠️ 过程中踩到两个「变异脚本自己撒谎」的坑（替换锚点漏了行尾注释、以及用字面 `\n` 匹配 CRLF 文件），两次都表现为「测试没守住」的**假结论** —— 已按「变异必须先确认真的改到了东西」修掉 | 本机（Docker；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致 `2026-09-22T04:19:11Z`） |
 | **部署 ㉟**：SPA 外壳缓存头 + 全站安全响应头（本轮审计修复） | 修的是审计里 A2 与 A4 两条，都属于「部署后才暴露」：CI 每轮都是干净浏览器，测不出「老外壳 + 已失效的哈希资源」，也测不出「响应头静默消失」。**① 外壳缓存头**：新增 `location = /index.html` 一条，带 `Cache-Control: no-cache always`。它能覆盖全部入口靠的是 try_files 语义 —— **最后一个参数是内部重定向**，nginx 会拿 `/index.html` 重新匹配 location，所以外壳只有一个出口、新增 SPA 路由自动生效。实测（`/`、`/login`、深链 `/links/AbCdEf`、`/index.html` 四条）全部 `CC=['no-cache']` **且恰好一条**。**② 安全头**：5 条（HSTS / X-Frame-Options / nosniff / Referrer-Policy / CSP）收进新文件 `deploy/nginx/security-headers.conf`，在 server 层与每个自带 `add_header` 的层级 `include`。带 `always` 实测在 200 / **401** / **404**（含 nginx 自己的 `/metrics` 404）上都出现。**③ CSP 直接强制、不是 Report-Only**：真浏览器 e2e **39 / 39** 且「全程零 console 错误」那条绿 —— CSP 违规会在控制台报错，所以这一次的浏览器验收同时是 CSP 的实测。`style-src` 用**哈希**（从 `pageCSS` 常量算，非 `'unsafe-inline'`），只为放行口令页 / 失效页那段内联 `<style>`。**④ 过程中实测到并记录的三个事实**：(a) 代理响应上 `X-Content-Type-Options` 是**两条**（应用 + nginx），取值相同、刻意保留；(b) `/assets/` 上 `Cache-Control` 本来就是**两条**（`expires 1y` + `add_header`，改动前就如此），而 **Go 的 `Header.Get` 只看第一条** —— 第一版冒烟断言因此把正确配置报成「没有 immutable」，加了 `headerValue`（拼接全部取值）后转绿；(c) `nginx.conf` 是 CRLF、其余文件是 LF，两者各自一致、没有混合。**⑤ 新增 5 条守卫**：`internal/httpx/nginx_headers_test.go`（解析 `nginx.conf` 的**块结构**，断言「任何含 `add_header` 的块里都有那个 include」+ 外壳 `no-cache` 在场 + 每条头都带 `always`）与 `internal/handler/nginx_headers_contract_test.go`（CSP 哈希与 `pageCSS` 一致；`referrerPolicy` 与 nginx 逐字一致 —— 因为 nginx 的 `add_header` 追加在上游之后，重复的 Referrer-Policy 以最后一条为准，不一致时 Go 那行是死代码）。**变异验证 6 条 + 1 条负对照，全部按预期**：删掉 Referrer-Policy / CSP 去掉 `always` / `/assets` 块漏 include / 外壳缓存头改成可长期缓存 / `pageCSS` 改了哈希没跟 / Go 与 nginx 的 Referrer-Policy 不一致 —— 六条各自只红对应的用例；只改注释的负对照仍绿；还原后四份文件逐字节一致并**独立读文件**复核。**验收**：`gofmt` / `go vet` / `go test ./...` 全绿；`nginx -t` syntax is ok；e2e **39 / 39** 紧接冒烟 **31 / 31**（+3：外壳 no-cache、三种状态码上的安全头、内容哈希资源同时有 immutable 与安全头）；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致（`2026-09-22T04:39:24Z`），并且**三方一致**（容器 `.Image` == 镜像 tag `.Id` == 构建日志里的 manifest list：`frontend` `e88aa49e` / `backend` `09bddc99` / `worker` `01113067`）。⚠️ **单向门提醒**：HSTS 一旦被浏览器记住，在 `max-age` 内撤不回来，所以刻意不加 `preload`；线上是 CF 提供 TLS 才敢带 `includeSubDomains` | 本机（Docker + 无头 Chrome） |
 | **后端 ㊱**：默认拒绝内网 / 回环目标（本轮审计修复 A5） | 公网短链被拿来把访问者的浏览器指向 `127.0.0.1` / `192.168.x` / 云元数据端点 `169.254.169.254` 是最廉价的一类滥用，而原先只校验 scheme。**分层是关键**：新增 `NormalizePublic(raw, allowPrivate)` 叠在纯语法层的 `Normalize` 之上，`IsAllowedTarget`（跳转路径）**一点没动** —— 收紧创建只是「以后不许再建」，若语法层也跟着拒，策略收紧前建的历史链接会在某次部署后成片失效（那不是安全，是摧毁数据；`TestNormalizeStaysPure` 把这个前提钉住了）。**判定只针对字面量与保留名，不做任何 DNS 解析**：创建路径不该引入网络依赖，而且应用层也拦不住（`evil.example` 可以解析到内网，也能用「先解析到公网、随后改指内网」的 rebinding 绕过）—— 所以它是「挡住最廉价的一类滥用」，**不是 SSRF 防护**，这条边界已写进「已知限制」。**宽松写法是本批的重点**：`127.1` / `2130706433` / `0x7f.1` / `0x7f000001` / `0177.0.0.1` / `127.0.0.1.` 指向的都是同一个地址，而 `netip.ParseAddr` 一个都识别不出来（inet_aton 语义要自己实现）；`::ffff:127.0.0.1` 必须先 `Unmap` 再比前缀，否则地址族不同、`Contains` 全返回 false。表 **26 段**（RFC 6890 特殊用途 + 云元数据 + 已弃用的 6to4/NAT64）+ **5 个保留域名后缀**（`.localhost` / `.local` / `.localdomain` / `.internal` / `.home.arpa`）。**容器实测 10 / 10 全绿**：6 条被拒（点分十进制 / 单整数 / RFC1918 / 云元数据 / IPv6 回环 / `localhost:3000` 缺 scheme）全部 **422 `invalid_url` + `field=target_url`**；正对照公网目标仍 **201** 且跳转 **302 Location 正确**；`PATCH` 改成云元数据同样 422 且**数据未被改动**（只拦创建拦不住「建完再改」）。⚠️ 该验证脚本必须先跑 —— 被拒的请求同样消耗 per-IP 创建配额。**新增 7 条守卫**：validator 表驱动 4 个（`TestIsPrivateHost` 60+ 子用例，含段边界 `172.32.0.1` / `100.128.0.1` / `9.255.255.255` 与「`08.8.8.8` 不是合法八进制、不该误伤」；`TestNormalizePublic`；`TestNormalizeStaysPure`；`TestNonPublicPrefixesAreSane` 是前缀表本身的下限守卫）+ handler 1 个 + service 2 个（开关两侧 + `Update` 也要拦）。**变异验证 6 条 + 1 条负对照全部按预期**：策略整体失效（`false && IsPrivateHost(...)`）/ 去掉 `Unmap` / 只认规范 IP / 保留域名表漏掉 `.internal` / 前缀表漏掉 `169.254.0.0/16` / `Update` 退回纯语法层 —— 各自只红对应用例，只改注释的负对照仍绿；还原后两份文件逐字节一致。**⚠️ 本批最大的坑不在产品而在验收工具**：新策略把 **e2e 自己的播种**也挡住了 —— 它的目标刻意是本栈的 SPA 路由（口令解锁那步要断言「真的落到目标」），也就是 `localhost`。修法**不是**放宽策略，而是让 e2e 的**浏览器侧整体**换一个「对服务端是普通域名、对 Chrome 被 `--host-resolver-rules` 映射到回环」的名字（`e2e.ashen.test`，RFC 2606 保留 TLD）—— 这样 CI 验收的仍是**默认最严配置**，不必为了跑测试打开 `ALLOW_PRIVATE_TARGETS`。过程中连着踩两个坑：① 只换目标、不换页面源时，**CSP 的 `form-action 'self'` 正确拦下**了「表单提交后重定向到别的源」，症状是提交口令后 `net::ERR_ABORTED`、既不导航也不报错（CSP 违规走 Log 域、不进 `console.error`，「零 console 错误」照样绿），看着像 303 没生效 —— 所以浏览器侧的 origin 必须整体统一；② 本机配了系统代理时 Chrome 会把 `e2e.ashen.test` 交给**代理**解析（`--host-resolver-rules` 只管 Chrome 自己的解析），实测症状是目标页变成「HTTP ERROR 502」，加 `--no-proxy-server` 才通（CI 没有代理，但两边行为必须一致）。**门禁**：`gofmt` / `go vet` / `go test ./...`（16 包）全绿；前端 eslint 0 / vitest **56** / `audit:refs` ✓ / vue-tsc 0 / build ✓；e2e **39 / 39** 紧接冒烟 **31 / 31**；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致（`2026-09-22T05:06:40Z`） | 本机（Docker + 无头 Chrome） |
+| **后端 ㊲**：`/api` 命名空间的错误体契约 + 登录失败的三档语义（本轮审计修复 A6 / A8） | **① A6**：`GET /api/<未知路径>` 原先回 `net/http` 默认的纯文本 `404 page not found`（19 字节，`text/plain`），而 README 承诺「失败响应统一为 `{"error":{…}}`」、前端 `src/api/client.ts` 也按 `error.code` 分支 —— 契约在**未注册路径**上不成立。改法刻意**不是**注册一条 `/api/` 兜底模式：不带方法前缀的模式匹配**任意方法**，于是 `PUT /api/links` 会从 405 变成 404（`TestRouterMethodAwareness` 正是盯着这一点，而 405 的 `Allow` 头是客户端唯一能知道「该用哪个方法」的地方）。改为在**响应侧**改写：`internal/httpx/APIErrorContract` 只认「状态码 ∈ {404,405} 且 `Content-Type` 是 `http.Error` 的默认值 `text/plain; charset=utf-8`」这个组合（本包自己的 404 是 `application/json`、短码失效页是 `text/html`，因此不会误伤），命中就换成本包的 JSON 错误体并**吞掉**随后那句纯文本。容器实测：未注册路径 404 `not_found`、方法不对 405 `method_not_allowed` **且 `Allow` 原样保留**（`PUT /api/links` → `Allow: GET, HEAD, POST`）、错误体**带 `request_id`**（说明改写发生在 `RequestID` 中间件之内）；作用域实测：`PUT /healthz` 仍是 `text/plain`、`GET /zzzzzzz` 仍是 HTML 失效页。**② A8**：登录失败原先一律 401 `unauthorized` +「登录状态无效，请重新登录」—— 在登录页输错密码会被提示去清 cookie，且与「该回登录页」的 `unauthorized` 同码同因。改为三档：字段级（邮箱格式 / 空口令）走 422 + `field`（**与注册同口径**，且判定在任何查库动作之前，不引入「账号是否存在」的耗时侧信道）、凭据错误用新的 `domain.ErrInvalidCredentials` → 401 `invalid_credentials` +「邮箱或密码不正确」（两条失败路径文案完全一致，仍是防枚举）、未认证保持 `unauthorized`。**刻意不在登录侧校验口令强度**：策略是注册侧的事，将来上调 `MinPasswordLength` 会让老用户被自己的合法密码挡在登录页外（`TestLoginValidationIsNotRegisterPolicy` 钉住）。**③ 连带修掉客户端一处「注释描述了、代码没实现」的保护**：`client.ts` 原本只在 `token !== null` 时不登出，与「登录接口的 401 不算会话过期」只是**间接**成立（靠 `/login` 的 `guestOnly` 守卫）；现在按 `code !== 'invalid_credentials'` 判定，将来去掉守卫或加「重新验证身份」流程都不会踩坑，并补了 3 条 vitest（`src/api/client.test.ts`）。**④ 新增守卫 9 条**：`httpx/api_errors_test.go` 3 个（含直接盯「吞掉纯文本」与「重复 `WriteHeader` 被丢弃」的两个细节用例，且刻意用**真实 ServeMux** 而不是手写模仿）、handler 2 个（`TestRouterAPIErrorContract` / `TestRouterKeepsNonAPIErrorBehavior`，前者同时是「Go 改了内建错误写法就会红」的守卫）、`service/auth_test.go` 5 个（此前 `auth` **完全没有单测**）、前端 3 条 vitest。**变异验证 7 条 + 1 条负对照全部按预期**：摘掉 `APIErrorContract` / 只改写 404 不管 405 / 不吞纯文本 / `isAPIPath` 放宽成前缀匹配 / 登录不校验邮箱格式 / 「邮箱不存在」退回 `ErrUnauthorized` / 映射表删掉 `ErrInvalidCredentials` —— 各自只红对应用例，只改注释的负对照仍绿；还原后 4 份文件逐字节一致并**独立读文件**复核。**验收**：`gofmt` / `go vet` / `go test ./...`（16 包，其中 handler 与 service 非缓存）全绿；前端 eslint / vitest **59**（+3）/ `audit:refs` ✓ / vue-tsc / build 全绿；容器级 **17 / 17**；e2e **39 / 39** 紧接冒烟 **34 / 34**（+3）；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致（`2026-09-22T05:38:19Z`） | 本机（Docker，全部重建） |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 

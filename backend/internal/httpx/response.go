@@ -143,7 +143,8 @@ func WriteError(w http.ResponseWriter, r *http.Request, status int, code, messag
 //	ErrForbidden       → 403 forbidden
 //	ErrConflict        → 409 conflict
 //	ErrGone            → 410 gone
-//	ErrUnauthorized    → 401 unauthorized
+//	ErrInvalidCredentials → 401 invalid_credentials（凭据不对，让用户改输入）
+//	ErrUnauthorized    → 401 unauthorized（未认证/令牌失效，送回登录页）
 //	ErrUnavailable     → 503 unavailable（可重试，带 Retry-After）
 //	ErrInternal / 其他  → 500 internal（并打 error 日志）
 //
@@ -169,6 +170,8 @@ func WriteDomainError(w http.ResponseWriter, r *http.Request, err error) {
 		status, code, message = http.StatusConflict, "conflict", conflictMessage(err)
 	case errors.Is(err, domain.ErrGone):
 		status, code, message = http.StatusGone, "gone", "该短链已失效"
+	case errors.Is(err, domain.ErrInvalidCredentials):
+		status, code, message = http.StatusUnauthorized, "invalid_credentials", "邮箱或密码不正确"
 	case errors.Is(err, domain.ErrUnauthorized):
 		status, code, message = http.StatusUnauthorized, "unauthorized", "登录状态无效，请重新登录"
 	}
