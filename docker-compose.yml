@@ -26,6 +26,23 @@ x-backend-env: &backend-env
   # 只影响创建与修改，跳转路径不做这个判定 —— 收紧策略不该让历史链接失效。
   ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
 
+# backend / worker 共用同一份**构建**定义（YAML 锚点复用）
+#
+# 这不只是省几行：两个服务必须从同一份 Dockerfile、同样的 build args 构建 ——
+# 否则会漂移成「一个跑新代码、一个跑旧代码」（README「九条踩过的坑」第 4 条，
+# 守卫见 deploy/check-image-drift.mjs）。用锚点把「同源」写进配置本身：
+# 将来要改 context / args，只可能改这一处，不会只改一半。
+x-backend-build: &backend-build
+  context: ./backend
+  args:
+    # 版本号注入：Dockerfile 里的 `ARG VERSION=dev` 落到 `-X main.version=`。
+    # 不传 = "dev"（本地开发的合理默认）；**生产构建时务必设 APP_VERSION**，
+    # 例如：APP_VERSION=$(git describe --tags --always) docker compose up -d --build
+    # 它是 /healthz/details 的 `version` 与 /metrics 的
+    # `ashen_build_info{version="…"}` 的唯一来源 —— 排障时要确认「线上跑的是哪一版」
+    # 只能靠它（A9：线上曾长期是 "dev"，「版本可定位」的承诺等于落空）。
+    VERSION: ${APP_VERSION:-dev}
+
 services:
   postgres:
     image: postgres:18.6-alpine
@@ -78,8 +95,8 @@ services:
     restart: "no"
 
   backend:
-    build:
-      context: ./backend
+    # 与 worker 共用同一份构建定义（见文件顶部的 x-backend-build）
+    build: *backend-build
     environment:
       <<: *backend-env
       HTTP_ADDR: ":8080"
@@ -98,8 +115,8 @@ services:
     restart: unless-stopped
 
   worker:
-    build:
-      context: ./backend
+    # 与 backend 共用同一份构建定义（见文件顶部的 x-backend-build）
+    build: *backend-build
     # ⚠️ 必须用 entrypoint 覆盖，不能用 command：
     #    Dockerfile 里是 exec 形式的 ENTRYPOINT ["/app/api"]，
     #    而 compose 的 command 只会成为 ENTRYPOINT 的**参数**，
