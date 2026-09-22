@@ -25,6 +25,16 @@ x-backend-env: &backend-env
   # ⚠️ 内网部署**必须**设成 true，否则一切创建都会拿到「不支持指向内网或本机的地址」。
   # 只影响创建与修改，跳转路径不做这个判定 —— 收紧策略不该让历史链接失效。
   ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+  # Go 的 GC 软内存上限（B5 的配套）。容器硬上限（deploy.resources.limits.memory）
+  # 单独存在时，Go 运行时并不知道它 —— 堆一直涨到被 cgroup **OOM kill**，
+  # 表现为「进程无故重启」。GOMEMLIMIT 让它在触界前先做 GC：代价是 GC 变频繁
+  # （CPU 涨），收益是从「被杀」变成「变慢」，而变慢是可观测、可告警的。
+  #
+  # 取容器上限的 ~90%：backend / worker 的 memory 都是 512m ⇒ 460MiB。
+  # ⚠️ 两者是**耦合**的：改上面的 memory 时这里要跟着改。
+  # 显式写出来而不是指望运行时自动推导 —— 无论 Go 版本怎么变，这个数值都由
+  # 这一行决定，排障时不用去猜运行时行为。
+  GOMEMLIMIT: ${GOMEMLIMIT:-460MiB}
 
 # backend / worker 共用同一份**构建**定义（YAML 锚点复用）
 #
@@ -43,6 +53,30 @@ x-backend-build: &backend-build
     # 只能靠它（A9：线上曾长期是 "dev"，「版本可定位」的承诺等于落空）。
     VERSION: ${APP_VERSION:-dev}
 
+# ------------------------------------------------------------
+# 资源上界（B5）：容器这一层也要有上界
+#
+# README 把「跳转 / 统计」的内存面控制得很细（有界队列 + 队满即丢 + 计数），
+# 唯独漏了**容器这一层** —— 原先一个 limit 都没有，于是任何一处失控都能把宿主
+# 内存吃满，连带把同机的 PostgreSQL 拖进 OOM（症状是整站不可用，而不只是坏掉
+# 一个容器）。
+#
+# 取值依据：**空闲实测**（`docker stats --no-stream`）backend 约 3–7M / worker 约 3M /
+# frontend 约 8M / postgres 约 27–36M / redis 约 6–13M —— 同一次 `up -d` 之后
+# 不同时刻量到的值本来就会变（日志缓冲、GC 时机、连接数都会动），所以下面的数值
+# 是**量级上的上界**、不是精确倍数：对空闲值留有 30 倍以上余量。要求只有两条：
+# 真实负载下跑得住；真失控时表现为**这一个容器被 kill**，而不是宿主被吃满。
+#
+# 用 `deploy.resources.limits` 而不是旧的 `mem_limit` / `cpus`：前者是 Compose
+# 规范里的写法，`docker compose up` 照常应用（并非只有 swarm 才认）。
+# 实测见 README 验收记录 ㊷（`docker inspect` 的 HostConfig.Memory / NanoCpus
+# 确实被设置）。
+#
+# 刻意**不加 `pids_limit`**：backend / worker 是单进程 Go（几乎不 fork），
+# 而 PostgreSQL 在 `max_connections=100` 时会**合法地**用到 100+ 进程 ——
+# 一个统一的 pids_limit 要么形同虚设、要么在正常负载下误杀 PG。
+# 守卫一个具体数值容易，守卫「为什么是这个数值」很难，所以宁可不加。
+
 services:
   postgres:
     image: postgres:18.6-alpine
@@ -60,6 +94,14 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+    # 1G 是给 shared_buffers（镜像默认 128MB）+ 每个连接的 work_mem + 排序/哈希
+    # 留的余量。空闲只占 35M，但**故意不按空闲值设** —— 先把 PG 卡死就会把 API
+    # 一起拖垮（它每个请求都要连库），那比「某个容器被 kill」严重得多。
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1g
     restart: unless-stopped
 
   redis:
@@ -81,6 +123,15 @@ services:
       start_period: 5s
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    # 只给容器上界，**刻意不设 `--maxmemory`**：Stream 里是尚未 ACK 的点击，
+    # 一旦配上淘汰策略（就算 noeviction，写失败同样会丢新点击），症状就从
+    # 「内存被限住」变成「静默少记数据」。内存面在别处已经收过口
+    # （`XADD ... MAXLEN ~ 100000` 兜住 Stream），这里只兜住容器。
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
     restart: unless-stopped
 
   # 一次性任务：迁移跑完即退出
@@ -112,6 +163,14 @@ services:
       - ./deploy/geoip:/geoip:ro
     expose:
       - "8080"
+    # 空闲 6.8M；512m 是上界而非常态。api 是唯一对外接流量的进程，
+    # 给到 2 CPU 让它能在尖峰时吃完配额（PG 那边也留了 2 CPU，避免互相饿死）。
+    # GOMEMLIMIT 在 x-backend-env 里（与这里的 memory 耦合，改动要一起改）。
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 512m
     restart: unless-stopped
 
   worker:
@@ -141,6 +200,13 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    # 空闲 3.6M。CPU 只给 1：worker 是每 2 秒一轮的批量回刷，不参与对外延迟，
+    # 给多了只会和 api / PG 抢核（单机部署下这三者共享同一批 CPU）。
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512m
     restart: unless-stopped
 
   frontend:
@@ -157,6 +223,14 @@ services:
       - "${FRONTEND_PORT:-8080}:80" # 对外唯一入口
     depends_on:
       - backend
+    # 空闲 8.8M：nginx 只发静态文件与反代。256m 足够几百个并发连接
+    # （每个连接的头/缓冲区是 KB 级）；给 1 CPU 是因为它的瓶颈在 TLS/网络，
+    # 不在计算。
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256m
     restart: unless-stopped
 
   # ----------------------------------------------------------
