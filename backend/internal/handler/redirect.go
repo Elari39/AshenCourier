@@ -34,6 +34,18 @@ const unlockCookie = "ac_unlock"
 // maxUnlockBody 限制口令表单的请求体。表单只有一个字段，1 KiB 绰绰有余。
 const maxUnlockBody = 1 << 10
 
+// referrerPolicy 是 302 跳转响应上的引用信息策略。
+//
+// ⚠️ 它必须与 `deploy/nginx/security-headers.conf` 里那条**取同一个值**：
+// 重复的 Referrer-Policy 会被浏览器当成逗号列表、**以最后一条为准**，而 nginx 的
+// add_header 追加在上游响应之后 —— 也就是 nginx 那份总是赢。两处不一致时，这一行
+// 会变成死代码，而且「读代码以为的策略」与「浏览器实际执行的策略」不是一回事。
+// 守卫：`nginx_headers_contract_test.go` 会把两者逐字比对。
+//
+// 取值理由：同源发完整 URL、跨源只发 origin（短链实际场景是 302 到第三方站点，
+// 于是对方只知道自己被从哪个站跳来，拿不到短码）、降级（https→http）不发。
+const referrerPolicy = "strict-origin-when-cross-origin"
+
 // serve 处理 GET /{code}。
 func (h *redirectHandler) serve(w http.ResponseWriter, r *http.Request) {
 	code := r.PathValue("code")
@@ -72,7 +84,7 @@ func (h *redirectHandler) serve(w http.ResponseWriter, r *http.Request) {
 	// 302 而非 301：301 会被浏览器永久缓存，之后再也拿不到统计，目标地址也无法修改。
 	w.Header().Set("Location", link.TargetURL)
 	w.Header().Set("Cache-Control", "no-store, private")
-	w.Header().Set("Referrer-Policy", "no-referrer-when-downgrade")
+	w.Header().Set("Referrer-Policy", referrerPolicy)
 	w.WriteHeader(http.StatusFound)
 
 	// 响应已发出，再做统计 —— 队列满就直接丢，不影响已经写出的 302

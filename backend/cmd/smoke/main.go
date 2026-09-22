@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -262,6 +263,84 @@ func (s *suite) runAll(ctx context.Context) error {
 				}
 			}
 			return nil
+		})
+	}
+
+	// ---------- 1c. 缓存头与安全响应头（仅经 nginx 时才有意义）----------
+	// 这两组都是「坏了也不报错」的类型：页面照样渲染、接口照样 200，
+	// 只有响应头不见了（安全退化）、或者浏览器把旧外壳缓存起来（部署后白屏）。
+	// 所以它们必须是 HTTP 断言 —— 光看代码或跑单测都发现不了。
+	if s.expectSPA {
+		s.check("SPA 外壳带 Cache-Control: no-cache（含深链与 /index.html 本身）", func(ctx context.Context) error {
+			// 四条路径覆盖不同入口：根、单段 SPA 路由、深链（/links/{code} 这种最常被分享的形态）、
+			// 以及 index.html 本身。它们最终都由 `location = /index.html` 送出（try_files 的
+			// 最后一个参数会触发内部重定向），少覆盖一种就可能漏掉一处缓存头。
+			for _, path := range []string{"/", "/login", "/links/smoke-probe", "/index.html"} {
+				got, err := s.do(ctx, http.MethodGet, path, nil, nil)
+				if err != nil {
+					return err
+				}
+				if got.status != http.StatusOK {
+					return fmt.Errorf("GET %s 返回 %d，期望 200", path, got.status)
+				}
+				cc := headerValue(got, "Cache-Control")
+				if !strings.Contains(cc, "no-cache") {
+					return fmt.Errorf("GET %s 的 Cache-Control=%q，期望含 no-cache\n"+
+						"    （没有它就只有 Last-Modified，浏览器按启发式规则缓存旧外壳，"+
+						"而 /assets/ 没有 fallback ⇒ 部署后白屏）", path, cc)
+				}
+			}
+			return nil
+		})
+
+		s.check("安全响应头在 200 / 404 / 401 三种响应上都在（always 生效）", func(ctx context.Context) error {
+			cases := []struct {
+				path string
+				want int
+			}{
+				{"/", http.StatusOK},
+				{"/zzzzzzz", http.StatusNotFound},         // 短链失效页：应用自己发的 404
+				{"/api/auth/me", http.StatusUnauthorized}, // 无凭据：401
+			}
+			for _, c := range cases {
+				got, err := s.do(ctx, http.MethodGet, c.path, nil, nil)
+				if err != nil {
+					return err
+				}
+				if got.status != c.want {
+					return fmt.Errorf("GET %s 返回 %d，期望 %d", c.path, got.status, c.want)
+				}
+				if err := assertSecurityHeaders(got, c.path); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+
+		s.check("内容哈希资源既有 immutable 缓存头、也没有丢掉安全头", func(ctx context.Context) error {
+			// 这条专门盯 nginx 的 add_header **不继承**那个坑：`location ^~ /assets/`
+			// 为了缓存头自己写了一条 add_header，于是 server 层那批安全头在那里会整批消失。
+			// 资源路径从首页里现取，避免把哈希文件名写死在断言里。
+			index, err := s.do(ctx, http.MethodGet, "/", nil, nil)
+			if err != nil {
+				return err
+			}
+			asset := assetPathRE.FindString(string(index.body))
+			if asset == "" {
+				return errors.New("首页里找不到 /assets/*.js 引用，无法验证静态资源的响应头")
+			}
+
+			got, err := s.do(ctx, http.MethodGet, asset, nil, nil)
+			if err != nil {
+				return err
+			}
+			if got.status != http.StatusOK {
+				return fmt.Errorf("GET %s 返回 %d，期望 200", asset, got.status)
+			}
+			if cc := headerValue(got, "Cache-Control"); !strings.Contains(cc, "immutable") {
+				return fmt.Errorf("GET %s 的 Cache-Control=%q，期望含 immutable", asset, cc)
+			}
+			return assertSecurityHeaders(got, asset)
 		})
 	}
 
@@ -1075,4 +1154,46 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// assetPathRE 从首页 HTML 里取出一条内容哈希资源路径，用来验静态资源的响应头。
+// 不写死文件名：哈希随每次构建变化，写死会让这条断言在下次部署后失效。
+var assetPathRE = regexp.MustCompile(`/assets/[A-Za-z0-9._-]+\.js`)
+
+// requiredSecurityHeaders 是经 nginx 访问时**必须**出现的响应头。
+// 键是头名，值是它必须包含的片段（空串表示只查头名在场）。
+//
+// 这里只钉「在不在」与最关键的取值，不复述 security-headers.conf 里的整串 CSP ——
+// 冒烟工具是黑盒端到端，太细的断言会让改一行 nginx 配置就要改测试。
+var requiredSecurityHeaders = map[string]string{
+	"Strict-Transport-Security": "max-age=31536000",
+	"X-Frame-Options":           "DENY",
+	"X-Content-Type-Options":    "nosniff",
+	"Referrer-Policy":           "strict-origin-when-cross-origin",
+	"Content-Security-Policy":   "frame-ancestors 'none'",
+}
+
+// assertSecurityHeaders 断言一次响应上安全头齐全。
+//
+// 取值一律走 headerValue（把所有同名头拼起来）而不是 Header.Get：
+// Get 只看**第一条**，而 nginx 允许同一个头出现多次 —— `/assets/` 上的 Cache-Control
+// 就是两条（`expires 1y` 加一条 `max-age=…`，`add_header` 再加一条 `public, immutable`），
+// 只看第一条会得到「没有 immutable」这个**假**结论（本轮第一次跑就是这么红的）。
+func assertSecurityHeaders(r *resp, where string) error {
+	for name, want := range requiredSecurityHeaders {
+		got := headerValue(r, name)
+		if got == "" {
+			return fmt.Errorf("%s 的响应缺 %s（nginx 那条 add_header 是否漏了 always？"+
+				"少了 always 时非 2xx 响应就不带这些头）", where, name)
+		}
+		if want != "" && !strings.Contains(got, want) {
+			return fmt.Errorf("%s 的 %s=%q，期望含 %q", where, name, got, want)
+		}
+	}
+	return nil
+}
+
+// headerValue 把同名响应头的所有取值拼成一条（逗号分隔，与浏览器看到的等价）。
+func headerValue(r *resp, name string) string {
+	return strings.Join(r.header.Values(name), ", ")
 }

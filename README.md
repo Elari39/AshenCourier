@@ -630,6 +630,72 @@ GET /api/links/{code}/clicks → 明细里 ip = 172.71.158.0/24
 > 影响：`qr.go` 里"删掉/改名后最多 5 分钟换图"的设计意图，在线上实际是 4 小时。
 > 要按设计意图走，就把该设置改成 *Respect Existing Headers*。
 
+### 缓存头与安全响应头
+
+两件事都写在 `deploy/nginx/security-headers.conf` 与 `nginx.conf` 里，都在**部署后才会暴露**：
+测试环境每轮都是干净浏览器，测不出「老外壳 + 已失效的哈希资源」，也测不出「响应头静默消失」。
+
+**① SPA 外壳必须 `Cache-Control: no-cache`**
+
+没有它时 nginx 只发 `Last-Modified`（实测 `Cache-Control` 与 `ETag` 都缺），浏览器按启发式规则
+缓存（约 `(now - Last-Modified) × 10%`）；而 `/assets/` 是**内容哈希 + `immutable`**、
+且 `try_files $uri =404` **刻意不设 fallback** —— 于是部署后，手里还开着旧页面的用户会拿
+旧外壳去请求**已经不存在的哈希资源**，拿到硬 404。结果是**白屏**，不是降级。
+
+实现上只需要一条 location：
+
+```nginx
+location = /index.html {
+    include /etc/nginx/security-headers.conf;   # 见下面的「add_header 不继承」
+    add_header Cache-Control "no-cache" always;
+}
+```
+
+它能覆盖 `/`、`/login`、`/dashboard`、`/links/{code}` 全部入口，靠的是 try_files 的语义：
+**最后一个参数不是普通回退，而是一次内部重定向** —— nginx 会拿 `/index.html` 重新做一遍
+location 匹配，落到这个 `=` 精确匹配上。所以外壳只有一个出口，**将来新增 SPA 路由也自动生效**。
+
+用 `no-cache` 而不是 `no-store`：允许缓存，但每次使用前必须带条件请求回源验证，
+内容没变仍是 304 —— 既省流量，又不会出现「旧外壳 + 新资源」。
+
+**② 全站安全响应头**
+
+| 头 | 取值 | 为什么不设它是个问题 |
+| --- | --- | --- |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` | 首次访问可被明文降级劫持。CF 的 *Always Use HTTPS* 只做 HTTP→HTTPS 跳转，**不等于** HSTS |
+| `X-Frame-Options` + CSP `frame-ancestors` | `DENY` / `'none'` | 控制台里那个「显示一次性管理密钥」的按钮**只显示一次**：被任意站点 iframe 嵌套 + 遮罩诱导点击就能把密钥骗走（点击劫持）。老浏览器只认前者、新标准只认后者，所以两条都给 |
+| `X-Content-Type-Options` | `nosniff` | 静态产物（`/assets/*.js`、`*.css`）靠它挡 MIME 混淆 |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | 外壳的引用信息会随出站请求外泄。⚠️ 302 那条**单独也设了同一个值**（`handler/redirect.go` 的 `referrerPolicy`）—— 重复的 Referrer-Policy 是逗号列表、**以最后一条为准**，而 nginx 的 `add_header` 追加在上游之后，也就是 nginx 那份总是赢；两处不一致时 Go 里那一行就是死代码（有守卫逐字比对） |
+| `Content-Security-Policy` | 见配置 | XSS 的第二道防线（走查未发现 XSS 面，所以它是纵深防御）。`style-src` 用的是**哈希**而不是 `'unsafe-inline'`：哈希对应口令页 / 失效页那段内联 `<style>`，从 `pageCSS` 常量算出来写入配置，`internal/handler/nginx_headers_contract_test.go` 会在常量改了而哈希没跟时变红（否则表现为「口令页静默变成没有样式的裸 HTML」） |
+
+全部带 `always`：nginx 默认只给 `2xx/3xx/204/301/302/304` 加头，而 404（短链失效页）、
+401（令牌过期）、503（依赖降级）恰恰是最需要它们的地方。
+
+> ⚠️ **`add_header` 在 nginx 里是替换而不是合并。** 父层的 `add_header` **只在「当前层级没有
+> `add_header`」时**才被继承 —— 所以 `location ^~ /assets/` 为了 immutable 缓存头自己写了一条，
+> server 层那批安全头就会在那里**整批消失**，而 `nginx -t`、页面渲染、缓存行为全都看不出异常。
+> 这正是安全头必须收进一个文件、再在每个写了 `add_header` 的层级 `include` 的原因。
+> 守卫 `internal/httpx/nginx_headers_test.go` 会解析 `nginx.conf` 的块结构，
+> 断言「**任何**含 `add_header` 的块里都有那个 include」，并检查外壳的 `no-cache` 仍在。
+>
+> **HSTS 是一扇单向门**：浏览器记住之后，在 `max-age` 内对该主机（以及
+> `*.shorten.miku831.fun`）会拒绝明文 HTTP，撤不回来。它只在「HTTPS 已经确定可用」时才该在场；
+> 本地走 `http://localhost:8080` 时发送它没有副作用（按 RFC 6797，浏览器必须忽略
+> 经非安全传输收到的 HSTS 头）。刻意**不加 `preload`**（撤出要等下一个浏览器版本，更不可逆）。
+
+**实测到的两处「同名头出现两次」，都不要当 bug 去重**：
+
+- `X-Content-Type-Options` 在**代理响应**上是两条（应用自己也设，`httpx/response.go`）。
+  应用那份保证「直连后端」也安全，nginx 这份保证它自己吐的静态文件也安全；取值相同。
+- `Cache-Control` 在 `/assets/` 上是两条（`expires 1y` 加一条 `max-age=…`，
+  `add_header` 再加一条 `public, immutable`）。这是**改动前就有的**既有行为，语义等价。
+  ⚠️ 但它有个真实的副作用：Go 的 `Header.Get` 只返回**第一条**，所以断言缓存头时必须
+  拼上全部取值（`cmd/smoke` 里那个 `headerValue` 就是为此而存在 —— 第一版断言只看第一条，
+  于是把正确配置报成了「没有 immutable」）。
+
+> **CDN 前置时请复验一次**：CF 会改写缓存头（见上一节），也可能改写或剥掉安全头。
+> 部署后拿 `curl -sSI` 对着线上跑一遍上表，确认它们原样出现。
+
 ### `/metrics`（Prometheus 文本格式）
 
 同一批数字的另一种形态，供 Prometheus 抓取。**零依赖**：没有客户端库，就是几十行手写的
@@ -1053,6 +1119,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **文档 ㉜**：界面截图与 README（B6 之后） | 7 张截图全部采自**运行中的实例**（Docker 全栈，frontend 镜像是当前源码的构建），落在 `docs/screenshots/`：`landing.png` 1440×1978 / `create-result.png` 1440×652（裁 hero 块）/ `dashboard.png` 1440×1595 / `link-detail.png` 1440×3117 / `confirm-dialog.png` 1440×900 / `mobile-dashboard.png` 390×2174 / `mobile-menu.png` 390×470，合计 **704KB**。采集用无头 Chrome + CDP（**零 npm 依赖**，只复用 `frontend/e2e/cdp.mjs` 的 `launchChrome`，另补 `Page.captureScreenshot` / `Emulation.setDeviceMetricsOverride` / `setScrollbarsHidden` 与 `Input.dispatch*`）。**图里的数据是真的**：演示账号建 4 条带标签短链、真打 30 次跳转，趋势图与明细就是这些点击，不是 mock 数字。两处刻意为之：`create-result` 必须在**未登录态**采（登录态后端不回 `manage_key`，结果卡根本不渲染）；`confirm-dialog` 只按 Esc、不点确认（不真删演示链接）。顺手复核了 B5 那两处修复在真实页面上的样子：一次性管理密钥默认打码（点「显示」才明文）、明细 IP 只到 `/24` 网段；`mobile-menu` 用的是 B4 修好的面板（390px 视口下 0…390 × 64…844 铺满，不是悬空一块）。另加 `.dockerignore` 的 `docs` 一行，并用 scratch 探针**实测**排除生效：当前构建上下文 **841.71kB**（`docs/screenshots` 自己就有 704KB，可见它确实不在其中）；往 `docs/` 塞 1MiB 后 `COPY` 层**仍命中缓存**（上下文摘要未变），而同样 1MiB 放进 `deploy/` 会让上下文涨到 **1.06MB** 且该层重建 —— 正反对照。**门禁**：eslint / vue-tsc / audit:refs / build 全 0，vitest **56**，e2e **39 / 39**，冒烟 **28 / 28**；重建 frontend 镜像后，容器里被服务的 **25** 个资源与重建前**逐字节一致**（三方一致：容器 `.Image` == tag `.Id` == manifest list `d5a598fb`）；推送后 CI 同样全绿（[run 35566729860](https://github.com/Elari39/AshenCourier/actions/runs/35566729860)，`frontend` 48s / `backend` 54s / `smoke` 1m47s —— 冒烟 job 里的 `docker compose up -d --build` 用的正是这份排除了 `docs` 的上下文） | 本机（Docker + 无头 Chrome）+ CI `frontend` / `backend` / `smoke` |
 | **部署 ㉝**：CDN 前置下的真实客户端 IP（本轮审计修复） | **线上实测确认了缺陷**：建链并跳转一次后，`GET /api/links/{code}/clicks` 返回 `ip = 172.71.158.0/24`（第二次独立复现是 `172.71.154.0/24`），落在 Cloudflare 的 `172.64.0.0/13` 内，而访客并非从 CF 访问 —— 即 `$remote_addr` 是 CF 边缘节点的地址，后果是「按 IP 的限流配额被全网共享」+「明细/日志 IP 失真」。修法：`nginx.conf` 用 real_ip 模块从 `CF-Connecting-IP` 还原访客地址（15 个 IPv4 + 7 个 IPv6 段，取自 <https://www.cloudflare.com/ips/>，并拉官方 `ips-v4` / `ips-v6` **逐条比对过：22/22 完全一致，无多无缺**），并新增守卫 `internal/httpx/realip_test.go`。**本机（前面没有 CDN）能验的是「不改变既有行为」**：没有 CF 段的对端 ⇒ `set_real_ip_from` 不匹配 ⇒ `$remote_addr` 仍是 Docker 网关；重建 `frontend` 镜像后 `nginx -t` 为 `syntax is ok`，e2e **39 / 39** 紧接冒烟 **28 / 28**。**变异验证 3 条 + 1 条负对照**：删掉全部 `set_real_ip_from` → `TestNginxRestoresRealClientIP` 红；`real_ip_header` 换成客户端可伪造的 `X-Forwarded-For` → 红；删掉 `proxy_set_header X-Real-IP $remote_addr` → 红；只改注释（负对照）→ 仍绿；三条还原后 sha256 与基线逐字节一致，并**独立读文件**复核了配置仍在场（不只信脚本自证）。⚠️ **该配置只在真实 CF 前置下才真正生效**，部署后需复验一次：把明细里的 IP 与访客实际出口比对。运维侧的两件事写在「CDN 前置部署」一节（源站只允许 CF 段访问；CF 段增删要同步） | 本机（Docker，`frontend` 镜像重建，单平台 manifest `cbdbcc56`）+ 线上（缺陷复现） |
 | **部署 ㉞**：删掉 10 条幽灵 SPA 路由，并让保留字的 404 说实话（本轮审计修复） | 审计发现 nginx 与 vite **各预留 10 条前端并不存在**的顶级路由（`/logout` `/settings` `/account` `/profile` `/admin` `/about` `/help` `/docs` `/terms` `/privacy`），它们被 `try_files` 兜到 `index.html` ⇒ **「不存在的页面」以 200 返回**，掩盖真实的 404。修法：清单收敛到前端真实存在的 4 条（login / register / dashboard / links），并给守卫加一条「**不多不少**」的不变量（`routes_sync_test.go` 现在同时读 `src/router/index.ts`、`nginx.conf` 与 `vite.config.ts` 做三向比对）。**容器实测**（全部重建镜像后）：4 条真实路由仍 **200** + SPA 外壳（含 `/links/AbCdEf`）；10 条幽灵路由全部 **404**；`/metrics` 仍由 nginx 回 404、`/healthz` 仍 200；形态非法的 `/zzzzzzz` 仍是「这条短链不存在」—— 幽灵路由返回码不正确的条数 = **0**。**顺带**：删掉占位后保留字会真的落到后端，而那里原本对保留字也说「这条短链不存在」—— 改成「页面不存在」（访问者找的是页面，不是短链）。**⚠️ 同时纠正了自己的一条审计结论**：`reserved.go` 分两组，`admin`/`about`/`terms` 等属「**易被误用 / 品牌与合规页**」的**刻意预留**，不是「白占短码」—— 所以本轮**只删 nginx/vite 的占位，保留字表一条没动**。**变异验证 3 条 + 1 条负对照**：加回一条幽灵路由 → 红；删掉一条真实路由 → 红（下限探针）；vite 白名单少一条 → 红；只改注释 → 绿；还原后两文件逐字节一致。e2e **39 / 39** 紧接冒烟 **28 / 28**。⚠️ 过程中踩到两个「变异脚本自己撒谎」的坑（替换锚点漏了行尾注释、以及用字面 `\n` 匹配 CRLF 文件），两次都表现为「测试没守住」的**假结论** —— 已按「变异必须先确认真的改到了东西」修掉 | 本机（Docker；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致 `2026-09-22T04:19:11Z`） |
+| **部署 ㉟**：SPA 外壳缓存头 + 全站安全响应头（本轮审计修复） | 修的是审计里 A2 与 A4 两条，都属于「部署后才暴露」：CI 每轮都是干净浏览器，测不出「老外壳 + 已失效的哈希资源」，也测不出「响应头静默消失」。**① 外壳缓存头**：新增 `location = /index.html` 一条，带 `Cache-Control: no-cache always`。它能覆盖全部入口靠的是 try_files 语义 —— **最后一个参数是内部重定向**，nginx 会拿 `/index.html` 重新匹配 location，所以外壳只有一个出口、新增 SPA 路由自动生效。实测（`/`、`/login`、深链 `/links/AbCdEf`、`/index.html` 四条）全部 `CC=['no-cache']` **且恰好一条**。**② 安全头**：5 条（HSTS / X-Frame-Options / nosniff / Referrer-Policy / CSP）收进新文件 `deploy/nginx/security-headers.conf`，在 server 层与每个自带 `add_header` 的层级 `include`。带 `always` 实测在 200 / **401** / **404**（含 nginx 自己的 `/metrics` 404）上都出现。**③ CSP 直接强制、不是 Report-Only**：真浏览器 e2e **39 / 39** 且「全程零 console 错误」那条绿 —— CSP 违规会在控制台报错，所以这一次的浏览器验收同时是 CSP 的实测。`style-src` 用**哈希**（从 `pageCSS` 常量算，非 `'unsafe-inline'`），只为放行口令页 / 失效页那段内联 `<style>`。**④ 过程中实测到并记录的三个事实**：(a) 代理响应上 `X-Content-Type-Options` 是**两条**（应用 + nginx），取值相同、刻意保留；(b) `/assets/` 上 `Cache-Control` 本来就是**两条**（`expires 1y` + `add_header`，改动前就如此），而 **Go 的 `Header.Get` 只看第一条** —— 第一版冒烟断言因此把正确配置报成「没有 immutable」，加了 `headerValue`（拼接全部取值）后转绿；(c) `nginx.conf` 是 CRLF、其余文件是 LF，两者各自一致、没有混合。**⑤ 新增 5 条守卫**：`internal/httpx/nginx_headers_test.go`（解析 `nginx.conf` 的**块结构**，断言「任何含 `add_header` 的块里都有那个 include」+ 外壳 `no-cache` 在场 + 每条头都带 `always`）与 `internal/handler/nginx_headers_contract_test.go`（CSP 哈希与 `pageCSS` 一致；`referrerPolicy` 与 nginx 逐字一致 —— 因为 nginx 的 `add_header` 追加在上游之后，重复的 Referrer-Policy 以最后一条为准，不一致时 Go 那行是死代码）。**变异验证 6 条 + 1 条负对照，全部按预期**：删掉 Referrer-Policy / CSP 去掉 `always` / `/assets` 块漏 include / 外壳缓存头改成可长期缓存 / `pageCSS` 改了哈希没跟 / Go 与 nginx 的 Referrer-Policy 不一致 —— 六条各自只红对应的用例；只改注释的负对照仍绿；还原后四份文件逐字节一致并**独立读文件**复核。**验收**：`gofmt` / `go vet` / `go test ./...` 全绿；`nginx -t` syntax is ok；e2e **39 / 39** 紧接冒烟 **31 / 31**（+3：外壳 no-cache、三种状态码上的安全头、内容哈希资源同时有 immutable 与安全头）；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致（`2026-09-22T04:39:24Z`），并且**三方一致**（容器 `.Image` == 镜像 tag `.Id` == 构建日志里的 manifest list：`frontend` `e88aa49e` / `backend` `09bddc99` / `worker` `01113067`）。⚠️ **单向门提醒**：HSTS 一旦被浏览器记住，在 `max-age` 内撤不回来，所以刻意不加 `preload`；线上是 CF 提供 TLS 才敢带 `includeSubDomains` | 本机（Docker + 无头 Chrome） |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 

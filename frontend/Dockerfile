@@ -45,6 +45,10 @@ FROM nginx:1.31-alpine AS runtime
 # 用仓库里的 nginx.conf 整体覆盖默认配置：
 # 反代 /api、短码正则 → backend，/assets 优先于短码正则，其余走 SPA fallback
 COPY deploy/nginx/nginx.conf /etc/nginx/nginx.conf
+# 安全响应头单独一份，由 nginx.conf 在**每个自带 add_header 的层级** include
+# （nginx 的 add_header 是替换而不是合并，理由见该文件顶部）。
+# 路径写死成 /etc/nginx/security-headers.conf —— 与 nginx.conf 里的 include 一致。
+COPY deploy/nginx/security-headers.conf /etc/nginx/security-headers.conf
 
 COPY --from=build /app/dist /usr/share/nginx/html
 
