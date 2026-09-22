@@ -181,6 +181,18 @@ jobs:
           fi
           docker compose ps
 
+      # 镜像 tag 漂移守卫：api 与 worker 共用一份 Dockerfile，但 compose 会给
+      # 每个服务各建一个 tag。判据是**内容层**（RootFS.Layers）逐项相等 ——
+      # 与构建时间/缓存状态无关，且刻意不比 image id（compose 给每个服务加了
+      # 自己的 label，两个 id 天生不同）。
+      #
+      # 本步骤在 CI 里跑的是 `up -d --build` 刚建出来的镜像，正常情况下必然绿；
+      # 它的价值是**回归网**：compose 文件一旦被改成「worker 不从同一份
+      # Dockerfile 构建」（或只 build 其中一个），这里会红，而不是等到线上发现
+      # worker 跑的是旧二进制。本机同一条命令用来在重建后自检。
+      - name: 镜像 tag 漂移守卫（backend 与 worker 必须同一份构建）
+        run: node deploy/check-image-drift.mjs
+
       # ⚠️ 顺序不能颠倒：本步骤**必须**排在「端到端冒烟」之前。
       #    原因：POST /api/links 是 10 次/分钟/IP 的硬配额（写死在 config，不可用环境变量调整），
       #    而 cmd/smoke 的**最后一项检查**会故意把这配额打满（它要断言 429 + Retry-After）。
