@@ -7,9 +7,18 @@ const SITE_NAME = 'AshenCourier'
 const DEFAULT_TITLE = `${SITE_NAME} · 把长链接变短`
 
 /**
- * ⚠️ 顶级路径清单必须与后端 `internal/pkg/shortcode/reserved.go` 的
- *    「前端 SPA 顶级路由」一致（那边有单测断言）。新增页面时两处一起改，
- *    否则新路由会被短码跳转"吃掉"。
+ * ⚠️ 这份清单是「单段顶级路由」的**唯一事实来源**：
+ *    - `deploy/nginx/nginx.conf` 的 `location = /xxx` 必须与它**不多不少**一致；
+ *    - `vite.config.ts` 的 `SPA_ROUTES` 同理（dev proxy 的 bypass 白名单）；
+ *    - 后端 `internal/pkg/shortcode/reserved.go` 的保留字表是它的**超集**
+ *      （额外那些是「品牌与合规页」的刻意预留，防止别人抢注 `admin` / `terms` 这类词）。
+ *
+ *    三者由 `backend/internal/pkg/shortcode/routes_sync_test.go` 交叉断言。
+ *    约束是「不多不少」而不是「越多越好」：nginx 多写一条前端并不存在的路由，
+ *    它就会被 `try_files` 兜成 **200 + NotFound 视图** —— 不存在的页面以成功码返回，
+ *    掩盖真实的 404。2026-09-22 的审计据此删掉了 10 条这种占位路由。
+ *
+ *    新增页面时：在这里加路由 → 同步 nginx 与 vite 白名单 → 需要占住这个词就再加保留字表。
  */
 const routes: RouteRecordRaw[] = [
   {

@@ -40,8 +40,7 @@ func (h *redirectHandler) serve(w http.ResponseWriter, r *http.Request) {
 
 	// 双保险：nginx 的 location 正则已经挡了一层形态校验，
 	// 这里再排一次保留字，避免 /api、/login 之类被当成短码解析。
-	if !shortcode.IsValidShape(code) || shortcode.IsReserved(code) {
-		h.notFound(w, r)
+	if h.rejectNonShortCode(w, r, code) {
 		return
 	}
 
@@ -87,6 +86,34 @@ func (h *redirectHandler) serve(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// rejectNonShortCode 处理「这个路径根本不是短码」的两种形态，返回 true 表示响应已写出。
+//
+// 两种形态的文案刻意不同：
+//   - **形态非法**（长度/字符集不对）：用户多半是在访问一条短链，只是码写错了或拼断了
+//     —— 「这条短链不存在」是对的。
+//   - **保留字**（`/admin`、`/metrics`、`/settings` 这类）：这些路径**不是短链**，
+//     访问者找的是一个页面。说「这条短链不存在」会答非所问 —— 他并没有在找短链。
+//
+// 第二种以前几乎走不到（nginx 把 `/settings` 这类路径都兜成了 index.html），
+// 2026-09-22 的审计把那些**前端并不存在**的路由从 nginx 里删掉之后，
+// 保留字就真的会落到这里，所以这段文案开始有实际影响。
+func (h *redirectHandler) rejectNonShortCode(w http.ResponseWriter, r *http.Request, code string) bool {
+	switch {
+	case !shortcode.IsValidShape(code):
+		h.notFound(w, r)
+		return true
+	case shortcode.IsReserved(code):
+		writeErrorPage(w, r, errorPageData{
+			Code:    http.StatusNotFound,
+			Title:   "页面不存在",
+			Message: "这个地址被站点保留，既不是一条短链，也没有对应的页面。检查一下地址是否拼错了？",
+		})
+		return true
+	default:
+		return false
+	}
+}
+
 // notFound 渲染 404 短码失效页。
 func (h *redirectHandler) notFound(w http.ResponseWriter, r *http.Request) {
 	writeErrorPage(w, r, errorPageData{
@@ -114,8 +141,7 @@ func (h *redirectHandler) unlock(w http.ResponseWriter, r *http.Request) {
 	code := r.PathValue("code")
 
 	// 与 GET 同源的形态校验：保留字与非法形态在这里同样不该被当成短码
-	if !shortcode.IsValidShape(code) || shortcode.IsReserved(code) {
-		h.notFound(w, r)
+	if h.rejectNonShortCode(w, r, code) {
 		return
 	}
 	if h.unlocker == nil {

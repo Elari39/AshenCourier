@@ -12,15 +12,15 @@ import { defineConfig } from 'vitest/config'
  * 短码代理正则会命中 /dashboard、/login 这类 SPA 路由，
  * 因此必须显式让它们绕过代理 —— 否则开发时刷新页面会打到后端拿 404。
  *
- * ⚠️ 这一份必须与 `deploy/nginx/nginx.conf` 的 `location = /xxx` 清单**完全一致**
- *    （后端 `internal/pkg/shortcode/reserved.go` 的保留字表则是它的超集，可以多不能少）。
- *    这个不变量现在有自动化守卫：`backend/internal/pkg/shortcode/routes_sync_test.go`
- *    会同时读这三个文件做交叉比对，漏改哪一处都会让 `go test ./...` 红 ——
- *    原来只靠注释提醒，结果 terms / privacy 就在这里漂移过（nginx 与保留字表都有、
- *    只有这一份没有，表现为本地 `pnpm dev` 下刷新 /terms 被当成短码打到后端 404）。
+ * ⚠️ 这一份必须与 `src/router/index.ts` 里真实存在的顶级路由**完全一致**，
+ *    并与 `deploy/nginx/nginx.conf` 的 `location = /xxx` 清单一致
+ *    （后端 `internal/pkg/shortcode/reserved.go` 的保留字表是它的**超集**，
+ *    额外那些是「品牌与合规页」的刻意预留，可以多不能少）。
+ *    这个不变量有自动化守卫：`backend/internal/pkg/shortcode/routes_sync_test.go`
+ *    会同时读三个文件交叉比对 —— nginx 有、前端没有（曾多出 10 条）、
+ *    或前端有、nginx 没有，都会让 `go test ./...` 红。
  */
-const SPA_ROUTES =
-  /^\/(login|register|logout|dashboard|links|settings|account|profile|admin|about|help|docs|terms|privacy)(\/|$)/
+const SPA_ROUTES = /^\/(login|register|dashboard|links)(\/|$)/
 
 export default defineConfig({
   plugins: [vue(), tailwindcss()],

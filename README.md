@@ -718,24 +718,37 @@ docker compose exec postgres dropdb -U ashen restore_check
 
 ### 1. 新增前端顶级路由，必须同步四处
 
-单域名下短码与 SPA 路由共用路径空间。新增顶级路由（例如 `/settings`）时要改**四个地方**：
+单域名下短码与 SPA 路由共用路径空间。**清单的唯一事实来源是 `frontend/src/router/index.ts`**；
+新增顶级路由（例如 `/settings`）时要改四处：
 
-1. `deploy/nginx/nginx.conf` 加一行 `location = /settings { try_files $uri /index.html; }`
-2. `backend/internal/pkg/shortcode/reserved.go` 的 `reserved` 集合
-3. `backend/internal/pkg/shortcode/shortcode_test.go` 里 `TestReservedSetContents` 的断言
-4. `frontend/vite.config.ts` 的 `SPA_ROUTES`（dev proxy bypass）
+1. `frontend/src/router/index.ts` —— 加路由（事实来源）
+2. `deploy/nginx/nginx.conf` 加一行 `location = /settings { try_files $uri /index.html; }`
+3. `frontend/vite.config.ts` 的 `SPA_ROUTES`（dev proxy bypass 白名单）
+4. 想让这个词不能被别人抢注成短码，再加进
+   `backend/internal/pkg/shortcode/reserved.go` 的 `reserved` 集合（连带
+   `shortcode_test.go` 里 `TestReservedSetContents` 的断言）
 
-漏掉第 1 步 → 生产环境刷新 `/settings` 会 404；
-漏掉第 2 步 → 别人可以注册 `settings` 当短码，把真实页面吃掉；
-漏掉第 4 步 → 开发环境刷新该页面会 404。
+漏掉第 2 步 → 生产环境刷新 `/settings` 会 404；
+漏掉第 3 步 → 开发环境刷新该页面会 404；
+漏掉第 4 步 → 别人可以注册 `settings` 当短码，把真实页面吃掉。
 
-> **这三条现在有自动化守卫了**：`backend/internal/pkg/shortcode/routes_sync_test.go`
-> 同时读 `nginx.conf`、`frontend/vite.config.ts` 与保留字表做交叉比对
-> （nginx 的 `location = /xxx` 清单 == vite 的 `SPA_ROUTES`，两者并集 ⊆ 保留字表），
+> **前三条现在有自动化守卫了**：`backend/internal/pkg/shortcode/routes_sync_test.go`
+> 同时读 `src/router/index.ts`、`nginx.conf` 与 `vite.config.ts` 做交叉比对
+> （三者的顶级路由清单必须**完全一致、不多不少**），并断言它们都在保留字表里。
 > 漏改哪一处 `go test ./...` 就会红并打印差异。
 > 加它的原因不是「防患于未然」，是真的漂移过：`terms` / `privacy` 在 nginx 与保留字表里
 > 都有，只有 vite 那份漏了 —— 表现是本地 `pnpm dev` 刷新 `/terms` 被当成短码打到后端 404，
 > 而生产 nginx 返回 200。靠注释提醒是拦不住的。
+
+> ⚠️ **约束是「不多不少」，不是「越多越好」。** 2026-09-22 的审计发现 nginx 与 vite 里
+> 各有 **10 条前端并不存在**的占位路由（`/logout` `/settings` `/account` `/profile`
+> `/admin` `/about` `/help` `/docs` `/terms` `/privacy`）：它们被 `try_files` 兜到
+> `index.html`，于是**「不存在的页面」以 200 返回**（渲染的是 NotFound 视图）——
+> 爬虫与可用性监控会把不存在当成正常，真实的 404 被掩盖。想预留将来要做的页面，
+> 正确做法是**等页面做出来再加那一行**。
+> 保留字表不受影响：那一份是**超集**，`/admin` `/terms` 这类词仍然刻意留着防止抢注。
+> 顺带：删掉这些占位之后，保留字真的会落到后端，于是那里也补上了更准确的一套 404 文案
+> （对保留字说「页面不存在」而不是「这条短链不存在」—— 访问者找的是页面，不是短链）。
 
 > **同一个坑的反面：新增「不是 SPA 页面但对外存在」的路径，也要动第 1、2 步。**
 > `/metrics` 就是例子 —— 它 7 位、形状与短码完全一致，于是同时踩两头：
@@ -1039,6 +1052,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **前端 ㉛**：零引用清仓 + 把「清一次」变成 CI 守卫（B6） | ① **清仓清单**：组件 31 个**全部有引用**；`main.css` 具名类 52 个里 **2 个零引用**（`.title-sm` 与 `.caption` —— DESIGN.md 的字阶表里有这两档，但本仓库从没用过）；npm 依赖无孤儿。另有 11 个「零引用**类型导出**」逐个核对后**全部不是死码**：`RequestTicket` / `RequestGuard` 是 `createRequestGuard()` 的返回类型，`ConfirmOptions` / `PendingConfirm` / `ConfirmVariant` 被 `useConfirm` 的签名用着，`ToastKind` 被 `Toast` 与 `Record<ToastKind, number>` 用着，`LinkStatus` 与四个 bucket 接口是 `Link` / `Stats` 的字段类型 —— 删掉 `export` 只会让调用方再也引用不到这些字段类型，属倒退，故保留。② **删两个类省 161 字节**（对照构建：HEAD 源码 31491 → 改后 31330，逐字节可控）。③ 顺带查出**两个反直觉事实**，都写进了 `main.css` 的行内注释：**(a)** Tailwind v4 会把**未引用**的 `@theme` 变量从产物里剪掉，所以「标着却没人用的 token」留着成本是 **0**，删它反而是纯改动；**(b)** 但它判断「一个 token 有没有被用到」靠的是**扫源码文本**，于是**在 JS/TS 的注释里写出 token 全名就等于把它钉进 `:root`** —— 本轮我自己在新建的守卫脚本头部为了举例写了三个 token 名，产物就凭空多出 **68 字节**。这条是**用「把 `frontend/scripts/` 整个移出 Vite 根再构建」隔离出来的**：移出后恰好那三个变量从产物消失、移回来又复现，完全可逆（`--radius-sm` 与 `--color-success` 因为在用而始终在场，作为对照）。④ **纠正两条被旧产物误导的结论**：本机磁盘上的 `frontend/dist/` 是**陈旧构建**（27615 字节），而同一份源码在本机重建是 31491 字节 —— 差 3.8KB，说明那份 dist 早于好几轮改动，拿它做的测量都不可信；以后测产物一律先重建。⑤ **把清扫变成守卫**：新增 `frontend/scripts/check-zero-ref.mjs`（零 npm 依赖）+ `pnpm audit:refs` + CI `frontend` job 里的一步，查三类：零引用组件、零引用的 `main.css` 具名类、「未引用的 token 被非 CSS 源码提到」；**刻意不判**未引用 token 本身（零成本）与类型导出（不是死码）。判定口径也写清：类的「使用」只认非 CSS 文件**且不含 `scripts/`**（否则守卫会被自己的注释糊住），token 的「被用到」则要**连 `scripts/` 一起看**（Tailwind 也扫它）。⑥ **变异验证 5 条，只红对应的那一条**：注入零引用类 / 新增零引用组件 / 断开 `ToastHost` 对 `ToastItem` 的**相对导入**（这条专门钉住历史盲区 —— 第一版审计只匹配 `ui/ToastItem.vue` 字面量，于是把还在用的 `ToastItem` 误报成零引用）/ 在 `.ts` 里提及未引用的 token / 一条负对照（同样加一个类但模板里用上 → 必须仍然绿）。**M5 第一次跑是红的，原因是守卫自己真有缺陷**：扫描集漏了 `scripts/` —— 恰恰是泄漏发生的那一个目录；补上后转红。**验收**：eslint / vue-tsc / audit:refs / build 均 0，vitest **56**；镜像重建后三方一致（容器 `.Image` == tag `.Id` == 构建 manifest list `f2d4b9e9`），e2e **39 / 39**、冒烟 **28 / 28**；**从容器里读那份被服务的 CSS** 确认：31240 字节、六个未引用 token 一个都不在、`.title-sm` 与 `.caption` 已消失。⚠️ 容器是 31240、本机是 31262 —— 差的 22 字节来自 `.dockerignore` 排除了 `frontend/e2e`（容器扫不到它），本地测产物时要记得这个差。⚠️ 另记三条本机工程坑：**(a)** 变异脚本「写-还原」的自证这次**撒过谎**（脚本自己的 sha 比对报告还原成功，文件里其实还留着变异内容），所以现在除 sha 外还**独立读文件找残留标记** —— 正是这一步抓到了残留的探针文件；**(b)** 变异脚本若把「探针文件」算进基线，`restore()` 会在每个变异前后都把它**写回来**，越跑越脏（已改成探针一律按「基线不存在」处理）；**(c)** 本机 Git Bash 的 `rm` 是个 shim，内部调 `dirname` 而 PATH 里没带 coreutils —— 它**报错却返回 0、文件根本没删**，删除后必须独立读回复核。 | 本机（Docker + 无头 Chrome）+ CI `frontend` |
 | **文档 ㉜**：界面截图与 README（B6 之后） | 7 张截图全部采自**运行中的实例**（Docker 全栈，frontend 镜像是当前源码的构建），落在 `docs/screenshots/`：`landing.png` 1440×1978 / `create-result.png` 1440×652（裁 hero 块）/ `dashboard.png` 1440×1595 / `link-detail.png` 1440×3117 / `confirm-dialog.png` 1440×900 / `mobile-dashboard.png` 390×2174 / `mobile-menu.png` 390×470，合计 **704KB**。采集用无头 Chrome + CDP（**零 npm 依赖**，只复用 `frontend/e2e/cdp.mjs` 的 `launchChrome`，另补 `Page.captureScreenshot` / `Emulation.setDeviceMetricsOverride` / `setScrollbarsHidden` 与 `Input.dispatch*`）。**图里的数据是真的**：演示账号建 4 条带标签短链、真打 30 次跳转，趋势图与明细就是这些点击，不是 mock 数字。两处刻意为之：`create-result` 必须在**未登录态**采（登录态后端不回 `manage_key`，结果卡根本不渲染）；`confirm-dialog` 只按 Esc、不点确认（不真删演示链接）。顺手复核了 B5 那两处修复在真实页面上的样子：一次性管理密钥默认打码（点「显示」才明文）、明细 IP 只到 `/24` 网段；`mobile-menu` 用的是 B4 修好的面板（390px 视口下 0…390 × 64…844 铺满，不是悬空一块）。另加 `.dockerignore` 的 `docs` 一行，并用 scratch 探针**实测**排除生效：当前构建上下文 **841.71kB**（`docs/screenshots` 自己就有 704KB，可见它确实不在其中）；往 `docs/` 塞 1MiB 后 `COPY` 层**仍命中缓存**（上下文摘要未变），而同样 1MiB 放进 `deploy/` 会让上下文涨到 **1.06MB** 且该层重建 —— 正反对照。**门禁**：eslint / vue-tsc / audit:refs / build 全 0，vitest **56**，e2e **39 / 39**，冒烟 **28 / 28**；重建 frontend 镜像后，容器里被服务的 **25** 个资源与重建前**逐字节一致**（三方一致：容器 `.Image` == tag `.Id` == manifest list `d5a598fb`）；推送后 CI 同样全绿（[run 35566729860](https://github.com/Elari39/AshenCourier/actions/runs/35566729860)，`frontend` 48s / `backend` 54s / `smoke` 1m47s —— 冒烟 job 里的 `docker compose up -d --build` 用的正是这份排除了 `docs` 的上下文） | 本机（Docker + 无头 Chrome）+ CI `frontend` / `backend` / `smoke` |
 | **部署 ㉝**：CDN 前置下的真实客户端 IP（本轮审计修复） | **线上实测确认了缺陷**：建链并跳转一次后，`GET /api/links/{code}/clicks` 返回 `ip = 172.71.158.0/24`（第二次独立复现是 `172.71.154.0/24`），落在 Cloudflare 的 `172.64.0.0/13` 内，而访客并非从 CF 访问 —— 即 `$remote_addr` 是 CF 边缘节点的地址，后果是「按 IP 的限流配额被全网共享」+「明细/日志 IP 失真」。修法：`nginx.conf` 用 real_ip 模块从 `CF-Connecting-IP` 还原访客地址（15 个 IPv4 + 7 个 IPv6 段，取自 <https://www.cloudflare.com/ips/>，并拉官方 `ips-v4` / `ips-v6` **逐条比对过：22/22 完全一致，无多无缺**），并新增守卫 `internal/httpx/realip_test.go`。**本机（前面没有 CDN）能验的是「不改变既有行为」**：没有 CF 段的对端 ⇒ `set_real_ip_from` 不匹配 ⇒ `$remote_addr` 仍是 Docker 网关；重建 `frontend` 镜像后 `nginx -t` 为 `syntax is ok`，e2e **39 / 39** 紧接冒烟 **28 / 28**。**变异验证 3 条 + 1 条负对照**：删掉全部 `set_real_ip_from` → `TestNginxRestoresRealClientIP` 红；`real_ip_header` 换成客户端可伪造的 `X-Forwarded-For` → 红；删掉 `proxy_set_header X-Real-IP $remote_addr` → 红；只改注释（负对照）→ 仍绿；三条还原后 sha256 与基线逐字节一致，并**独立读文件**复核了配置仍在场（不只信脚本自证）。⚠️ **该配置只在真实 CF 前置下才真正生效**，部署后需复验一次：把明细里的 IP 与访客实际出口比对。运维侧的两件事写在「CDN 前置部署」一节（源站只允许 CF 段访问；CF 段增删要同步） | 本机（Docker，`frontend` 镜像重建，单平台 manifest `cbdbcc56`）+ 线上（缺陷复现） |
+| **部署 ㉞**：删掉 10 条幽灵 SPA 路由，并让保留字的 404 说实话（本轮审计修复） | 审计发现 nginx 与 vite **各预留 10 条前端并不存在**的顶级路由（`/logout` `/settings` `/account` `/profile` `/admin` `/about` `/help` `/docs` `/terms` `/privacy`），它们被 `try_files` 兜到 `index.html` ⇒ **「不存在的页面」以 200 返回**，掩盖真实的 404。修法：清单收敛到前端真实存在的 4 条（login / register / dashboard / links），并给守卫加一条「**不多不少**」的不变量（`routes_sync_test.go` 现在同时读 `src/router/index.ts`、`nginx.conf` 与 `vite.config.ts` 做三向比对）。**容器实测**（全部重建镜像后）：4 条真实路由仍 **200** + SPA 外壳（含 `/links/AbCdEf`）；10 条幽灵路由全部 **404**；`/metrics` 仍由 nginx 回 404、`/healthz` 仍 200；形态非法的 `/zzzzzzz` 仍是「这条短链不存在」—— 幽灵路由返回码不正确的条数 = **0**。**顺带**：删掉占位后保留字会真的落到后端，而那里原本对保留字也说「这条短链不存在」—— 改成「页面不存在」（访问者找的是页面，不是短链）。**⚠️ 同时纠正了自己的一条审计结论**：`reserved.go` 分两组，`admin`/`about`/`terms` 等属「**易被误用 / 品牌与合规页**」的**刻意预留**，不是「白占短码」—— 所以本轮**只删 nginx/vite 的占位，保留字表一条没动**。**变异验证 3 条 + 1 条负对照**：加回一条幽灵路由 → 红；删掉一条真实路由 → 红（下限探针）；vite 白名单少一条 → 红；只改注释 → 绿；还原后两文件逐字节一致。e2e **39 / 39** 紧接冒烟 **28 / 28**。⚠️ 过程中踩到两个「变异脚本自己撒谎」的坑（替换锚点漏了行尾注释、以及用字面 `\n` 匹配 CRLF 文件），两次都表现为「测试没守住」的**假结论** —— 已按「变异必须先确认真的改到了东西」修掉 | 本机（Docker；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致 `2026-09-22T04:19:11Z`） |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 

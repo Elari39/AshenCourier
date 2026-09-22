@@ -21,7 +21,15 @@ import (
 
 // minExpectedRoutes 是解析结果的下限，用来防止「两边都解析成空切片」导致的假绿 ——
 // 那是最容易发生的失效模式：正则一改、清单没解析出来，空 == 空 照样通过。
-const minExpectedRoutes = 5
+//
+// 2026-09-22 从 5 下调到 4：那轮审计把 10 条**前端并不存在**的路由从 nginx / vite 里删了
+// （它们被 `try_files` 兜到 index.html，于是「不存在的页面」以 200 返回）。
+// 现在真实的顶级路由就是 4 条：login / register / dashboard / links。
+// 下限不能再降 —— 它同时是「解析逻辑失效」的探针。
+const minExpectedRoutes = 4
+
+// minExpectedFrontendRoutes 是前端路由表解析结果的下限，作用同上。
+const minExpectedFrontendRoutes = 4
 
 // nginxExactLocationRE 抓 `location = /xxx {`。带点的（favicon.ico / robots.txt）
 // 因为后面紧跟的不是 `{` 而不会被抓成 `favicon` / `robots`。
@@ -29,6 +37,9 @@ var nginxExactLocationRE = regexp.MustCompile(`(?m)^\s*location\s*=\s*/([A-Za-z0
 
 // viteSPARoutesRE 抓 `SPA_ROUTES = /^\/(a|b|c)(\/|$)/` 里的交替分支。
 var viteSPARoutesRE = regexp.MustCompile(`SPA_ROUTES\s*=\s*/\^\\/\(([^)]+)\)`)
+
+// routerPathRE 抓 `src/router/index.ts` 里的 `path: 'xxx'`。
+var routerPathRE = regexp.MustCompile(`(?m)^\s*path:\s*'([^']*)'`)
 
 // nginxNonSPA 是从 nginx 精确匹配里排除掉的基础设施端点。
 //
@@ -41,9 +52,11 @@ func TestSPARoutesStayInSync(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "..")
 	nginxPath := filepath.Join(root, "deploy", "nginx", "nginx.conf")
 	vitePath := filepath.Join(root, "frontend", "vite.config.ts")
+	routerPath := filepath.Join(root, "frontend", "src", "router", "index.ts")
 
 	nginxRoutes := parseNginxRoutes(t, nginxPath)
 	viteRoutes := parseViteRoutes(t, vitePath)
+	frontendRoutes := parseFrontendRoutes(t, routerPath)
 
 	if len(nginxRoutes) < minExpectedRoutes {
 		t.Fatalf("从 nginx.conf 只解析出 %d 条 SPA 路由（下限 %d）：解析逻辑或配置结构变了，"+
@@ -52,6 +65,11 @@ func TestSPARoutesStayInSync(t *testing.T) {
 	if len(viteRoutes) < minExpectedRoutes {
 		t.Fatalf("从 vite.config.ts 只解析出 %d 条 SPA 路由（下限 %d）：解析逻辑或写法变了，"+
 			"先修解析再信任本用例。解析结果：%v", len(viteRoutes), minExpectedRoutes, viteRoutes)
+	}
+	if len(frontendRoutes) < minExpectedFrontendRoutes {
+		t.Fatalf("从 router/index.ts 只解析出 %d 条顶级路由（下限 %d）：解析逻辑或写法变了，"+
+			"先修解析再信任本用例。解析结果：%v",
+			len(frontendRoutes), minExpectedFrontendRoutes, frontendRoutes)
 	}
 
 	// 不变量 1：两份清单必须完全相同 —— 漏一处就是 dev 与 prod 行为分叉。
@@ -71,6 +89,32 @@ func TestSPARoutesStayInSync(t *testing.T) {
 		if _, ok := reservedSet[route]; !ok {
 			t.Errorf("保留字表缺少 %q：它已经在 nginx / vite 里被占用，别人抢注成短码会把真实页面或端点吃掉", route)
 		}
+	}
+
+	// 不变量 3：nginx / vite 的清单必须与前端**真实存在**的顶级路由一致（不多不少）。
+	//
+	// 「多」的害处不是抽象的：多出来的条目会被 `try_files` 兜到 index.html，
+	// 于是「不存在的页面」以 **200** 返回 —— 爬虫与可用性监控会把不存在当正常，
+	// 真实的 404 也被掩盖。2026-09-22 的审计就是在这里发现多出 10 条
+	// （/logout /settings /account /profile /admin /about /help /docs /terms /privacy）。
+	// 想预留将来要做的页面，正确做法是等页面做出来再加那一行。
+	//
+	// 「少」的害处是反过来的：前端有页面，而 nginx 没拦下来 → 被短码正则当成短码
+	// 打到后端拿 404（开发环境则由 vite 白名单兜住，于是又变成「本地好、线上坏」）。
+	//
+	// 注意 `links/:code` 的顶级段是 `links`，所以两边的粒度都是「第一段路径」。
+	for _, src := range []struct {
+		name   string
+		routes []string
+	}{{"nginx.conf", nginxRoutes}, {"vite.config.ts", viteRoutes}} {
+		if slices.Equal(src.routes, frontendRoutes) {
+			continue
+		}
+		t.Errorf("%s 的路由清单与 router/index.ts 不一致（前端真实顶级路由：%v）：\n"+
+			"  多余的（前端没有这个页面，却会被兜成 200）：%v\n"+
+			"  缺失的（前端有这个页面，但线上刷新会 404）：%v",
+			src.name, frontendRoutes,
+			missingFrom(frontendRoutes, src.routes), missingFrom(src.routes, frontendRoutes))
 	}
 }
 
@@ -113,6 +157,38 @@ func parseViteRoutes(t *testing.T, path string) []string {
 		if trimmed := strings.TrimSpace(part); trimmed != "" {
 			routes = append(routes, trimmed)
 		}
+	}
+	slices.Sort(routes)
+	return slices.Compact(routes)
+}
+
+// parseFrontendRoutes 解析 `src/router/index.ts` 里顶级路由的第一段路径（已排序）。
+//
+// 只看第一段：`links/:code` 的顶级路径是 `links`，单段顶级路由才需要 nginx 用 `=` 精确匹配拦住。
+// 父路由的 index 子路由（path 为空串）与参数段 catch-all（`:pathMatch(.*)*`）都不是「单段顶级路径」。
+func parseFrontendRoutes(t *testing.T, path string) []string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("读不到 %s（需要完整仓库检出）：%v", path, err)
+	}
+
+	matches := routerPathRE.FindAllStringSubmatch(string(body), -1)
+	routes := make([]string, 0, len(matches))
+	for _, match := range matches {
+		seg := strings.Trim(strings.TrimSpace(match[1]), "/")
+		if seg == "" {
+			continue
+		}
+		// 先切第一段再判参数段：`links/:code` 是真实路由，`/links` 需要被 nginx 拦住；
+		// 而 `:pathMatch(.*)*` 切完仍是参数段，属于 catch-all，不是真实页面。
+		if first, _, found := strings.Cut(seg, "/"); found {
+			seg = first
+		}
+		if strings.HasPrefix(seg, ":") {
+			continue
+		}
+		routes = append(routes, seg)
 	}
 	slices.Sort(routes)
 	return slices.Compact(routes)
