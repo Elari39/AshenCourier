@@ -136,9 +136,10 @@ func run() error {
 	links := pg.Links()
 	cache := redis.NewCache(rdb)
 	shortener := service.NewShortener(links, cache, redis.NewRecorder(rdb), pg.Domains(), service.ShortenerConfig{
-		BaseURL:     cfg.PublicBaseURL,
-		CacheTTL:    cfg.CacheTTL,
-		NegativeTTL: cfg.NegativeTTL,
+		BaseURL:             cfg.PublicBaseURL,
+		CacheTTL:            cfg.CacheTTL,
+		NegativeTTL:         cfg.NegativeTTL,
+		AllowPrivateTargets: cfg.AllowPrivateTargets,
 	})
 	authSvc := service.NewAuth(pg.Users(), cfg.JWTSecret, cfg.JWTExpiry)
 	statsSvc := service.NewStats(pg.Clicks(), rdb)
@@ -148,6 +149,11 @@ func run() error {
 	if cfg.RateLimitDisabled {
 		limiter.Disable()
 		logger.Warn("限流应急开关已打开（RATE_LIMIT_DISABLED=true），本次启动全量放行")
+	}
+	// 内网目标是默认拒绝的，放开属于刻意放宽：记一条，便于回答
+	// 「为什么这条私网链接建不了」与「为什么突然能建了」。
+	if cfg.AllowPrivateTargets {
+		logger.Info("已允许把短链目标指向内网/回环地址（ALLOW_PRIVATE_TARGETS=true）")
 	}
 
 	// 统计写入协程用**独立**的 ctx，并且要到 HTTP 优雅关闭结束之后才取消。

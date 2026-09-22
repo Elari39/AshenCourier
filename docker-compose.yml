@@ -19,6 +19,12 @@ x-backend-env: &backend-env
   # 这样新克隆的仓库启动时只打一条 info，而不是因为「目录挂进来了但文件还没有」而 warn。
   # 启用方式：把 mmdb 放进 ./deploy/geoip/，然后在这里指向 /geoip/<文件名>。
   GEOIP_DB_PATH: ${GEOIP_DB_PATH:-}
+  # 是否允许短链目标指向内网/回环地址。默认 false（拒绝）：
+  # 公网短链被拿来把访问者的浏览器指向 127.0.0.1 / 192.168.x /
+  # 169.254.169.254（云元数据）是最廉价的一类滥用。
+  # ⚠️ 内网部署**必须**设成 true，否则一切创建都会拿到「不支持指向内网或本机的地址」。
+  # 只影响创建与修改，跳转路径不做这个判定 —— 收紧策略不该让历史链接失效。
+  ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
 
 services:
   postgres:

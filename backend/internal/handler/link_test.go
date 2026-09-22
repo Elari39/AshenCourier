@@ -139,6 +139,18 @@ func errCode(t *testing.T, rr *httptest.ResponseRecorder) string {
 	return body.Error.Code
 }
 
+// errField 解析统一错误体里的 field。前端靠它把错误挂到对应的输入框上，
+// 所以「是字段级错误」这件事必须断言，不能只看状态码。
+func errField(t *testing.T, rr *httptest.ResponseRecorder) string {
+	t.Helper()
+
+	var body httpx.ErrorBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应不是合法 JSON：%v（%q）", err, rr.Body.String())
+	}
+	return body.Error.Field
+}
+
 // patchRequest 构造一个 PATCH 请求并带上 code 路径参数。
 func patchRequest(t *testing.T, code string) *http.Request {
 	t.Helper()
@@ -489,5 +501,57 @@ func TestCreateAcceptsDomainField(t *testing.T) {
 	}
 	if got := errCode(t, rr); got != "invalid_domain" {
 		t.Errorf("错误码 %q，期望 invalid_domain", got)
+	}
+}
+
+// TestCreateRejectsPrivateTargets 守住「公网部署默认拒绝内网目标」这条策略，
+// 以及它的错误形状：必须是**字段级 422**（前端据此把错误挂到输入框上），
+// 不是笼统的 400，更不是 500。
+//
+// 表里每一条此前都能创建成功。宽松写法（127.1 / 2130706433 / 0x7f.1）是重点 ——
+// 只挡点分十进制等于没挡：浏览器会把它们解析成同一个地址。
+//
+// 反例（公网地址不被误伤）不在这一层测：stubLinkRepo 没实现 Create，
+// 校验一旦放行就会 panic 而不是返回错误。段边界由 validator 的
+// TestNormalizePublic / TestIsPrivateHost 精确覆盖（172.32.0.1 刚好在
+// 172.16/12 之外、100.128.0.1 刚好在 100.64/10 之外）。
+func TestCreateRejectsPrivateTargets(t *testing.T) {
+	t.Parallel()
+
+	targets := []string{
+		"http://127.0.0.1:22/",
+		"http://127.1/",
+		"http://2130706433/",
+		"http://0x7f.1/",
+		"http://192.168.1.1/admin",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[::1]:8080/x",
+		"localhost:3000/dev",
+		"https://git.internal/repo",
+	}
+
+	for _, target := range targets {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+
+			h := &linkHandler{shortener: newTestShortener(&stubLinkRepo{})}
+
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/links",
+				strings.NewReader(fmt.Sprintf(`{"target_url":%q}`, target)))
+			r.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+
+			h.create(rr, r)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("状态码 %d，期望 422：%s", rr.Code, rr.Body.String())
+			}
+			if got := errCode(t, rr); got != "invalid_url" {
+				t.Errorf("错误码 %q，期望 invalid_url", got)
+			}
+			if got := errField(t, rr); got != "target_url" {
+				t.Errorf("field %q，期望 target_url（前端靠它定位输入框）", got)
+			}
+		})
 	}
 }

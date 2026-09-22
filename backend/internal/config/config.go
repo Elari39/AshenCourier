@@ -3,7 +3,8 @@
 // 约定：
 //   - 走环境变量的键就是下面这些（README 的「环境变量」一节是同一份清单）：
 //     HTTP_ADDR / DATABASE_URL / REDIS_ADDR / REDIS_PASSWORD / REDIS_DB / JWT_SECRET /
-//     PUBLIC_BASE_URL / LOG_LEVEL / WORKER_ENABLED / TRUST_PROXY / RATE_LIMIT_DISABLED。
+//     PUBLIC_BASE_URL / LOG_LEVEL / WORKER_ENABLED / TRUST_PROXY / RATE_LIMIT_DISABLED /
+//     ALLOW_PRIVATE_TARGETS / GEOIP_DB_PATH。
 //     缺省值由 cmp.Or 提供，不使用 .env 解析库
 //   - 其余项（各类超时、TTL、页大小、限流配额）是内置默认值，调整要改代码：
 //     它们**不是**环境变量，别照上面那份清单去猜
@@ -106,6 +107,16 @@ type Config struct {
 	// RateLimitDisabled 为 true 时启动即打开限流的应急开关（全量放行）。
 	// 宁可短暂失去限流，也不让限流组件把整站挡在门外。
 	RateLimitDisabled bool
+
+	// AllowPrivateTargets 为 true 时允许把短链目标指向内网/回环地址。
+	//
+	// 默认 false（拒绝）：公网短链被拿来把访问者的浏览器指向 127.0.0.1、
+	// 192.168.x 或云元数据端点 169.254.169.254 是最廉价的一类滥用。
+	// **内网部署必须打开它**（公司内部短链的目标本来就在私网里），
+	// 否则一切创建都会拿到「不支持指向内网或本机的地址」。
+	//
+	// 只影响创建与修改；跳转路径不做这个判定 —— 收紧策略不该让历史链接失效。
+	AllowPrivateTargets bool
 }
 
 // Role 标识进程角色，决定哪些配置项是必需的。
@@ -168,6 +179,9 @@ func LoadFor(role Role) (*Config, error) {
 		errs = append(errs, err)
 	}
 	if cfg.RateLimitDisabled, err = boolEnv("RATE_LIMIT_DISABLED", false); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.AllowPrivateTargets, err = boolEnv("ALLOW_PRIVATE_TARGETS", false); err != nil {
 		errs = append(errs, err)
 	}
 	cfg.LogLevel = levelEnv("LOG_LEVEL")

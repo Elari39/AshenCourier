@@ -10,8 +10,14 @@
  *   - 「解锁恰好只计一次点击」换一个口径复核：落库的**明细行数**恰好 +1
  *     （明细靠 `event_uid` 幂等去重，行数不会出现瞬时翻倍这种抖动，比读计数更稳）
  *
- * 目标地址刻意用 `{base}/login`（本栈自己的 SPA 路由）而不是外部站点：
- * 验收因此不依赖外网，而且「到底落到哪」能用一个确定性的 URL 断言。
+ * 目标地址刻意用本栈自己的 SPA 路由而不是外部站点：验收因此不依赖外网，
+ * 而且「到底落到哪」能用一个确定性的 URL 断言。
+ *
+ * ⚠️ 这里的 `base` 是**浏览器侧**的 origin，由 browser-check.mjs 传入 ——
+ * 回环部署下它是一个被 `--host-resolver-rules` 映射到本栈的别名域名，而不是
+ * `localhost`（后端默认拒绝指向内网/回环的目标）。**必须与口令页同源**，
+ * 否则 CSP 的 `form-action 'self'` 会拦掉「提交后重定向到别的源」。
+ * 理由见 browser-check.mjs 里 `browserOrigin` 的注释。
  */
 import { assert, assertEqual, waitForClicks } from './harness.mjs'
 

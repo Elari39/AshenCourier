@@ -51,6 +51,12 @@ type ShortenerConfig struct {
 	NegativeTTL time.Duration
 	// QueueSize 是统计写入队列容量，<=0 时取 DefaultQueueSize。
 	QueueSize int
+	// AllowPrivateTargets 为 true 时允许目标指向内网/回环地址（ALLOW_PRIVATE_TARGETS）。
+	//
+	// 默认 false：公网短链被拿来把访问者的浏览器指向 127.0.0.1 / 192.168.x /
+	// 169.254.169.254 是最廉价的一类滥用。内网部署与本地开发需要时显式打开。
+	// 只影响**创建与修改**：跳转路径不做这个判定，见 validator.NormalizePublic。
+	AllowPrivateTargets bool
 }
 
 // Shortener 是短链核心服务。
@@ -66,6 +72,8 @@ type Shortener struct {
 	scheme      string
 	cacheTTL    time.Duration
 	negativeTTL time.Duration
+	// allowPrivateTargets 决定创建/修改时是否放行指向内网的目标（见 ShortenerConfig）。
+	allowPrivateTargets bool
 
 	// domainsSnap 是「主机名 ↔ 域」的进程内快照，按 TTL 惰性刷新（见 snapshot）。
 	//
@@ -112,6 +120,8 @@ func NewShortener(links domain.LinkRepository, cache domain.LinkCache, recorder 
 		cacheTTL:    cfg.CacheTTL,
 		negativeTTL: cfg.NegativeTTL,
 		queue:       make(chan domain.ClickRecord, queueSize),
+
+		allowPrivateTargets: cfg.AllowPrivateTargets,
 	}
 }
 
@@ -232,7 +242,7 @@ type CreateResult struct {
 
 // Create 创建短链。匿名创建会生成一次性管理密钥。
 func (s *Shortener) Create(ctx context.Context, in CreateInput) (*CreateResult, error) {
-	target, err := validator.Normalize(in.TargetURL)
+	target, err := validator.NormalizePublic(in.TargetURL, s.allowPrivateTargets)
 	if err != nil {
 		return nil, mapURLError(err)
 	}
@@ -493,7 +503,7 @@ func (s *Shortener) Update(ctx context.Context, code string, patch domain.LinkPa
 		return nil, domain.Invalid("body", "没有需要更新的字段")
 	}
 	if patch.TargetURL != nil {
-		normalized, err := validator.Normalize(*patch.TargetURL)
+		normalized, err := validator.NormalizePublic(*patch.TargetURL, s.allowPrivateTargets)
 		if err != nil {
 			return nil, mapURLError(err)
 		}
@@ -931,6 +941,10 @@ func mapURLError(err error) error {
 		return domain.Invalid("target_url", "仅支持 http/https 链接")
 	case errors.Is(err, validator.ErrNoHost):
 		return domain.Invalid("target_url", "链接缺少域名")
+	// 策略判定（不是语法错误）：内网部署可用 ALLOW_PRIVATE_TARGETS 放行。
+	// 文案不提这个开关 —— 面向的是终端用户，他要做的就是换一个公网地址。
+	case errors.Is(err, validator.ErrPrivateHost):
+		return domain.Invalid("target_url", "不支持指向内网或本机的地址")
 	case errors.Is(err, validator.ErrMalformed):
 		return domain.Invalid("target_url", "链接格式无法解析")
 	default:

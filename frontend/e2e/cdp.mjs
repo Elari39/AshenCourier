@@ -155,8 +155,12 @@ async function connect(wsUrl) {
  * 起一个无头 Chrome 并连上第一个目标页。
  *
  * `CHROME_FLAGS` 可追加启动参数（以空格分隔），例如在某些以 root 运行的容器里需要 `--no-sandbox`。
+ *
+ * `extraFlags` 是给单个调用点的追加参数（在 `CHROME_FLAGS` **之后**），
+ * 目前只有一个用途：把 e2e 自己造的域名映射到回环（`--host-resolver-rules`），
+ * 见 browser-check.mjs 里 `TARGET_HOST` 的说明。
  */
-export async function launchChrome({ port = 9333, windowSize = '1440,1100' } = {}) {
+export async function launchChrome({ port = 9333, windowSize = '1440,1100', extraFlags = [] } = {}) {
   const profile = mkdtempSync(join(tmpdir(), 'ashen-e2e-'))
   const extra = (process.env.CHROME_FLAGS ?? '').split(' ').filter(Boolean)
   const child = spawn(
@@ -172,6 +176,7 @@ export async function launchChrome({ port = 9333, windowSize = '1440,1100' } = {
       `--user-data-dir=${profile}`,
       `--window-size=${windowSize}`,
       ...extra,
+      ...extraFlags,
       'about:blank',
     ],
     { stdio: 'ignore' },

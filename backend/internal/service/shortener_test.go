@@ -542,3 +542,105 @@ func TestNormalizeHostUntouched(t *testing.T) {
 		t.Fatalf("IPv6 目标被改写：%q", got)
 	}
 }
+
+// newShortenerAllowPrivateForTest 与 newShortenerForTest 相同，只多打开内网目标开关
+// （等价于配了 ALLOW_PRIVATE_TARGETS=true 的内网部署）。
+func newShortenerAllowPrivateForTest(repo *linkRepoFake, cache *memCache) *Shortener {
+	return NewShortener(repo, cache, &recorderFake{}, nil, ShortenerConfig{
+		BaseURL:             "https://sho.rt",
+		CacheTTL:            time.Hour,
+		NegativeTTL:         time.Minute,
+		AllowPrivateTargets: true,
+	})
+}
+
+// TestCreatePrivateTargetsPolicy 守住内网目标开关的两侧：
+//   - 默认（false）：被拒，且拒绝发生在**落库之前**（不是建了再回滚）
+//   - 打开（true）：能真的建出来（内网部署靠它，否则整站不可用）
+//
+// 断言 field 而不是只看有没有报错：提示要挂在 target_url 输入框上，
+// 「请求无效」这种笼统错误在前端只能弹个全局 toast。
+func TestCreatePrivateTargetsPolicy(t *testing.T) {
+	t.Parallel()
+
+	targets := []string{
+		"http://127.0.0.1:3000/x",
+		"http://192.168.1.10/admin",
+		"https://nas.local/share",
+	}
+
+	for _, target := range targets {
+		t.Run("默认拒绝 "+target, func(t *testing.T) {
+			t.Parallel()
+
+			repo := newLinkRepoFake()
+			s := newShortenerForTest(repo, newMemCache())
+
+			_, err := s.Create(t.Context(), CreateInput{TargetURL: target})
+			if err == nil {
+				t.Fatalf("Create(%q) 必须被拒：默认不放行内网目标", target)
+			}
+
+			var invalid *domain.InvalidInputError
+			if !errors.As(err, &invalid) {
+				t.Fatalf("错误类型 %T，期望字段级校验错误：%v", err, err)
+			}
+			if invalid.Field != "target_url" {
+				t.Errorf("field = %q，期望 target_url", invalid.Field)
+			}
+			if len(repo.links) != 0 {
+				t.Errorf("被拒的目标不该落库，实际写入 %d 条", len(repo.links))
+			}
+		})
+
+		t.Run("开关打开后放行 "+target, func(t *testing.T) {
+			t.Parallel()
+
+			s := newShortenerAllowPrivateForTest(newLinkRepoFake(), newMemCache())
+
+			got, err := s.Create(t.Context(), CreateInput{TargetURL: target})
+			if err != nil {
+				t.Fatalf("ALLOW_PRIVATE_TARGETS=true 时 Create(%q) 失败：%v", target, err)
+			}
+			if got.Link.TargetURL != target {
+				t.Errorf("target_url = %q，期望 %q", got.Link.TargetURL, target)
+			}
+		})
+	}
+}
+
+// TestUpdateRejectsPrivateTargets 是上面那条的另一半：**修改**目标也要守住。
+// 只拦创建是个很典型的漏 —— 建一条公网链接、再改成 127.0.0.1 就绕过去了。
+func TestUpdateRejectsPrivateTargets(t *testing.T) {
+	t.Parallel()
+
+	repo := newLinkRepoFake()
+	s := newShortenerForTest(repo, newMemCache())
+
+	created, err := s.Create(t.Context(), CreateInput{TargetURL: "https://example.com/origin"})
+	if err != nil {
+		t.Fatalf("前置：创建公网链接失败：%v", err)
+	}
+	code := created.Link.ShortCode
+
+	private := "http://169.254.169.254/latest/meta-data/"
+	_, err = s.Update(t.Context(), code, domain.LinkPatch{TargetURL: &private})
+	if err == nil {
+		t.Fatal("把目标改成云元数据端点必须被拒（只拦创建拦不住这种绕过）")
+	}
+
+	var invalid *domain.InvalidInputError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("错误类型 %T，期望字段级校验错误：%v", err, err)
+	}
+	if invalid.Field != "target_url" {
+		t.Errorf("field = %q，期望 target_url", invalid.Field)
+	}
+
+	// 被拒的修改不能已经落到数据上（校验必须在写库之前）
+	for _, l := range repo.links {
+		if l.ShortCode == code && l.TargetURL != "https://example.com/origin" {
+			t.Errorf("被拒的修改改到了数据：target_url = %q", l.TargetURL)
+		}
+	}
+}
