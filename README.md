@@ -25,7 +25,7 @@
 - **跳转路径零数据库写入。** `GET /{code}` 只做 Redis `GET` + `INCR` + `XADD`，
   缓存未命中才回源一次 PostgreSQL。数据库挂了对已缓存的短链都没有影响。
 - **统计不阻塞跳转。** 点击写入一个有界队列（默认 4096），队满直接丢弃并计数。
-  丢弃数在 `/healthz` 里可见 —— 宁可少记一次点击，也不让 302 慢 1 毫秒。
+  丢弃数在 `/healthz/details` 里可见 —— 宁可少记一次点击，也不让 302 慢 1 毫秒。
 - **界面上「总点击」不会卡住。** 详情页与列表页的数字都是 `links.click_count`（PG 基线）
   + `clicks:cnt:{code}`（Redis 待同步增量）：详情页单键 `GET`，列表页一次 `MGET` 批量取，
   worker 每 2 秒回刷，正常情况下偏差小于 2 秒。统计侧读不到时列表退回纯基线，不报 5xx。
@@ -166,7 +166,7 @@ Browser ──┬─ /api/*         ─┐
 1. **跳转不落库**：`GET /{code}` 只做 Redis `GET` + `INCR` + `XADD`，全程无 PostgreSQL 写入。
    缓存 miss 才回源一次，并把结果回填 —— 且同一短码的并发 miss 由 `singleflight`
    合并成**一次**回源（负缓存只能挡住「已确认不存在」，挡不住「刚出现的热点」）。
-   回源次数在 `/healthz` 的 `pg_fallbacks` 里可见。
+   回源次数在 `/healthz/details` 的 `pg_fallbacks` 里可见。
 2. **计数最终一致**：详情页与列表页的「总点击」都是 `links.click_count`（PG 基线）
    + `clicks:cnt:{code}`（Redis 待同步增量），**两个口径一致** —— 不会出现「详情有数、列表没数」。
    worker 每 2 秒把增量刷回 PG，正常情况下偏差 < 2 秒。
@@ -175,7 +175,7 @@ Browser ──┬─ /api/*         ─┐
    回刷是**补偿式**的（见下面第 3 条）：增量只读不删、写库成功后才结算，
    进程崩溃最多让基线重复累加一批，不会丢计数。
 3. **统计不阻塞跳转**：统计写入走**有界队列**（默认 4096），队列满直接丢弃并计数，
-   丢弃数在 `/healthz` 的 `dropped_clicks` 里可见。
+   丢弃数在 `/healthz/details` 的 `dropped_clicks` 里可见。
 
 ### 降级行为
 
@@ -183,7 +183,7 @@ Browser ──┬─ /api/*         ─┐
 | --- | --- |
 | Redis 读缓存失败 | 当作未命中处理，回源 PostgreSQL；跳转仍可用 |
 | Redis 写统计失败 | 记 warn 日志并丢弃该次统计，**不影响 302** |
-| Redis 限流不可用 | 全量放行并累计降级次数（`/healthz` 的 `rate_limit_degraded`），不熔断自锁 |
+| Redis 限流不可用 | 全量放行并累计降级次数（`/healthz/details` 的 `rate_limit_degraded`），不熔断自锁 |
 | PostgreSQL 不可用 | 返回 503 + `Retry-After` |
 | 某条点击消息永远写不进库（外键冲突等永久性失败） | 重投 5 次后 ACK 丢弃并记 WARN（worker 打点的 `dead_lettered`），不再无限重投 —— 否则它会每 30 秒被捞回来一次，刷屏日志并卡住同批的正常消息 |
 
@@ -242,7 +242,7 @@ Browser ──┬─ /api/*         ─┐
 
 | # | Method | Path | 鉴权 | 说明 |
 | --- | --- | --- | --- | --- |
-| 1 | GET | `/healthz` | — | 存活 + 就绪（PG / Redis / Stream 积压 / 丢弃计数） |
+| 1 | GET | `/healthz` | — | 存活 + 就绪，**只回 `status` / `postgres` / `redis`**（PG 或 Redis 异常 → **503** + `Retry-After`）。它匿名可达，所以内部诊断字段**一律不出现在这里** —— 完整快照见第 17 项 |
 | 2 | POST | `/api/auth/register` | — | 注册，返回 user + token |
 | 3 | POST | `/api/auth/login` | — | 登录（限流 20 次 / 10 分钟 / IP）。字段级校验与注册**同一套口径**（邮箱格式 / 口令为空 → 422 `invalid_email` / `invalid_password` + `field`）；凭据不对 → 401 `invalid_credentials` +「邮箱或密码不正确」，与「未认证」的 `unauthorized` 分开。「邮箱不存在」与「口令错误」刻意**不可区分**（防账号枚举，且在邮箱不存在时也走一次 bcrypt 抹平时间差） |
 | 4 | GET | `/api/auth/me` | JWT | 当前用户 |
@@ -257,7 +257,8 @@ Browser ──┬─ /api/*         ─┐
 | 13 | GET | `/api/links/{code}/clicks?limit=20&cursor=&days=30&device=` | JWT 或 Key | 点击明细，`(occurred_at, id)` keyset 分页（**时间倒序**）；`device` 取 `desktop` / `mobile` / `tablet` / `bot` / `unknown`（与分布口径一致）。**IP 只回掩码网段**：IPv4 → `/24`、IPv6 → `/64` |
 | 14 | POST | `/{code}` | — | **口令校验**（表单 `password`）：正确 → **303** 回 `GET /{code}` 并下发解锁 cookie；错误 → **401** 重新渲染口令页。两者都**不计点击**（计点击的是随后那个 GET）。限流 20 次 / 10 分钟 / IP |
 | 15 | GET | `/api/links/{code}/qr.svg` | — | **二维码 SVG**（`image/svg+xml`），给邮件模板 / 印刷品 / 第三方系统引用。**公开可读**（二维码的内容就是 `short_url` 本身，而 `GET /{code}` 本来就公开）；只要求「短链存在且未被软删除」，已停用/过期的链接**仍能取图**（印好的二维码不该因此失效）。`Cache-Control: public, max-age=300`。限流沿用统计那一档（IP + 路径哈希） |
-| 16 | GET | `/metrics` | — | **Prometheus 文本格式**（`text/plain; version=0.0.4`），与 `/healthz` 同一次采集。**不对外**（nginx 里 `= /metrics` 直接 404）、**不加鉴权也不限流**（只在内网可达）；探针异常时仍回 **200**，故障由 `ashen_*_up 0` 表达。详见「`/metrics`」一节 |
+| 16 | GET | `/metrics` | — | **Prometheus 文本格式**（`text/plain; version=0.0.4`），与 `/healthz/details` 同一次采集。**不对外**（nginx 里 `= /metrics` 直接 404）、**不加鉴权也不限流**（只在内网可达）；探针异常时仍回 **200**，故障由 `ashen_*_up 0` 表达。详见「`/metrics`」一节 |
+| 17 | GET | `/healthz/details` | — | **完整诊断快照**（JSON）：版本、存活时长、队列 / Stream 积压、回源次数、丢弃计数、是否内嵌 worker、限流是否降级……**与 `/metrics` 是同一批数字，因此同一套可见性**：nginx 里 `= /healthz/details` 直接 404。探针异常时仍回 **200**（degraded 那一刻的数字最该被交出去，理由同 `/metrics`），故障由响应体里的 `status: "degraded"` 表达 |
 
 **访问口令**（`POST /{code}`）
 
@@ -537,7 +538,7 @@ mmdb 查询虽然只是一次内存映射读，但它会引入文件句柄与页
 | `REDIS_DB` | `0` | 进程默认值 | 逻辑库编号 |
 | `WORKER_ENABLED` | `false` | compose（仅 backend） | `true` 时 api 进程内嵌同一套 worker 循环（本地开发用） |
 | `TRUST_PROXY` | `true` | 进程默认值 | 从 `X-Real-IP` 取客户端 IP；**不**信任 `X-Forwarded-For` |
-| `RATE_LIMIT_DISABLED` | `false` | 进程默认值 | `true` 时启动即全量放行（限流应急开关），状态见 `/healthz` 的 `rate_limit_disabled` |
+| `RATE_LIMIT_DISABLED` | `false` | 进程默认值 | `true` 时启动即全量放行（限流应急开关），状态见 `/healthz/details` 的 `rate_limit_disabled` |
 | `ALLOW_PRIVATE_TARGETS` | `false` | compose | `true` 时允许短链目标指向内网/回环地址。**内网部署必须打开**，否则创建一律 422「不支持指向内网或本机的地址」。只影响创建与修改，跳转路径不做这个判定 —— 见「已知限制」 |
 | `POSTGRES_TEST_DSN` | 空 | 只给测试用 | 进程不读它：store 集成测试的 DSN，未设置时整体跳过（见「store 层集成测试」） |
 | `GEOIP_TEST_DB` | 空 | 只给测试用 | 进程不读它：`internal/store/geoip` 里唯一会真查库的用例的库文件路径，未设置时该用例 SKIP |
@@ -560,8 +561,13 @@ mmdb 查询虽然只是一次内存映射读，但它会引入文件句柄与页
 ## 部署与运维排查
 
 ```bash
-# 服务健康 + 诊断计数（丢弃数、队列积压、Stream 积压、限流是否走原生 INCREX）
+# 服务健康（**公开**探针，只回 status/postgres/redis）
 curl -s localhost:8080/healthz | jq
+
+# 完整诊断快照（丢弃数、队列积压、Stream 积压、回源次数、限流是否走原生 INCREX）
+# ⚠️ 它**不对外**：nginx 里 `= /healthz/details { return 404; }`，所以走 localhost:8080 拿到的是 404。
+#    要从本机读得借同一网络内的容器：
+docker compose exec frontend wget -qO- http://backend:8080/healthz/details
 
 # 同一批数字的 Prometheus 文本形态。⚠️ 它**不对外**：
 # nginx 里 `location = /metrics { return 404; }`，走 localhost:8080 会拿到 404。
@@ -605,11 +611,22 @@ docker compose logs backend | grep '"level":"ERROR"'
 > 窗口用尽**仍然会退出**并打出带根因的错误 —— 「口令写错 / 端口填错」这类永久性失败
 > 不会变成无限等待。实现与设计取舍见 `backend/internal/startup`。
 
-`/healthz` 关键字段：
+`/healthz` 在公开面上**只回三项**：`status`、`postgres`、`redis` —— 这是编排系统判断
+「能不能接流量、是哪个依赖不行」所需的全部。其余全是**内部诊断字段**，只出现在
+`/healthz/details`（与 `/metrics` 同策略：nginx 里显式 404）。
 
-| 字段 | 含义 |
+> 为什么要拆：这些数字和 `/metrics` 是**同一次采集的同一批数据**。原先 `/healthz` 匿名可读、
+> `/metrics` 却被 404 挡着 —— 同一批数字两套可见性，是配置不对称而不是设计取舍。
+> 另外它们本身也有价值可被利用：`version` 是版本指纹（便于按已知漏洞定位）、
+> `uptime_seconds` 泄露部署节奏（什么时候重启过）、`stream_len` / `pg_fallbacks` 是积压水位
+> （可以据此判断「什么时候加压最有效」，也能确认自己的压测是否起了作用）。
+> 守卫：`handler/healthz_surface_test.go` 用**键集合白名单**断言公开面恰好三项 ——
+> 白名单能挡住**将来**新增的字段（黑名单不能），并且测试用一份「所有诊断字段都非零」的探针，
+> 否则 `omitzero` 会让漏字段的断言必然通过（一个永远绿的守卫）。
+
+| 字段（`/healthz/details`，`status` 同时也出现在 `/healthz`） | 含义 |
 | --- | --- |
-| `status` | `ok` / `degraded`（PG 或 Redis 异常时 degraded，HTTP 503） |
+| `status` | `ok` / `degraded`（PG 或 Redis 异常时 degraded，`/healthz` 回 HTTP 503） |
 | `dropped_clicks` / `failed_clicks` | 统计因队满 / 写失败而丢弃的次数 |
 | `queue_len` | 统计写入队列积压长度 |
 | `stream_len` / `stream_pending` | Stream 长度 / 未 ACK 条数 |
@@ -901,7 +918,7 @@ worker 刷计数分三步，**增量只读不删**（M3-1）：
 这与「宁可重复累加也不能丢」一致；用 `link_click_totals` 对账时，
 `base_count` 比 `event_count` 略大属于已知情形，上限是一批。
 结算失败会打 `基线可能重复累加（上限一批）` 的 error 日志（内嵌 worker 时还会进入
-`/healthz` 的 `worker_errors`；生产形态下 worker 是独立容器，看它的容器日志）。
+`/healthz/details` 的 `worker_errors`；生产形态下 worker 是独立容器，看它的容器日志）。
 
 ### 4. api 与 worker 共用镜像，换入口必须用 `entrypoint` 而不是 `command`
 
@@ -1119,7 +1136,7 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | 迁移往返（M2-1） | `migrate down 1` + `up` 连续两轮无报错；`version` = 2；列与部分唯一索引恢复，之后的新跳转仍写入 `event_uid` | 本机 |
 | **容器级 ⑤**：列表口径 = 基线 + 待同步增量（M2-2） | 停掉 worker 后跳转 4 次：PG 基线仍 `0`、Redis 增量 `4`，而 `GET /api/links` 的 `click_count` = **4**，与详情 `total_clicks` 相等；恢复 worker 后基线刷成 `4`、增量键清空、列表仍为 `4`；把 Redis 停掉时列表仍 **200**（退回纯基线，不 5xx） | 本机 |
 | **容器级 ⑥**：补偿式计数（M3-1） | 停 worker 后跳转 10 次：`clicks:cnt:{code}` = `10`、`clicks:dirty` 含该码、PG 基线 `0`（增量没被「取走」）；启动 worker 后基线 `10`、明细 `10`，**计数键被删除**（不是留一个 0）且 dirty 清空；再压 100 次跳转 → 基线/明细都是 `100`；全库 `base_count <> event_count` 的链接数 = 0，`dropped_clicks` / `failed_clicks` 均为 0 | 本机 |
-| **容器级 ⑦**：缓存击穿防护（M3-2） | 用一个刚创建（缓存已被主动失效）的冷短码，`curl --parallel-immediate` 同时打 **20** 个请求 → 20 个 **302**；`/healthz` 的 `pg_fallbacks` 增量 = **1**（而不是 20）。单测侧：50 个 goroutine 并发 miss + 回源处设屏障，断言仓储只被调用 1 次 | 本机 |
+| **容器级 ⑦**：缓存击穿防护（M3-2） | 用一个刚创建（缓存已被主动失效）的冷短码，`curl --parallel-immediate` 同时打 **20** 个请求 → 20 个 **302**；`/healthz/details` 的 `pg_fallbacks` 增量 = **1**（而不是 20）。单测侧：50 个 goroutine 并发 miss + 回源处设屏障，断言仓储只被调用 1 次 | 本机 |
 | **容器级 ⑧**：备份与恢复（M3-3） | `--profile ops` 起 backup → 产出 `ashen-20260918-154740.dump`；`pg_restore` 到临时库 `restore_check` 后与主库逐项一致（`links` 14、`click_events` 169、`sum(base_count)` = `sum(event_count)` = 169）；删临时库后 `pg_database` 里不再有它。保留策略实测：造一个 2000 年的假备份 → 清理后旧文件被删、当天的留下 | 本机 |
 | **容器级 ⑨**：标签（M4-1） | 创建时传 `["Ops","  ops  ","Dev"]` → 返回 `["ops","dev"]`（归一化 + 去重）；`?tag=ops` 只命中该条，`?tag=DEV`（大写）也能命中（按小写比较）；11 个标签 / 33 字符标签都返回 422 `invalid_tags`；`EXPLAIN` 下 `tags @> ARRAY['ops']` 走 **`links_tags_gin`**（Bitmap Index Scan）。浏览器侧：无头 Chrome 在 `/dashboard` 输入 `ops` 后列表从 2 条变 1 条 | 本机 |
 | **容器级 ⑩**：点击明细页（M4-2） | 跳转 3 次（手机 / 桌面 / 爬虫 UA）→ `?limit=2` 拿到 2 行 + 游标，带游标翻到第 2 页拿到剩下的 1 行、`next_cursor` 为空；时间倒序且两页无重叠无缺口（26 行 = 首屏 20 + 「加载更多」6，逐行核对无重复）。IP 掩码：库里 `host(ip)` = `172.20.0.1`，响应里是 `172.20.0.0/24`，且响应体里搜不到原始地址。`device=mobile` 命中 1 条、`device=unknown` 命中 0 条（与设备分布口径一致）；`limit=0` / `days=abc` / `device=tv` / 坏游标都返回 422 且 `field` 正确；无凭据 404。`EXPLAIN` 下 `(occurred_at, id) < (…)` 被下推进 **`click_events_link_time_id_idx`** 的 Index Cond，且 Index Only Scan **不带 Sort 节点**（索引本身给出倒序）。浏览器侧：无头 Chrome 打开 `/links/{code}`，首屏 20 行 + 「加载更多」，点一下变 26 行、按钮换成「已经到底了」，两页拼接处无重复行 | 本机 |
@@ -1152,8 +1169,9 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | **部署 ㉟**：SPA 外壳缓存头 + 全站安全响应头（本轮审计修复） | 修的是审计里 A2 与 A4 两条，都属于「部署后才暴露」：CI 每轮都是干净浏览器，测不出「老外壳 + 已失效的哈希资源」，也测不出「响应头静默消失」。**① 外壳缓存头**：新增 `location = /index.html` 一条，带 `Cache-Control: no-cache always`。它能覆盖全部入口靠的是 try_files 语义 —— **最后一个参数是内部重定向**，nginx 会拿 `/index.html` 重新匹配 location，所以外壳只有一个出口、新增 SPA 路由自动生效。实测（`/`、`/login`、深链 `/links/AbCdEf`、`/index.html` 四条）全部 `CC=['no-cache']` **且恰好一条**。**② 安全头**：5 条（HSTS / X-Frame-Options / nosniff / Referrer-Policy / CSP）收进新文件 `deploy/nginx/security-headers.conf`，在 server 层与每个自带 `add_header` 的层级 `include`。带 `always` 实测在 200 / **401** / **404**（含 nginx 自己的 `/metrics` 404）上都出现。**③ CSP 直接强制、不是 Report-Only**：真浏览器 e2e **39 / 39** 且「全程零 console 错误」那条绿 —— CSP 违规会在控制台报错，所以这一次的浏览器验收同时是 CSP 的实测。`style-src` 用**哈希**（从 `pageCSS` 常量算，非 `'unsafe-inline'`），只为放行口令页 / 失效页那段内联 `<style>`。**④ 过程中实测到并记录的三个事实**：(a) 代理响应上 `X-Content-Type-Options` 是**两条**（应用 + nginx），取值相同、刻意保留；(b) `/assets/` 上 `Cache-Control` 本来就是**两条**（`expires 1y` + `add_header`，改动前就如此），而 **Go 的 `Header.Get` 只看第一条** —— 第一版冒烟断言因此把正确配置报成「没有 immutable」，加了 `headerValue`（拼接全部取值）后转绿；(c) `nginx.conf` 是 CRLF、其余文件是 LF，两者各自一致、没有混合。**⑤ 新增 5 条守卫**：`internal/httpx/nginx_headers_test.go`（解析 `nginx.conf` 的**块结构**，断言「任何含 `add_header` 的块里都有那个 include」+ 外壳 `no-cache` 在场 + 每条头都带 `always`）与 `internal/handler/nginx_headers_contract_test.go`（CSP 哈希与 `pageCSS` 一致；`referrerPolicy` 与 nginx 逐字一致 —— 因为 nginx 的 `add_header` 追加在上游之后，重复的 Referrer-Policy 以最后一条为准，不一致时 Go 那行是死代码）。**变异验证 6 条 + 1 条负对照，全部按预期**：删掉 Referrer-Policy / CSP 去掉 `always` / `/assets` 块漏 include / 外壳缓存头改成可长期缓存 / `pageCSS` 改了哈希没跟 / Go 与 nginx 的 Referrer-Policy 不一致 —— 六条各自只红对应的用例；只改注释的负对照仍绿；还原后四份文件逐字节一致并**独立读文件**复核。**验收**：`gofmt` / `go vet` / `go test ./...` 全绿；`nginx -t` syntax is ok；e2e **39 / 39** 紧接冒烟 **31 / 31**（+3：外壳 no-cache、三种状态码上的安全头、内容哈希资源同时有 immutable 与安全头）；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致（`2026-09-22T04:39:24Z`），并且**三方一致**（容器 `.Image` == 镜像 tag `.Id` == 构建日志里的 manifest list：`frontend` `e88aa49e` / `backend` `09bddc99` / `worker` `01113067`）。⚠️ **单向门提醒**：HSTS 一旦被浏览器记住，在 `max-age` 内撤不回来，所以刻意不加 `preload`；线上是 CF 提供 TLS 才敢带 `includeSubDomains` | 本机（Docker + 无头 Chrome） |
 | **后端 ㊱**：默认拒绝内网 / 回环目标（本轮审计修复 A5） | 公网短链被拿来把访问者的浏览器指向 `127.0.0.1` / `192.168.x` / 云元数据端点 `169.254.169.254` 是最廉价的一类滥用，而原先只校验 scheme。**分层是关键**：新增 `NormalizePublic(raw, allowPrivate)` 叠在纯语法层的 `Normalize` 之上，`IsAllowedTarget`（跳转路径）**一点没动** —— 收紧创建只是「以后不许再建」，若语法层也跟着拒，策略收紧前建的历史链接会在某次部署后成片失效（那不是安全，是摧毁数据；`TestNormalizeStaysPure` 把这个前提钉住了）。**判定只针对字面量与保留名，不做任何 DNS 解析**：创建路径不该引入网络依赖，而且应用层也拦不住（`evil.example` 可以解析到内网，也能用「先解析到公网、随后改指内网」的 rebinding 绕过）—— 所以它是「挡住最廉价的一类滥用」，**不是 SSRF 防护**，这条边界已写进「已知限制」。**宽松写法是本批的重点**：`127.1` / `2130706433` / `0x7f.1` / `0x7f000001` / `0177.0.0.1` / `127.0.0.1.` 指向的都是同一个地址，而 `netip.ParseAddr` 一个都识别不出来（inet_aton 语义要自己实现）；`::ffff:127.0.0.1` 必须先 `Unmap` 再比前缀，否则地址族不同、`Contains` 全返回 false。表 **26 段**（RFC 6890 特殊用途 + 云元数据 + 已弃用的 6to4/NAT64）+ **5 个保留域名后缀**（`.localhost` / `.local` / `.localdomain` / `.internal` / `.home.arpa`）。**容器实测 10 / 10 全绿**：6 条被拒（点分十进制 / 单整数 / RFC1918 / 云元数据 / IPv6 回环 / `localhost:3000` 缺 scheme）全部 **422 `invalid_url` + `field=target_url`**；正对照公网目标仍 **201** 且跳转 **302 Location 正确**；`PATCH` 改成云元数据同样 422 且**数据未被改动**（只拦创建拦不住「建完再改」）。⚠️ 该验证脚本必须先跑 —— 被拒的请求同样消耗 per-IP 创建配额。**新增 7 条守卫**：validator 表驱动 4 个（`TestIsPrivateHost` 60+ 子用例，含段边界 `172.32.0.1` / `100.128.0.1` / `9.255.255.255` 与「`08.8.8.8` 不是合法八进制、不该误伤」；`TestNormalizePublic`；`TestNormalizeStaysPure`；`TestNonPublicPrefixesAreSane` 是前缀表本身的下限守卫）+ handler 1 个 + service 2 个（开关两侧 + `Update` 也要拦）。**变异验证 6 条 + 1 条负对照全部按预期**：策略整体失效（`false && IsPrivateHost(...)`）/ 去掉 `Unmap` / 只认规范 IP / 保留域名表漏掉 `.internal` / 前缀表漏掉 `169.254.0.0/16` / `Update` 退回纯语法层 —— 各自只红对应用例，只改注释的负对照仍绿；还原后两份文件逐字节一致。**⚠️ 本批最大的坑不在产品而在验收工具**：新策略把 **e2e 自己的播种**也挡住了 —— 它的目标刻意是本栈的 SPA 路由（口令解锁那步要断言「真的落到目标」），也就是 `localhost`。修法**不是**放宽策略，而是让 e2e 的**浏览器侧整体**换一个「对服务端是普通域名、对 Chrome 被 `--host-resolver-rules` 映射到回环」的名字（`e2e.ashen.test`，RFC 2606 保留 TLD）—— 这样 CI 验收的仍是**默认最严配置**，不必为了跑测试打开 `ALLOW_PRIVATE_TARGETS`。过程中连着踩两个坑：① 只换目标、不换页面源时，**CSP 的 `form-action 'self'` 正确拦下**了「表单提交后重定向到别的源」，症状是提交口令后 `net::ERR_ABORTED`、既不导航也不报错（CSP 违规走 Log 域、不进 `console.error`，「零 console 错误」照样绿），看着像 303 没生效 —— 所以浏览器侧的 origin 必须整体统一；② 本机配了系统代理时 Chrome 会把 `e2e.ashen.test` 交给**代理**解析（`--host-resolver-rules` 只管 Chrome 自己的解析），实测症状是目标页变成「HTTP ERROR 502」，加 `--no-proxy-server` 才通（CI 没有代理，但两边行为必须一致）。**门禁**：`gofmt` / `go vet` / `go test ./...`（16 包）全绿；前端 eslint 0 / vitest **56** / `audit:refs` ✓ / vue-tsc 0 / build ✓；e2e **39 / 39** 紧接冒烟 **31 / 31**；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致（`2026-09-22T05:06:40Z`） | 本机（Docker + 无头 Chrome） |
 | **后端 ㊲**：`/api` 命名空间的错误体契约 + 登录失败的三档语义（本轮审计修复 A6 / A8） | **① A6**：`GET /api/<未知路径>` 原先回 `net/http` 默认的纯文本 `404 page not found`（19 字节，`text/plain`），而 README 承诺「失败响应统一为 `{"error":{…}}`」、前端 `src/api/client.ts` 也按 `error.code` 分支 —— 契约在**未注册路径**上不成立。改法刻意**不是**注册一条 `/api/` 兜底模式：不带方法前缀的模式匹配**任意方法**，于是 `PUT /api/links` 会从 405 变成 404（`TestRouterMethodAwareness` 正是盯着这一点，而 405 的 `Allow` 头是客户端唯一能知道「该用哪个方法」的地方）。改为在**响应侧**改写：`internal/httpx/APIErrorContract` 只认「状态码 ∈ {404,405} 且 `Content-Type` 是 `http.Error` 的默认值 `text/plain; charset=utf-8`」这个组合（本包自己的 404 是 `application/json`、短码失效页是 `text/html`，因此不会误伤），命中就换成本包的 JSON 错误体并**吞掉**随后那句纯文本。容器实测：未注册路径 404 `not_found`、方法不对 405 `method_not_allowed` **且 `Allow` 原样保留**（`PUT /api/links` → `Allow: GET, HEAD, POST`）、错误体**带 `request_id`**（说明改写发生在 `RequestID` 中间件之内）；作用域实测：`PUT /healthz` 仍是 `text/plain`、`GET /zzzzzzz` 仍是 HTML 失效页。**② A8**：登录失败原先一律 401 `unauthorized` +「登录状态无效，请重新登录」—— 在登录页输错密码会被提示去清 cookie，且与「该回登录页」的 `unauthorized` 同码同因。改为三档：字段级（邮箱格式 / 空口令）走 422 + `field`（**与注册同口径**，且判定在任何查库动作之前，不引入「账号是否存在」的耗时侧信道）、凭据错误用新的 `domain.ErrInvalidCredentials` → 401 `invalid_credentials` +「邮箱或密码不正确」（两条失败路径文案完全一致，仍是防枚举）、未认证保持 `unauthorized`。**刻意不在登录侧校验口令强度**：策略是注册侧的事，将来上调 `MinPasswordLength` 会让老用户被自己的合法密码挡在登录页外（`TestLoginValidationIsNotRegisterPolicy` 钉住）。**③ 连带修掉客户端一处「注释描述了、代码没实现」的保护**：`client.ts` 原本只在 `token !== null` 时不登出，与「登录接口的 401 不算会话过期」只是**间接**成立（靠 `/login` 的 `guestOnly` 守卫）；现在按 `code !== 'invalid_credentials'` 判定，将来去掉守卫或加「重新验证身份」流程都不会踩坑，并补了 3 条 vitest（`src/api/client.test.ts`）。**④ 新增守卫 9 条**：`httpx/api_errors_test.go` 3 个（含直接盯「吞掉纯文本」与「重复 `WriteHeader` 被丢弃」的两个细节用例，且刻意用**真实 ServeMux** 而不是手写模仿）、handler 2 个（`TestRouterAPIErrorContract` / `TestRouterKeepsNonAPIErrorBehavior`，前者同时是「Go 改了内建错误写法就会红」的守卫）、`service/auth_test.go` 5 个（此前 `auth` **完全没有单测**）、前端 3 条 vitest。**变异验证 7 条 + 1 条负对照全部按预期**：摘掉 `APIErrorContract` / 只改写 404 不管 405 / 不吞纯文本 / `isAPIPath` 放宽成前缀匹配 / 登录不校验邮箱格式 / 「邮箱不存在」退回 `ErrUnauthorized` / 映射表删掉 `ErrInvalidCredentials` —— 各自只红对应用例，只改注释的负对照仍绿；还原后 4 份文件逐字节一致并**独立读文件**复核。**验收**：`gofmt` / `go vet` / `go test ./...`（16 包，其中 handler 与 service 非缓存）全绿；前端 eslint / vitest **59**（+3）/ `audit:refs` ✓ / vue-tsc / build 全绿；容器级 **17 / 17**；e2e **39 / 39** 紧接冒烟 **34 / 34**（+3）；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致（`2026-09-22T05:38:19Z`） | 本机（Docker，全部重建） |
+| **后端 ㊳**：`/healthz` 收敛为存活/就绪子集，完整诊断移到 `/healthz/details`（本轮审计修复 A3） | 修的是「同一批数字两套可见性」：`/healthz` 匿名可达，却把与 `/metrics` **同一次采集**的完整诊断一起回了出去（`version` 版本指纹、`uptime_seconds` 部署节奏、`stream_len` / `stream_pending` 积压水位、`pg_fallbacks` 回源次数、丢失计数、是否内嵌 worker、限流是否降级），而 `/metrics` 在 nginx 里被显式 404、README 还专门用一节论证「不对外」。改法**不是在 handler 里做 IP 过滤** —— 这个端点必须继续被编排系统使用（api 镜像的 `HEALTHCHECK` 走 `api -healthcheck`，只看状态码、从不解析响应体），而是把响应体裁成两个面：`GET /healthz` 只回 `status` / `postgres` / `redis`，新增 `GET /healthz/details` 回完整快照，**与 `/metrics` 同策略**（nginx 里 `= /healthz/details { return 404; }`，不加鉴权也不限流，只在内网可达）。两者在 degraded 时语义各自成立：`/healthz` 回 **503 + `Retry-After`**（编排系统据此不接流量），`/healthz/details` 仍回 **200**（诊断快照的职责是把 degraded 那一刻的数字交出去，回 503 会让脚本与监控把整份响应丢掉）。**新增 2 条守卫，都刻意用「能挡住将来」的写法**：`handler/healthz_surface_test.go` 用**键集合白名单**断言公开面恰好三项（黑名单挡不住将来新增的字段），且用一份「所有诊断字段都非零」的探针 —— 否则字段自带的 `omitzero` 会让「不该有 version」因为 version 本来就是空串而必然通过（一个永远绿的守卫）；`httpx/nginx_surface_test.go` 解析 `nginx.conf` 的**块结构**，断言 `/metrics` 与 `/healthz/details` **各自恰好一条** `location = … { return 404; }`，并做一条**反向断言**（`/healthz` 必须仍在 `proxy_pass`、不是 404）—— 少了它，一个「顺手一刀切」的改动会让容器永久 unhealthy 而无人发现。⚠️ 反向断言必须用**精确匹配**（为此新增 `exactBlocks`）而不能复用已有的 `findBlocks`：后者用 `HasPrefix`，而 `location = /healthz` 恰好是 `location = /healthz/details` 的前缀，会把两个端点混成一对（守卫自己算错比漏测更难发现）。**变异验证 2 条全部按预期**：把 `report.Public()` 退回完整 `report` → 键集合白名单红并逐条打印泄漏的字段名；删掉 nginx 那一行 → 「应当**恰好一条**，实际 0 条」红；还原后两份文件 sha256 与基线**逐字节一致**（另起进程独立读文件复核，不只信脚本自证），两条守卫复绿。**验收**：`gofmt` / `go vet` / `go test ./...`（16 包）全绿；`backend`/`worker`/`frontend` 全部重建，两个后端 tag 时间戳一致（`2026-09-22T06:03:47Z`）；e2e **39 / 39** 紧接冒烟 **36 / 36**（+2，正是上面这两条新检查：`/healthz` 只回三项、内部诊断端点经 nginx 回 404） | 本机（Docker，全部重建） |
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
-| Stream 消费 | `/healthz` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
+| Stream 消费 | `/healthz/details` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 
 ⚠️ **「计数一致性 = 0」这条要这样读**：它指的是**只经过跳转路径**（`GET /{code}`）产生的点击。
 `容器级 ⑰` 的 GeoIP 验收是**手工往 Stream 投显式 ID 的消息**，那条路径绕过了跳转里的

@@ -91,6 +91,37 @@ type HealthReport struct {
 	Errors []string `json:"errors,omitempty"`
 }
 
+// PublicHealthReport 是 `/healthz` 对外暴露的**最小子集**。
+//
+// 为什么要拆（2026-09-22 审计 A3）：`/healthz` 是匿名可达的（README 的 API 表里鉴权列
+// 写的是「—」），而同一次采集出来的诊断字段曾经**一并公开** —— 版本号、进程存活时长、
+// Stream 积压、回源次数、丢弃计数、是否内嵌 worker、限流是否降级……
+//
+// 关键在于：这与 `/metrics` 是**同一批数字**，只因为一个走 JSON、一个走 Prometheus 文本，
+// 待遇就差了整整一个「公开 / 不公开」（nginx 里 `= /metrics` 显式 404，README 还专门用
+// 一节论证它「不对外」）。那是配置不对称，不是设计取舍。同一批数字必须同一套可见性，
+// 所以完整诊断统一挪到 `/healthz/details`，它和 `/metrics` 一样只在内网可达。
+//
+// 留在公开面的只有编排系统真正需要的三项。**将来加诊断字段时不要往这里加** ——
+// 多一个字段就是多一份信息面，而它由配置文件（nginx）兜底，漏兜就是静默泄露。
+type PublicHealthReport struct {
+	// Status 是 ok / degraded。
+	Status string `json:"status"`
+	// Postgres / Redis 是依赖探针结果：ok / error。
+	// 保留它们是因为「就绪」本来就要求编排系统知道是**哪个**依赖不可用，
+	// 否则 503 只是一个无法行动的信号。
+	Postgres string `json:"postgres"`
+	Redis    string `json:"redis"`
+}
+
+// Public 截取对外可见的子集。
+//
+// 刻意**不返回 `errors`**：故障说明里会出现组件名与「不可用」措辞，属于诊断信息，
+// 而对外那三项已经足够回答「现在能不能接流量、是哪个依赖不行」。
+func (r HealthReport) Public() PublicHealthReport {
+	return PublicHealthReport{Status: r.Status, Postgres: r.Postgres, Redis: r.Redis}
+}
+
 // HealthProbe 由 cmd/api 实现，负责汇总各组件状态。
 type HealthProbe interface {
 	// Report 采集一次健康报告。

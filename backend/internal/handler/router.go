@@ -56,7 +56,8 @@ type Options struct {
 //
 // 路由表（与 PLAN.md §7 一致）：
 //
-//	GET    /healthz
+//	GET    /healthz          ← 匿名可达，**只回 status / postgres / redis**
+//	GET    /healthz/details  ← 完整诊断快照（**不对外**，见 healthDetailsHandler）
 //	GET    /metrics         ← Prometheus 文本格式（**不对外**，见 metricsHandler）
 //	POST   /api/auth/register
 //	POST   /api/auth/login
@@ -118,9 +119,15 @@ func Router(opts Options) http.Handler {
 	mux := http.NewServeMux()
 
 	// ---- 基础设施 ----
+	//
+	// 两个健康端点分工，见各自的 handler 注释：`/healthz` 只回对外最小子集，
+	// 完整诊断在 `/healthz/details`（与 /metrics 同策略：nginx 里显式 404）。
+	// ⚠️ 两者的**可见性差别不由路由决定，而由 nginx 兜底** —— 少了那两条 `= … { return 404; }`，
+	//    诊断端点就会掉进 SPA fallback 以 200 返回外壳，静默地变回公开。
 	mux.Handle("GET /healthz", http.HandlerFunc(healthHandler(opts.Health)))
+	mux.Handle("GET /healthz/details", http.HandlerFunc(healthDetailsHandler(opts.Health)))
 
-	// /metrics 与 /healthz 同源（同一次 Report），只换一种给 Prometheus 看的形态。
+	// /metrics 与 /healthz/details 同源（同一次 Report），只换一种给 Prometheus 看的形态。
 	// **不对外**：nginx 里 `location = /metrics { return 404; }` 挡住了公网，
 	// 只有同一网络内的抓取方能到 —— 所以这里不需要鉴权，也不该加限流
 	// （限流会把「每 15 秒抓一次」的固定开销变成配额消耗）。
@@ -180,12 +187,19 @@ func Router(opts Options) http.Handler {
 	)
 }
 
-// healthHandler 返回 /healthz 处理器。
+// healthHandler 返回 /healthz 处理器（**匿名可达，只回最小子集**）。
 // PG / Redis 任一异常 → 503，让编排系统（compose healthcheck、K8s）能感知。
+//
+// 为什么只回 `status` / `postgres` / `redis`：这个端点是公开的，而完整诊断
+// （版本指纹、存活时长、积压水位、回源次数、丢弃计数）曾是它的一部分 ——
+// 与 `/metrics` 同一批数字，却只在这里公开。取舍与理由见 httpx.PublicHealthReport。
+//
+// 注意响应体收窄**不影响任何探针**：容器的 HEALTHCHECK 走 `probeHealth`，
+// 它只看状态码，从不解析响应体。
 func healthHandler(probe httpx.HealthProbe) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if probe == nil {
-			httpx.WriteJSON(w, r, http.StatusOK, httpx.HealthReport{
+			httpx.WriteJSON(w, r, http.StatusOK, httpx.PublicHealthReport{
 				Status:   "ok",
 				Postgres: "unknown",
 				Redis:    "unknown",
@@ -199,7 +213,30 @@ func healthHandler(probe httpx.HealthProbe) http.HandlerFunc {
 			status = http.StatusServiceUnavailable
 			w.Header().Set("Retry-After", "2")
 		}
-		httpx.WriteJSON(w, r, status, report)
+		httpx.WriteJSON(w, r, status, report.Public())
+	}
+}
+
+// healthDetailsHandler 返回 /healthz/details 处理器：**完整诊断快照**。
+//
+// 与 healthHandler 的两处刻意差别：
+//
+//  1. 可见性：这个端点只在内网可达。nginx 里是 `location = /healthz/details { return 404; }`，
+//     与 `/metrics` 同策略。**不要因为它「只是个健康检查」就放开** ——
+//     它和 /metrics 是同一份数据，放开它就等于把 /metrics 的策略作废。
+//
+//  2. **探针异常也回 200**，理由与 metricsHandler 完全相同：判断依赖好坏已经由
+//     `/healthz` 用状态码承担了，而本端点的职责是「把此刻的观测值交出去」——
+//     degraded 那一刻的数字（`stream_len`、`pg_fallbacks`、`errors`）恰恰是最有价值的，
+//     回 503 会让脚本与监控把整份响应丢掉，在最需要观测的时刻失去观测能力。
+//     故障由响应体里的 `status: "degraded"` 与 `postgres`/`redis` 表达。
+func healthDetailsHandler(probe httpx.HealthProbe) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		report := httpx.HealthReport{Status: "ok", Postgres: "unknown", Redis: "unknown"}
+		if probe != nil {
+			report = probe.Report(r.Context())
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, report)
 	}
 }
 

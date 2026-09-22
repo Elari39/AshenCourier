@@ -11,6 +11,7 @@ import (
 	"uuid"
 
 	"ashen-courier/internal/domain"
+	"ashen-courier/internal/httpx"
 	"ashen-courier/internal/service"
 )
 
@@ -28,6 +29,23 @@ func newTestRouter(t *testing.T, links map[string]*domain.Link) http.Handler {
 func newTestRouterWith(t *testing.T, links map[string]*domain.Link, users domain.UserRepository) http.Handler {
 	t.Helper()
 
+	return newTestRouterWithProbe(t, links, users, okProbe{})
+}
+
+// newTestRouterWithProbe 再允许注入健康探针。
+//
+// 为什么需要它：`okProbe` 只填 status / postgres / redis —— 恰好**等于**公开面。
+// 而 HealthReport 上那些诊断字段都带 `omitzero`，零值会被 JSON 丢掉，于是
+// 「公开响应里不该出现 version」这类断言用 okProbe 会**必然通过**（一个永远绿的守卫）。
+// `/healthz` 的可见性边界用例必须能塞一份「所有诊断字段都非零」的报告进来。
+func newTestRouterWithProbe(
+	t *testing.T,
+	links map[string]*domain.Link,
+	users domain.UserRepository,
+	probe httpx.HealthProbe,
+) http.Handler {
+	t.Helper()
+
 	repo := &stubLinkRepo{getByCode: func(_ context.Context, code string) (*domain.Link, error) {
 		if l, ok := links[code]; ok {
 			return l, nil
@@ -40,7 +58,7 @@ func newTestRouterWith(t *testing.T, links map[string]*domain.Link, users domain
 		Auth:        service.NewAuth(users, "test-secret-0123456789", time.Hour),
 		Shortener:   newTestShortener(repo),
 		Stats:       service.NewStats(&stubClicks{}, stubDelta{}),
-		Health:      okProbe{},
+		Health:      probe,
 		Unlock:      service.NewLinkUnlocker("test-secret-0123456789", time.Hour),
 		Limiter:     nil, // 不限流：路由表用例不该被配额干扰
 		TrustProxy:  false,
@@ -52,7 +70,7 @@ func newTestRouterWith(t *testing.T, links map[string]*domain.Link, users domain
 	})
 }
 
-// TestRouterTable 用一张表钉住 README「API」一节的 16 条路由：
+// TestRouterTable 用一张表钉住 README「API」一节的 17 条路由：
 // 每条都要能被路由到（而不是 404），且鉴权层次符合文档 ——
 // 这正好挡住「改了路由忘了改文档」和「requireUser 写成 optionalAuth」两类回归。
 func TestRouterTable(t *testing.T) {
@@ -162,6 +180,11 @@ func TestRouterTable(t *testing.T) {
 			wantStatus: http.StatusOK,
 			why:        "Prometheus 文本端点：**不挂鉴权也不挂限流**（它只在内网可达，公网由 nginx 的 `= /metrics` 挡掉）；探针异常时仍回 200，故障由 ashen_*_up 0 表达",
 		},
+		{
+			name: "17 GET /healthz/details", method: http.MethodGet, path: "/healthz/details",
+			wantStatus: http.StatusOK,
+			why:        "完整诊断快照：同样不挂鉴权（公网由 nginx 的 `= /healthz/details` 挡掉，与 /metrics 同策略）；探针异常时仍回 200，与 /healthz 的分工见 healthDetailsHandler 注释",
+		},
 	}
 
 	for _, tt := range tests {
@@ -190,6 +213,7 @@ func TestRouterMethodAwareness(t *testing.T) {
 
 	paths := []string{
 		"/healthz",
+		"/healthz/details",
 		"/metrics",
 		"/api/auth/register",
 		"/api/auth/login",

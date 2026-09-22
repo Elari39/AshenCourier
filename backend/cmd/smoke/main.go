@@ -239,6 +239,33 @@ func (s *suite) runAll(ctx context.Context) error {
 		}
 		return nil
 	})
+	// 收窄响应体这件事**必须用 HTTP 断言守**：它是「安静地退化回去」的类型 ——
+	// 多回几个字段不会让任何现有检查变红，只有对比响应体原文才发现得了。
+	// 这也解释了为什么这条断言查的是「原文里有没有出现这些字段名」而不是解析 JSON：
+	// 要挡的是**将来新增**的诊断字段，逐个解析就等于每次加字段都得回来补一行。
+	s.check("GET /healthz 只回 status/postgres/redis，不带内部诊断字段", func(ctx context.Context) error {
+		got, err := s.do(ctx, http.MethodGet, "/healthz", nil, nil)
+		if err != nil {
+			return err
+		}
+		if got.status != http.StatusOK {
+			return fmt.Errorf("期望 200，实际 %d：%s", got.status, truncate(string(got.body), 120))
+		}
+		// 与 /metrics 同一批数字：后者被 nginx 显式 404，前者也不该匿名可读。
+		for _, leak := range []string{
+			"version", "uptime_seconds", "queue_len", "stream_len", "stream_pending",
+			"pg_fallbacks", "dropped_clicks", "failed_clicks", "worker_enabled",
+			"worker_errors", "consumed_clicks", "rate_limit_", "errors",
+		} {
+			if strings.Contains(string(got.body), leak) {
+				return fmt.Errorf("公开的 /healthz 里出现了内部诊断字段 %q：\n"+
+					"    %s\n"+
+					"    诊断快照应只出现在 /healthz/details（与 /metrics 同策略，公网 nginx 404）。", leak, truncate(string(got.body), 300))
+			}
+		}
+		return nil
+	})
+
 	if s.failures > 0 {
 		// 服务没起来，后面的步骤没有意义
 		return nil
@@ -260,6 +287,31 @@ func (s *suite) runAll(ctx context.Context) error {
 				}
 				if ct := got.header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 					return fmt.Errorf("GET %s 的 Content-Type=%q，期望 text/html", path, ct)
+				}
+			}
+			return nil
+		})
+	}
+
+	// ---------- 1b-2. 内部诊断端点不对外（仅经 nginx 时才有意义）----------
+	// 这两个端点是**同一批数据**（`/metrics` 走 Prometheus 文本，`/healthz/details` 走 JSON），
+	// 可见性也必须一致：nginx 里各有一条 `location = … { return 404; }`。
+	//
+	// 这条检查盯的是一个「配错就静默」的结构：两者都不是**单段**路径，不会被短码正则截走，
+	// 但会掉进 `location /` 的 `try_files … /index.html`，于是以 **200 + SPA 外壳**返回。
+	// 软 200 比 404 更糟：扫描器会认为端点存在。而**直连后端时它们本来就该是 200**
+	// （后端不设防，只靠拓扑挡住），所以这个错只有走 nginx 时才看得出来。
+	if s.expectSPA {
+		s.check("内部诊断端点（/metrics、/healthz/details）经 nginx 回 404", func(ctx context.Context) error {
+			for _, path := range []string{"/metrics", "/healthz/details"} {
+				got, err := s.do(ctx, http.MethodGet, path, nil, nil)
+				if err != nil {
+					return err
+				}
+				if got.status != http.StatusNotFound {
+					return fmt.Errorf("GET %s 返回 %d，期望 404（nginx 里应有 `location = %s { return 404; }`）。\n"+
+						"    它此刻很可能正以 200 返回 SPA 外壳 —— 软 200 会让人以为端点不存在，"+
+						"也让扫描器以为它存在。", path, got.status, path)
 				}
 			}
 			return nil
