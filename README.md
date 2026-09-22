@@ -1197,6 +1197,16 @@ CI 每次都跑，本机记录的是基线快照与 CI 里不好做的项（比�
 | 计数一致性 | `link_click_totals` 中 `base_count <> event_count` 的链接数 = 0；`clicks:dirty` 与 `clicks:cnt:*` 回刷后清空 | 本机 |
 | Stream 消费 | `/healthz/details` 不含 `stream_pending`（零值 ⇒ 0 pending）；worker 日志无 `"msg":"http"` 记录（确认跑的是 worker 而非 api） | 本机 |
 
+**2026-09-22 修复线（批次 1–9，共 12 个提交）推送后 CI 全绿**
+（[run 35697596345](https://github.com/Elari39/AshenCourier/actions/runs/35697596345)，全程 2m35s）：
+`frontend（typecheck / lint / build）` **43s**、`backend（fmt / vet / test -race + store 集成测试）` **1m0s**、
+`smoke（容器级端到端）` **1m37s**。⚠️ 两点要说清：① 这是本轮修复**唯一**在 CI 里跑过的验证 ——
+上面那些验收数字绝大多数是本机 Docker 的实测，CI 只覆盖「格式 / 静态检查 / 单测（含 `-race`）/
+store 集成 / 容器级端到端」这一套；② 本批新增的镜像漂移守卫就在 `smoke` job 里，
+所以这一步**同时**是它的首次 CI 运行。CI 只报了两类**非失败**告警：
+`actions/setup-node@v4` / `actions/setup-go@v5` / `pnpm/action-setup@v4` 触发的 Node 20 弃用提示，
+以及 `ubuntu-latest` 将于 2026-10-19 迁到 Ubuntu 26 —— 都还没处理。
+
 ⚠️ **「计数一致性 = 0」这条要这样读**：它指的是**只经过跳转路径**（`GET /{code}`）产生的点击。
 `容器级 ⑰` 的 GeoIP 验收是**手工往 Stream 投显式 ID 的消息**，那条路径绕过了跳转里的
 `INCR clicks:cnt:{code}`，于是那些明细永远追不上基线 —— 那个库现在能查到 1 条
