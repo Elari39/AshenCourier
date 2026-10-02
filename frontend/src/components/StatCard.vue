@@ -16,7 +16,7 @@ const displayValue = computed(() =>
 </script>
 
 <template>
-  <div class="stat-tile card-cream bg-surface-card px-6 py-5">
+  <div class="stat-tile card-cream px-6 py-5">
     <p class="eyebrow">{{ label }}</p>
     <p class="mt-2 font-display font-extrabold text-[48px] leading-[1.1] tracking-[-0.014em] text-ink">
       {{ displayValue }}

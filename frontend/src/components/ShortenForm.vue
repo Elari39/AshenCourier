@@ -9,6 +9,8 @@ import { useAuth } from '@/composables/useAuth'
 import { creationExpiry, type ExpiryChoice } from '@/utils/expiry'
 import { splitTags } from '@/utils/tags'
 
+defineProps<{ compact?: boolean }>()
+
 const emit = defineEmits<{
   (event: 'created', payload: { link: Link; manageKey?: string }): void
 }>()
@@ -148,13 +150,16 @@ async function submit(): Promise<void> {
 <template>
   <form ref="form" class="w-full min-w-0" novalidate @submit.prevent="submit">
     <fieldset :disabled="submitting" class="min-w-0">
-      <div class="flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-center">
+      <div
+        class="flex flex-col items-start justify-between gap-2 sm:flex-row sm:items-center"
+        :class="compact ? 'xl:flex-col xl:items-stretch' : ''"
+      >
         <p class="text-base font-bold text-ink">创建你的短链接</p>
         <span class="text-xs text-muted">{{
           isAuthenticated ? '自动保存到我的链接' : '无需注册，即刻分享'
         }}</span>
       </div>
-      <div class="mt-4 flex flex-col gap-3 sm:flex-row">
+      <div class="mt-4 flex flex-col gap-3 sm:flex-row" :class="compact ? 'xl:flex-col' : ''">
         <Input
           v-model="targetURL"
           class="min-w-0 flex-1"

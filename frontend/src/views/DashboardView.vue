@@ -15,7 +15,6 @@ import ResultCard from '@/components/ResultCard.vue'
 import ShortenForm from '@/components/ShortenForm.vue'
 import StatCard from '@/components/StatCard.vue'
 import Button from '@/components/ui/Button.vue'
-import Card from '@/components/ui/Card.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import Input from '@/components/ui/Input.vue'
 import PageHeader from '@/components/ui/PageHeader.vue'
@@ -170,6 +169,11 @@ function onCreated(payload: { link: Link; manageKey?: string }): void {
 }
 
 // 搜索 / 标签筛选：300ms 防抖，避免每敲一个字就打一次接口
+function clearFilters(): void {
+  query.value = ''
+  tagFilter.value = ''
+}
+
 let searchTimer: number | undefined
 watch([query, tagFilter], () => {
   listGuard.cancel()
@@ -194,70 +198,72 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="bg-canvas py-12 md:py-16">
-    <div class="container-page">
-      <!-- 页头 -->
-      <PageHeader eyebrow="Dashboard" title="我的链接">
-        <template #actions>
-          <p class="text-[13px] text-muted">共加载 {{ totalLinks }} 条</p>
-        </template>
-      </PageHeader>
-
-      <!-- 创建区（奶油卡片） -->
-      <Card class="mt-8 p-6 md:p-8">
-        <ShortenForm @created="onCreated" />
-      </Card>
-
-      <!-- 刚创建的结果卡（深色） -->
-      <div v-if="latest" class="mt-6">
-        <ResultCard :link="latest.link" :manage-key="latest.manageKey" />
+  <div class="dashboard-stage">
+    <header class="dashboard-masthead">
+      <div class="container-page">
+        <PageHeader eyebrow="YOUR LINKS / YOUR SPACE" title="我的链接">
+          把分享的每一站，收在这里。
+          <template #actions>
+            <a href="#create-link" class="btn btn-secondary">新建短链 ↗</a>
+          </template>
+        </PageHeader>
       </div>
-
-      <!-- 指标卡 3-up -->
-      <div class="mt-6 grid gap-4 sm:grid-cols-3">
+    </header>
+    <div class="container-page">
+      <div class="dashboard-metrics grid gap-5 sm:grid-cols-3">
         <StatCard label="已加载链接" :value="totalLinks" hint="当前列表中的条数" />
         <StatCard label="已加载链接点击" :value="totalClicks" hint="已加载链接的点击之和" />
         <StatCard label="正常状态" :value="activeLinks" hint="当前列表中处于正常状态的链接" />
       </div>
-
-      <!-- 列表 + 搜索 -->
-      <Card class="mt-6 p-6 md:p-8">
-        <div class="flex flex-wrap items-center justify-between gap-4">
-          <p class="title-md">链接列表</p>
-          <div class="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
-            <div class="w-full sm:w-40">
-              <Input v-model="tagFilter" placeholder="按标签筛选" aria-label="按标签筛选" />
+      <div class="dashboard-workspace">
+        <section id="create-link" class="min-w-0 scroll-mt-24" tabindex="-1" aria-label="新建短链">
+          <div class="neo-workbench">
+            <div class="neo-window-bar">
+              <span>01 / CREATE & SHARE</span><span aria-hidden="true">↗</span>
             </div>
-            <div class="w-full sm:w-64">
-              <Input v-model="query" placeholder="搜索短码 / 标题 / 目标地址" aria-label="搜索链接" />
-            </div>
+            <div class="p-5"><ShortenForm compact @created="onCreated" /></div>
           </div>
-        </div>
-
-        <div class="mt-6">
-          <Skeleton v-if="loading" :lines="4" height="h-14" />
-
-          <div v-else-if="loadError" role="alert">
-            <p class="text-[14px] text-error">{{ loadError }}</p>
-            <Button class="mt-3" variant="secondary" @click="reload">重新加载</Button>
+          <div v-if="latest" class="mt-7">
+            <ResultCard :link="latest.link" :manage-key="latest.manageKey" />
           </div>
-
-          <EmptyState v-else-if="links.length === 0" :title="emptyTitle" :description="emptyDescription" />
-
-          <template v-else>
-            <LinkTable
-              :links="links"
-              :pending-code="deletingCode"
-              @delete="handleDelete"
-              @filter-tag="(tag) => (tagFilter = tag)"
-            />
-
-            <div v-if="hasMore" class="mt-6 flex justify-center">
-              <Button variant="secondary" :loading="loadingMore" @click="loadMore">加载更多</Button>
+          <div v-else class="dashboard-tip">
+            <span class="text-3xl font-extrabold" aria-hidden="true">✳</span>
+            <p>默认 24 小时有效。<br /><span class="font-normal">需要更多设置？展开高级选项。</span></p>
+          </div>
+        </section>
+        <section class="dashboard-collection min-w-0" aria-labelledby="collection-title">
+          <div class="dashboard-collection-title">
+            <h2 id="collection-title">链接收藏夹</h2>
+            <span class="font-mono text-xs">{{ totalLinks }} LOADED</span>
+          </div>
+          <div class="dashboard-filterbar">
+            <Input v-model="query" placeholder="搜索短码 / 标题 / 目标地址" aria-label="搜索链接" />
+            <Input v-model="tagFilter" placeholder="按标签筛选" aria-label="按标签筛选" />
+            <button v-if="hasFilter" class="text-link text-xs" type="button" @click="clearFilters">
+              清空筛选
+            </button>
+          </div>
+          <div class="p-4 md:p-5">
+            <Skeleton v-if="loading" :lines="4" height="h-14" />
+            <div v-else-if="loadError" role="alert">
+              <p class="text-sm text-error">{{ loadError }}</p>
+              <Button class="mt-3" variant="secondary" @click="reload">重新加载</Button>
             </div>
-          </template>
-        </div>
-      </Card>
+            <EmptyState v-else-if="links.length === 0" :title="emptyTitle" :description="emptyDescription" />
+            <template v-else>
+              <LinkTable
+                :links="links"
+                :pending-code="deletingCode"
+                @delete="handleDelete"
+                @filter-tag="(tag) => (tagFilter = tag)"
+              />
+              <div v-if="hasMore" class="mt-6 flex justify-center">
+                <Button variant="secondary" :loading="loadingMore" @click="loadMore">加载更多</Button>
+              </div>
+            </template>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 </template>

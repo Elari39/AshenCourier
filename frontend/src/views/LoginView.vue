@@ -11,9 +11,8 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
-import Card from '@/components/ui/Card.vue'
+import AccountLayout from '@/components/AccountLayout.vue'
 import Input from '@/components/ui/Input.vue'
-import PageHeader from '@/components/ui/PageHeader.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useToast } from '@/composables/useToast'
 
@@ -63,48 +62,33 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <div class="auth-canvas bg-canvas py-16 md:py-24">
-    <div class="container-page">
-      <div class="mx-auto w-full max-w-md">
-        <PageHeader eyebrow="Welcome back" title="登录" align="center">
-          登录后即可集中管理短链并查看点击统计。
-        </PageHeader>
+  <AccountLayout mode="login">
+    <form class="space-y-5" novalidate @submit.prevent="submit">
+      <Input v-model="email" label="邮箱" type="email" placeholder="you@example.com" autocomplete="email" />
+      <Input
+        v-model="password"
+        label="密码"
+        type="password"
+        placeholder="输入密码"
+        autocomplete="current-password"
+      />
 
-        <Card class="mt-8 p-6 md:p-8">
-          <form class="space-y-5" novalidate @submit.prevent="submit">
-            <Input
-              v-model="email"
-              label="邮箱"
-              type="email"
-              placeholder="you@example.com"
-              autocomplete="email"
-            />
-            <Input
-              v-model="password"
-              label="密码"
-              type="password"
-              placeholder="输入密码"
-              autocomplete="current-password"
-            />
+      <p v-if="formError" role="alert" class="border-2 border-error bg-red-50 p-3 text-[13px] text-error">
+        {{ formError }}
+      </p>
 
-            <p v-if="formError" class="text-[13px] text-error">{{ formError }}</p>
+      <Button type="submit" block :loading="submitting" :disabled="!canSubmit">
+        {{ submitting ? '登录中' : '登录' }}
+      </Button>
+    </form>
 
-            <Button type="submit" block :loading="submitting" :disabled="!canSubmit">
-              {{ submitting ? '登录中' : '登录' }}
-            </Button>
-          </form>
+    <p class="mt-6 text-center text-[14px] text-muted">
+      还没有账号？
+      <RouterLink :to="{ name: 'register' }" class="text-link">免费注册</RouterLink>
+    </p>
 
-          <p class="mt-6 text-center text-[14px] text-muted">
-            还没有账号？
-            <RouterLink :to="{ name: 'register' }" class="text-link">免费注册</RouterLink>
-          </p>
-        </Card>
-
-        <p class="mt-6 text-center text-[13px] text-muted-soft">
-          不想注册也可以直接用 ——
-          <RouterLink :to="{ name: 'landing' }" class="text-link">匿名创建短链</RouterLink>
-        </p>
-      </div>
-    </div>
-  </div>
+    <p class="mt-5 border-t-2 border-ink/15 pt-5 text-center text-sm text-muted">
+      只想试试看？ <RouterLink :to="{ name: 'landing' }" class="text-link">匿名创建短链 ↗</RouterLink>
+    </p>
+  </AccountLayout>
 </template>

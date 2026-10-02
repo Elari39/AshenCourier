@@ -11,9 +11,8 @@ import { RouterLink, useRouter } from 'vue-router'
 
 import { ApiError } from '@/api/client'
 import Button from '@/components/ui/Button.vue'
-import Card from '@/components/ui/Card.vue'
+import AccountLayout from '@/components/AccountLayout.vue'
 import Input from '@/components/ui/Input.vue'
-import PageHeader from '@/components/ui/PageHeader.vue'
 import { useAuth } from '@/composables/useAuth'
 import { useToast } from '@/composables/useToast'
 
@@ -75,62 +74,54 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <div class="auth-canvas bg-canvas py-16 md:py-24">
-    <div class="container-page">
-      <div class="mx-auto w-full max-w-md">
-        <PageHeader eyebrow="Get started" title="创建账号" align="center">
-          免费，不需要信用卡。注册后立刻可以创建与管理短链。
-        </PageHeader>
+  <AccountLayout mode="register">
+    <form class="space-y-5" novalidate @submit.prevent="submit">
+      <Input
+        v-model="email"
+        label="邮箱"
+        type="email"
+        placeholder="you@example.com"
+        autocomplete="email"
+        :error="fieldErrors.email"
+      />
+      <Input
+        v-model="displayName"
+        label="昵称（可选）"
+        placeholder="怎么称呼你"
+        autocomplete="nickname"
+        :maxlength="64"
+        :error="fieldErrors.display_name"
+      />
+      <Input
+        v-model="password"
+        label="密码"
+        type="password"
+        placeholder="至少 8 位"
+        autocomplete="new-password"
+        hint="密码至少 8 位，最多 72 字节"
+        :error="fieldErrors.password"
+      />
+      <Input
+        v-model="confirm"
+        label="确认密码"
+        type="password"
+        placeholder="再输入一次"
+        autocomplete="new-password"
+        :error="confirmError"
+      />
 
-        <Card class="mt-8 p-6 md:p-8">
-          <form class="space-y-5" novalidate @submit.prevent="submit">
-            <Input
-              v-model="email"
-              label="邮箱"
-              type="email"
-              placeholder="you@example.com"
-              autocomplete="email"
-              :error="fieldErrors.email"
-            />
-            <Input
-              v-model="displayName"
-              label="昵称（可选）"
-              placeholder="怎么称呼你"
-              autocomplete="nickname"
-              :maxlength="64"
-              :error="fieldErrors.display_name"
-            />
-            <Input
-              v-model="password"
-              label="密码"
-              type="password"
-              placeholder="至少 8 位"
-              autocomplete="new-password"
-              hint="密码至少 8 位，最多 72 字节"
-              :error="fieldErrors.password"
-            />
-            <Input
-              v-model="confirm"
-              label="确认密码"
-              type="password"
-              placeholder="再输入一次"
-              autocomplete="new-password"
-              :error="confirmError"
-            />
+      <p v-if="formError" role="alert" class="border-2 border-error bg-red-50 p-3 text-[13px] text-error">
+        {{ formError }}
+      </p>
 
-            <p v-if="formError" class="text-[13px] text-error">{{ formError }}</p>
+      <Button type="submit" block :loading="submitting" :disabled="!canSubmit">
+        {{ submitting ? '注册中' : '注册并开始' }}
+      </Button>
+    </form>
 
-            <Button type="submit" block :loading="submitting" :disabled="!canSubmit">
-              {{ submitting ? '注册中' : '注册并开始' }}
-            </Button>
-          </form>
-
-          <p class="mt-6 text-center text-[14px] text-muted">
-            已有账号？
-            <RouterLink :to="{ name: 'login' }" class="text-link">去登录</RouterLink>
-          </p>
-        </Card>
-      </div>
-    </div>
-  </div>
+    <p class="mt-6 text-center text-[14px] text-muted">
+      已有账号？
+      <RouterLink :to="{ name: 'login' }" class="text-link">去登录</RouterLink>
+    </p>
+  </AccountLayout>
 </template>
