@@ -18,13 +18,7 @@ withDefaults(
 </script>
 
 <template>
-  <button
-    type="button"
-    class="btn-icon"
-    :aria-label="label"
-    :title="label"
-    :disabled="disabled"
-  >
+  <button type="button" class="btn-icon" :aria-label="label" :title="label" :disabled="disabled">
     <slot />
   </button>
 </template>

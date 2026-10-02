@@ -29,17 +29,17 @@ func TestKeyConstruction(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "默认域的正向键", got: LinkKey(nil, "abc1234"), want: "link:v2:-:abc1234"},
-		{name: "默认域的负缓存键", got: MissKey(nil, "abc1234"), want: "link:v2:miss:-:abc1234"},
+		{name: "默认域的正向键", got: LinkKey(nil, "abc1234"), want: "link:v3:-:abc1234"},
+		{name: "默认域的负缓存键", got: MissKey(nil, "abc1234"), want: "link:v3:miss:-:abc1234"},
 		{
 			name: "自定义域的正向键",
 			got:  LinkKey(&domA, "abc1234"),
-			want: "link:v2:11111111-1111-4111-8111-111111111111:abc1234",
+			want: "link:v3:11111111-1111-4111-8111-111111111111:abc1234",
 		},
 		{
 			name: "自定义域的负缓存键",
 			got:  MissKey(&domA, "abc1234"),
-			want: "link:v2:miss:11111111-1111-4111-8111-111111111111:abc1234",
+			want: "link:v3:miss:11111111-1111-4111-8111-111111111111:abc1234",
 		},
 		{name: "计数增量键", got: ClickCounterKey("abc1234"), want: "clicks:cnt:abc1234"},
 		{name: "dirty 集合键", got: dirtySetKey, want: "clicks:dirty"},

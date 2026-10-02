@@ -2,6 +2,7 @@ package redis
 
 import (
 	"os"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -35,7 +36,16 @@ func openTestClient(t *testing.T) *Client {
 		t.Skipf("未设置 %s，跳过真 Redis 集成测试", redisTestAddrEnv)
 	}
 
+	db := 0
+	if raw := os.Getenv("REDIS_TEST_DB"); raw != "" {
+		var err error
+		db, err = strconv.Atoi(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	c, err := Open(t.Context(), Options{
+		DB:       db,
 		Addr:     addr,
 		Password: os.Getenv(redisTestPasswordEnv),
 		Timeout:  2 * time.Second,

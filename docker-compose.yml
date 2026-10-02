@@ -220,7 +220,7 @@ services:
         # 留空时前端回退到 window.location.origin。⚠️ 构建期注入，改它要重新 build。
         VITE_SHORT_BASE_URL: ${PUBLIC_BASE_URL:-}
     ports:
-      - "${FRONTEND_PORT:-8080}:80" # 对外唯一入口
+      - "${FRONTEND_BIND:-127.0.0.1}:${FRONTEND_PORT:-8080}:80" # 对外唯一入口
     depends_on:
       - backend
     # 空闲 8.8M：nginx 只发静态文件与反代。256m 足够几百个并发连接

@@ -449,20 +449,25 @@ func (s *Shortener) resolveFromDB(ctx context.Context, code string, domainID *uu
 // host 与 Resolve 一致：只在**该域内**找这条短链。否则可以从 A 域提交口令
 // 去解锁一条属于 B 域的短链 —— 那等于绕过了域隔离。
 func (s *Shortener) VerifyPassword(ctx context.Context, host, code, plain string) error {
+	_, err := s.VerifiedPassword(ctx, host, code, plain)
+	return err
+}
+
+func (s *Shortener) VerifiedPassword(ctx context.Context, host, code, plain string) (*domain.Link, error) {
 	link, err := s.links.GetByCodeInDomain(ctx, code, s.domainIDForHost(ctx, host))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := link.Redirectable(time.Now()); err != nil {
-		return err
+		return nil, err
 	}
 	if !link.HasPassword() {
-		return nil
+		return link, nil
 	}
 	if !CheckLinkPassword(link.PasswordHash, plain) {
-		return fmt.Errorf("service.shortener: unlock %q: %w", code, domain.ErrUnauthorized)
+		return nil, fmt.Errorf("service.shortener: unlock %q: %w", code, domain.ErrUnauthorized)
 	}
-	return nil
+	return link, nil
 }
 
 // Get 读取短链详情（管理端使用，不校验权限，由调用方先做鉴权）。
@@ -827,6 +832,7 @@ func (s *Shortener) putCache(ctx context.Context, link *domain.Link) {
 		ExpiresAt: link.ExpiresAt,
 		// 缓存里只带「有没有口令」这一个布尔，摘要不出库（见 domain.CachedLink）
 		PasswordProtected: link.HasPassword(),
+		PasswordVersion:   link.PasswordVersion,
 		// 所属域必须一起缓存：命中之后要靠它做域校验。
 		// 漏了这一行的症状是「自定义域的短链第一次能开、TTL 内之后全 404」——
 		// 回源那条路拿的是数据库行所以是对的，只有缓存命中才会踩。
@@ -888,9 +894,17 @@ func (s *Shortener) drain(ctx context.Context) {
 
 	drained := 0
 	for {
+		if drainCtx.Err() != nil {
+			s.droppedClicks.Add(int64(len(s.queue)))
+			slog.Warn("排空统计队列超时", "remaining", len(s.queue))
+			return
+		}
 		select {
 		case rec := <-s.queue:
-			s.write(drainCtx, rec)
+			if err := s.recorder.Record(drainCtx, rec); err != nil {
+				s.failedClicks.Add(1)
+				slog.Warn("排空统计写入失败", "err", err)
+			}
 			drained++
 		default:
 			// 这条日志是关停顺序的验收依据：它必须出现在 HTTP 优雅关闭完成之后
@@ -913,6 +927,7 @@ func cachedToLink(entry *domain.CachedLink) *domain.Link {
 		ExpiresAt: entry.ExpiresAt,
 
 		PasswordProtected: entry.PasswordProtected,
+		PasswordVersion:   entry.PasswordVersion,
 		// 带上所属域：Resolve 的域校验读的就是它
 		DomainID: entry.DomainID,
 	}

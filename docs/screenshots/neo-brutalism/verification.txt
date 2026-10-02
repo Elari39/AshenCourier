@@ -1,0 +1,33 @@
+landing 390px: no overflow
+landing 768px: no overflow
+landing 1440px: no overflow
+login 390px: no overflow
+login 768px: no overflow
+login 1440px: no overflow
+register 390px: no overflow
+register 768px: no overflow
+register 1440px: no overflow
+not-found 390px: no overflow
+not-found 768px: no overflow
+not-found 1440px: no overflow
+Anonymous creation via UI and management key persistence: passed
+Registration via UI: passed
+Anonymous link claim via UI: passed
+dashboard 390px: no overflow
+dashboard 768px: no overflow
+dashboard 1440px: no overflow
+detail 390px: no overflow
+detail 768px: no overflow
+detail 1440px: no overflow
+Statistics failure shows unknown values and retry recovers: passed
+Edit via UI: passed
+QR download via UI: passed
+Creation under active tag filter preserves matching results: passed
+password 390px: no overflow
+password 768px: no overflow
+password 1440px: no overflow
+Password change revokes existing cookie: passed
+expired 390px: no overflow
+expired 768px: no overflow
+expired 1440px: no overflow
+Login via UI: passed

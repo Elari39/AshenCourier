@@ -44,10 +44,13 @@ describe('client 收到 401 时的处置', () => {
   function stubLogin(status: number, body: unknown): void {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify(body), {
-        status,
-        headers: { 'Content-Type': 'application/json' },
-      })),
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(body), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
     )
   }
 

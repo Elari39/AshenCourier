@@ -149,7 +149,7 @@ type Deps struct {
 	// Clicks 批量落库点击明细（*postgres.ClickStore 满足）。
 	Clicks domain.ClickRepository
 	// Counter 是计数增量的原子操作（*redis.Client 满足）。
-	Counter domain.ClickCounter
+	Counter domain.BatchCounter
 	// Stream 是点击事件流的消费端口（*redis.Client 满足）。
 	Stream domain.ClickStream
 	// Cache 用于过期清理后失效短码缓存。
@@ -174,7 +174,7 @@ type Worker struct {
 	counts  domain.ClickCountWriter
 	sweeper domain.ExpiredLinkSweeper
 	clicks  domain.ClickRepository
-	counter domain.ClickCounter
+	counter domain.BatchCounter
 	stream  domain.ClickStream
 	cache   domain.LinkCache
 	geo     domain.GeoLocator
@@ -343,8 +343,9 @@ func (w *Worker) syncCounts(ctx context.Context) error {
 	synced := 0
 	var retry []string
 	for _, code := range codes {
-		// TakeDelta 只读不删：值留在键里，崩在任何一步都不会丢（见 domain.ClickCounter 注释）
-		delta, err := w.counter.TakeDelta(ctx, code)
+		// TakeDelta 只读不删：值留在键里，崩在任何一步都不会丢（见 domain.BatchCounter 注释）
+		batch, err := w.counter.FreezeBatch(ctx, code)
+		delta := batch.Delta
 		if err != nil {
 			// 读不到增量：把标记放回去，下一轮重试
 			retry = append(retry, code)
@@ -352,16 +353,16 @@ func (w *Worker) syncCounts(ctx context.Context) error {
 		}
 		if delta == 0 {
 			// 没有增量也要结算：TakeDelta 不再顺手摘 dirty，不摘的话这个短码每轮都被扫到
-			if serr := w.counter.SettleDelta(ctx, code, 0); serr != nil {
+			if serr := w.counter.ConfirmBatch(ctx, code, batch); serr != nil {
 				w.log.Warn("清理空增量的 dirty 标记失败，下一轮会重扫", "code", code, "err", serr)
 			}
 			continue
 		}
-		if _, err := w.counts.AddClickCount(ctx, code, delta); err != nil {
+		if err := w.counts.ApplyCountBatch(ctx, code, batch); err != nil {
 			if errors.Is(err, domain.ErrNotFound) {
 				// 短码已被删除，增量无处可去：结算掉（把键减到 0 并摘 dirty）后丢弃。
 				// 不结算的话值会一直留在键里、dirty 也一直在 —— 每 2 秒重试一次直到永远。
-				if serr := w.counter.SettleDelta(ctx, code, delta); serr != nil {
+				if serr := w.counter.ConfirmBatch(ctx, code, batch); serr != nil {
 					w.log.Warn("短码已删除，丢弃增量失败，下一轮会重试",
 						"code", code, "delta", delta, "err", serr)
 				}
@@ -377,11 +378,11 @@ func (w *Worker) syncCounts(ctx context.Context) error {
 			continue
 		}
 		// 落库成功才结算：减掉这批增量 + 摘掉 dirty 标记
-		if serr := w.counter.SettleDelta(ctx, code, delta); serr != nil {
-			// 结算失败 → 增量仍在键里、dirty 也还在 → 下一轮会把同一批再累加一次。
-			// 这是设计上接受的失败模式（重复累加 ≤ 一批），但必须留明确日志。
+		if serr := w.counter.ConfirmBatch(ctx, code, batch); serr != nil {
+			// Confirmation failure leaves the same batch available for an idempotent retry.
+			// PostgreSQL has already recorded its batch ID, so it cannot be counted twice.
 			w.errors.Add(1)
-			w.log.Error("结算点击增量失败，基线可能重复累加（上限一批）",
+			w.log.Error("确认点击批次失败，将幂等重试",
 				"code", code, "delta", delta, "err", serr)
 		}
 		synced++

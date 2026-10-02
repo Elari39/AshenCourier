@@ -12,9 +12,12 @@ defineProps<{
 </script>
 
 <template>
-  <div class="flex flex-col items-center px-6 py-14 text-center">
+  <div class="flex flex-col items-center px-5 py-9 text-center">
     <!-- 品牌标记：4 辐放射星，纯装饰。颜色取自 text-primary（珊瑚描边）-->
-    <BrandMark variant="outline" class="mb-5 h-7 w-7 text-primary" />
+    <span
+      class="mb-5 flex h-12 w-12 rotate-[-6deg] items-center justify-center border-2 border-ink bg-surface-cream-strong"
+      ><BrandMark class="h-6 w-6 text-ink"
+    /></span>
 
     <p class="title-md">{{ title }}</p>
     <p v-if="description" class="mt-2 max-w-sm text-[14px] text-muted">

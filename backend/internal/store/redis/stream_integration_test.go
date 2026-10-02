@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"strconv"
 	"testing"
 	"time"
 	"uuid"
@@ -45,12 +44,12 @@ func seedPending(t *testing.T, c *Client, count int, attempts int) []string {
 	}
 
 	// 用远过去的时间戳生成 ID，避免与上一次运行留下的条目混在一起
-	base := time.Now().Add(-time.Hour).UnixMilli()
+	// Redis allocates monotonic IDs even when the database contains older test runs.
 	ids := make([]string, 0, count)
-	for i := range count {
+	for range count {
 		id, err := c.rdb.XAdd(t.Context(), &goredis.XAddArgs{
 			Stream: streamKey,
-			ID:     strconv.FormatInt(base, 10) + "-" + strconv.Itoa(i),
+			ID:     "*",
 			Values: []any{
 				fieldCode, "it-dead-letter",
 				fieldLinkID, uuid.New().String(),
@@ -58,7 +57,7 @@ func seedPending(t *testing.T, c *Client, count int, attempts int) []string {
 			},
 		}).Result()
 		if err != nil {
-			t.Fatalf("投递第 %d 条消息失败：%v", i, err)
+			t.Fatalf("投递消息失败：%v", err)
 		}
 		ids = append(ids, id)
 	}

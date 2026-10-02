@@ -35,13 +35,13 @@ var (
 
 // 键前缀与固定键。短码字符集是 [0-9A-Za-z_-]，不含 ':'，因此拼键无歧义。
 const (
-	// linkKeyPrefix 是短码正向缓存：link:v2:{domainKey}:{code}
+	// linkKeyPrefix 是短码正向缓存：link:v3:{domainKey}:{code}
 	//
 	// v2 而不是 v1：键的**含义**变了（从「短码」变成「域 + 短码」），
 	// 这属于不兼容变更，必须换版本 —— 否则升级瞬间会读到按旧坐标写的条目，
 	// 表现为「短链一会儿能开一会儿不能开」。老键不迁移，交给 TTL 自然淘汰。
-	linkKeyPrefix = "link:v2:"
-	// missKeyPrefix 是短码负缓存：link:v2:miss:{domainKey}:{code}
+	linkKeyPrefix = "link:v3:"
+	// missKeyPrefix 是短码负缓存：link:v3:miss:{domainKey}:{code}
 	//
 	// domainKey 必须进键：负缓存的含义是「该短码在**该域内**不存在」。
 	// 只按短码记会让跨域探测把「不属于这个域」误记成「不存在」，
@@ -50,7 +50,7 @@ const (
 	// 注意：不用 PLAN.md 草案里的 "link:v1:-{code}"。短码字符集含 '-'，
 	// 那么短码 "-abc" 的正向键 link:v1:-abc 会与短码 "abc" 的负缓存键撞车。
 	// 由于短码不含 ':'，插一层 "miss:" 段即可彻底消除歧义。
-	missKeyPrefix = "link:v2:miss:"
+	missKeyPrefix = "link:v3:miss:"
 	// defaultDomainKey 是默认域名在缓存键里的占位符。
 	// 用 '-'（不在 UUID 字符集 '0-9a-f-' 的合法形态里，也不是任何短码前缀的歧义源）
 	// 而不是空串：空串会让键里出现连续的 ':'，读起来分不清是「两段」还是「漏了一段」。

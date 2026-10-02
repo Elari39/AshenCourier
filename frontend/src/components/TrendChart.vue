@@ -64,7 +64,9 @@ function yAt(clicks: number): number {
 const linePath = computed(() => {
   if (series.value.length === 0) return ''
   return series.value
-    .map((point, index) => `${index === 0 ? 'M' : 'L'}${xAt(index).toFixed(2)},${yAt(point.clicks).toFixed(2)}`)
+    .map(
+      (point, index) => `${index === 0 ? 'M' : 'L'}${xAt(index).toFixed(2)},${yAt(point.clicks).toFixed(2)}`,
+    )
     .join(' ')
 })
 

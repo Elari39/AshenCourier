@@ -142,7 +142,12 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     //    （这条原先只靠「/login 有 guestOnly 守卫、登录页进不去」间接成立，
     //    也就是说注释描述的保护并没有真的写在代码里；改成按 code 判之后，
     //    将来去掉那个守卫、或加一个「重新验证身份」的流程都不会踩坑。）
-    if (error.isUnauthorized && token !== null && error.code !== 'invalid_credentials') {
+    if (
+      error.isUnauthorized &&
+      token !== null &&
+      error.code !== 'invalid_credentials' &&
+      loadToken() === token
+    ) {
       notifyUnauthorized()
     }
     throw error

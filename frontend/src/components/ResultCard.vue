@@ -36,17 +36,28 @@ const { revealed: revealKey, toggle: toggleKey } = useMaskedSecret(() => props.l
 <template>
   <Card variant="dark">
     <div class="flex flex-wrap items-center justify-between gap-3">
-      <Badge variant="coral">已生成</Badge>
+      <Badge variant="accent">已生成</Badge>
       <span class="text-[13px] text-on-dark-soft">{{ describeExpiry(link.expires_at) }}</span>
     </div>
 
     <!-- 短链本体：等宽字体 + 深色内嵌面板 -->
-    <CodeWindow class="mt-5 flex flex-wrap items-center gap-3">
+    <p class="mt-4 text-sm text-on-dark">短链已准备好，可以复制分享。</p>
+    <p class="mt-2 text-xs text-on-dark-soft">
+      {{
+        link.expires_at
+          ? `到期时间：${formatDateTime(link.expires_at)}（本地时间）`
+          : '永久有效，可在详情页随时停用。'
+      }}
+    </p>
+    <p v-if="link.password_protected" class="mt-2 text-xs text-on-dark-soft">
+      已开启口令保护，记得另外告知接收者访问口令。
+    </p>
+    <CodeWindow class="mt-5 flex flex-col items-start gap-4">
       <a
         :href="link.short_url"
         target="_blank"
         rel="noopener noreferrer"
-        class="min-w-0 flex-1 break-anywhere text-on-dark underline-offset-4 hover:underline"
+        class="w-full min-w-0 break-anywhere text-on-dark underline-offset-4 hover:underline"
       >
         {{ link.short_url }}
       </a>
@@ -65,30 +76,32 @@ const { revealed: revealKey, toggle: toggleKey } = useMaskedSecret(() => props.l
     <!-- 一次性管理密钥 -->
     <div v-if="manageKey" class="mt-5 rounded-md border border-surface-dark-elevated p-4">
       <p class="text-[13px] leading-[1.55] text-on-dark-soft">
-        这是<strong class="font-medium text-on-dark">一次性管理密钥</strong>，只显示这一次。
-        没有它就无法再管理这条匿名短链，请立刻保存；登录后也可以用它把链接「认领」到账号下。
+        这是你的<strong class="font-medium text-on-dark">管理密钥</strong>，请单独保存，不要随短链分享。
+        它用于修改、停用或认领这条匿名短链，不是访问口令。
       </p>
       <div class="mt-3 flex flex-wrap items-center gap-2">
-        <code class="min-w-0 flex-1 break-anywhere rounded-sm bg-surface-dark-soft px-2.5 py-1.5 text-[12px] text-on-dark">
+        <code
+          class="min-w-0 flex-1 break-anywhere rounded-sm bg-surface-dark-soft px-2.5 py-1.5 text-[12px] text-on-dark"
+        >
           {{ revealKey ? manageKey : '•••••••••••••••••••••••••••••••••••••••••••' }}
         </code>
         <Button variant="secondary-dark" size="sm" @click="toggleKey">
           {{ revealKey ? '隐藏' : '显示' }}
         </Button>
-        <CopyButton
-          :value="manageKey"
-          variant="secondary-dark"
-          size="sm"
-          success-message="管理密钥已复制"
-        />
+        <CopyButton :value="manageKey" variant="secondary-dark" size="sm" success-message="管理密钥已复制" />
       </div>
     </div>
 
     <div class="mt-5 flex flex-wrap items-center gap-4 text-[13px]">
-      <RouterLink :to="{ name: 'link-detail', params: { code: link.short_code } }" class="text-link">
+      <RouterLink
+        :to="{ name: 'link-detail', params: { code: link.short_code } }"
+        class="text-link text-on-dark"
+      >
         查看点击统计
       </RouterLink>
-      <span class="text-on-dark-soft">短码 <code class="text-on-dark">{{ link.short_code }}</code></span>
+      <span class="text-on-dark-soft"
+        >短码 <code class="text-on-dark">{{ link.short_code }}</code></span
+      >
       <span class="text-on-dark-soft">创建于 {{ formatDateTime(link.created_at) }}</span>
     </div>
   </Card>

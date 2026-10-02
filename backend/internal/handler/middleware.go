@@ -81,7 +81,7 @@ func optionalAuth(auth *service.Auth) httpx.Middleware {
 			}
 			id, err := auth.ParseToken(token)
 			if err != nil {
-				next.ServeHTTP(w, r)
+				httpx.WriteUnauthorized(w, r, "登录状态已失效，请重新登录")
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(withUserID(r.Context(), id)))

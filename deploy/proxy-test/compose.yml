@@ -1,0 +1,28 @@
+services:
+  backend:
+    image: nginx:1.31-alpine
+    entrypoint: [nginx, -g, 'daemon off;']
+    volumes: ['./echo.conf:/etc/nginx/nginx.conf:ro']
+    networks: [test]
+  frontend:
+    image: ashencourier-audit-frontend
+    entrypoint: [nginx, -g, 'daemon off;']
+    volumes:
+      - '../nginx/nginx.conf:/etc/nginx/nginx.conf:ro'
+      - './trusted.conf:/etc/nginx/trusted-proxies.conf:ro'
+    networks: [test]
+  outer:
+    image: nginx:1.31-alpine
+    entrypoint: [nginx, -g, 'daemon off;']
+    volumes: ['./outer.conf:/etc/nginx/nginx.conf:ro']
+    networks:
+      test: {ipv4_address: 172.30.84.3}
+  edge:
+    image: nginx:1.31-alpine
+    entrypoint: [sleep, infinity]
+    networks:
+      test: {ipv4_address: 172.30.84.4}
+networks:
+  test:
+    ipam:
+      config: [{subnet: 172.30.84.0/24}]

@@ -56,13 +56,7 @@ const inactive = computed(() => props.disabled === true || props.loading === tru
     <slot />
   </a>
 
-  <button
-    v-else
-    :type="type"
-    :class="classes"
-    :disabled="inactive"
-    :aria-busy="loading ? 'true' : undefined"
-  >
+  <button v-else :type="type" :class="classes" :disabled="inactive" :aria-busy="loading ? 'true' : undefined">
     <Spinner v-if="loading" :size="14" />
     <slot />
   </button>

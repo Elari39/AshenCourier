@@ -27,7 +27,7 @@ type LinkStore struct {
 // "203.0.113.7/32"），而这一列存的始终是单个地址。click_events.ip 早就做了同样的
 // 处理（见 click.go 的 clickEventColumns），这里对齐它 —— 是集成测试第一次跑就发现的。
 const linkColumns = `id, short_code, target_url, title, owner_id, key_hash, password_hash, status,
-       click_count, expires_at, tags, coalesce(host(created_ip), ''), created_at, updated_at, domain_id`
+       click_count, expires_at, tags, coalesce(host(created_ip), ''), created_at, updated_at, domain_id, password_version`
 
 // linkRow 是 links 表的一行。
 type linkRow struct {
@@ -47,7 +47,8 @@ type linkRow struct {
 	createdAt    time.Time
 	updatedAt    time.Time
 	// domainID 为 NULL 表示默认域名（见 domain.Link.DomainID）。
-	domainID pgtype.UUID
+	domainID        pgtype.UUID
+	passwordVersion int64
 }
 
 // dest 返回交给 rows.Scan 的扫描目标，顺序与 linkColumns 完全一致。
@@ -55,7 +56,7 @@ func (r *linkRow) dest() []any {
 	return []any{
 		&r.id, &r.shortCode, &r.targetURL, &r.title, &r.ownerID, &r.keyHash, &r.passwordHash,
 		&r.status, &r.clickCount, &r.expiresAt, &r.tags, &r.createdIP, &r.createdAt, &r.updatedAt,
-		&r.domainID,
+		&r.domainID, &r.passwordVersion,
 	}
 }
 
@@ -71,6 +72,7 @@ func (r *linkRow) toDomain() *domain.Link {
 		// 库读路径同时填两个字段：PasswordProtected 是「缓存路径也要能回答」的冗余标志，
 		// 见 domain.Link.PasswordProtected 的注释。
 		PasswordHash:      r.passwordHash,
+		PasswordVersion:   r.passwordVersion,
 		PasswordProtected: r.passwordHash != "",
 		Status:            domain.LinkStatus(r.status),
 		ClickCount:        r.clickCount,
@@ -188,6 +190,7 @@ UPDATE links SET
     expires_at = CASE WHEN $5 THEN NULL ELSE COALESCE($6, expires_at) END,
     tags       = COALESCE($7, tags),
     password_hash = COALESCE($8, password_hash),
+    password_version = password_version + CASE WHEN $8::text IS NULL THEN 0 ELSE 1 END,
     updated_at = now()
 WHERE short_code = $1
 RETURNING ` + linkColumns

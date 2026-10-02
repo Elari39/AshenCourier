@@ -39,7 +39,7 @@ const centered = computed(() => props.align === 'center')
 </script>
 
 <template>
-  <div :class="centered ? '' : 'flex flex-wrap items-end justify-between gap-6'">
+  <div class="page-heading" :class="centered ? '' : 'flex flex-wrap items-end justify-between gap-6'">
     <div class="min-w-0" :class="centered ? 'text-center' : ''">
       <p class="eyebrow" :class="centered ? 'text-center' : ''">{{ eyebrow }}</p>
       <!-- tabindex="-1"：它是「路由切换后焦点去哪」的落点，见文件头注释 -->

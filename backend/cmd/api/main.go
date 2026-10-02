@@ -142,7 +142,8 @@ func run() error {
 		AllowPrivateTargets: cfg.AllowPrivateTargets,
 	})
 	authSvc := service.NewAuth(pg.Users(), cfg.JWTSecret, cfg.JWTExpiry)
-	statsSvc := service.NewStats(pg.Clicks(), rdb)
+	totals := service.NewTotals(rdb, links)
+	statsSvc := service.NewStats(pg.Clicks(), rdb, totals)
 	limiter := redis.NewLimiter(rdb)
 	// 限流应急开关：打开后全量放行。刻意做成启动期开关而不是运行期端点 ——
 	// 它只在限流组件本身出问题时用，重启一次完全可接受。
@@ -220,7 +221,7 @@ func run() error {
 		Stats:       statsSvc,
 		Health:      probe,
 		Limiter:     limiter,
-		DeltaBatch:  rdb,
+		Totals:      totals,
 		TrustProxy:  cfg.TrustProxy,
 		CORSOrigins: corsOrigins(cfg.PublicBaseURL),
 

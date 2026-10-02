@@ -131,12 +131,12 @@ function handleLogout(): void {
     <a class="skip-link" href="#main-content">跳到主要内容</a>
 
     <!-- ---------- 顶栏：64px 奶油固定条 ---------- -->
-    <header class="sticky top-0 z-40 h-16 border-b border-hairline bg-canvas">
+    <header class="sticky top-0 z-40 h-16 border-b-[3px] border-hairline bg-canvas">
       <div class="container-page flex h-full items-center gap-6">
         <RouterLink :to="{ name: 'landing' }" class="flex items-center gap-2.5">
           <!-- 品牌标记 + 字标。标记永远是深色，不反相 -->
-          <BrandMark class="h-5 w-5 text-ink" />
-          <span class="text-[15px] font-medium tracking-tight text-ink">AshenCourier</span>
+          <span class="site-brand"><BrandMark class="h-5 w-5 text-ink" /></span>
+          <span class="text-[15px] font-extrabold tracking-tight text-ink">AshenCourier</span>
         </RouterLink>
 
         <!-- 桌面端菜单 -->
@@ -166,7 +166,9 @@ function handleLogout(): void {
           </template>
           <template v-else>
             <Button :to="{ name: 'login' }" variant="text">登录</Button>
-            <Button :to="{ name: 'register' }" variant="primary">免费开始</Button>
+            <Button :to="{ name: 'register' }" variant="primary" class="hidden sm:inline-flex"
+              >免费开始</Button
+            >
           </template>
 
           <!-- 移动端汉堡。label 随开合状态变：读屏听到的是「关闭菜单」而不是
@@ -213,6 +215,12 @@ function handleLogout(): void {
         >
           我的链接
         </RouterLink>
+        <RouterLink
+          v-if="!isAuthenticated"
+          :to="{ name: 'register' }"
+          class="rounded-md bg-primary px-3 py-3 text-[16px] font-bold text-ink"
+          >免费注册</RouterLink
+        >
       </nav>
     </div>
 
@@ -232,7 +240,7 @@ function handleLogout(): void {
             <span class="text-[15px] font-medium text-on-dark">AshenCourier</span>
           </div>
           <p class="mt-4 max-w-sm text-[14px] leading-[1.55]">
-            一个克制的短链服务：匿名即可用，登录后可集中管理并查看点击统计。
+            让分享轻一点。创建、管理和了解你的每一条短链。
           </p>
         </div>
 
@@ -246,11 +254,11 @@ function handleLogout(): void {
         </div>
 
         <div>
-          <p class="eyebrow text-on-dark-soft">技术</p>
+          <p class="eyebrow text-on-dark-soft">为分享而生</p>
           <ul class="mt-4 space-y-2.5 text-[14px]">
-            <li class="font-mono text-[13px]">Go 1.27 · net/http</li>
-            <li class="font-mono text-[13px]">PostgreSQL 18 · Redis 8</li>
-            <li class="font-mono text-[13px]">Vue 3 · Tailwind v4</li>
+            <li class="font-mono text-[13px]">短链 · 二维码 · 标签</li>
+            <li class="font-mono text-[13px]">口令保护 · 灵活有效期</li>
+            <li class="font-mono text-[13px]">随时管理 · 了解访问</li>
           </ul>
         </div>
       </div>

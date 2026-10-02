@@ -1,0 +1,10 @@
+# Use with -p ashencourier-audit -f docker-compose.yml -f deploy/compose.audit.yml
+# and a dedicated --env-file; never attach this stack to existing data volumes.
+services:
+  postgres:
+    ports: ["127.0.0.1:15483:5432"]
+  redis:
+    ports: ["127.0.0.1:16383:6379"]
+  frontend:
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;"]

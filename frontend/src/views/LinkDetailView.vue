@@ -6,7 +6,7 @@
  * 后端对「无权限」和「不存在」都回 404，所以这里只需要处理一种失败态。
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import QRCode from 'qrcode'
 
 import { ApiError, linksApi } from '@/api/client'
@@ -16,6 +16,7 @@ import StatCard from '@/components/StatCard.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
+import BackButton from '@/components/ui/BackButton.vue'
 import Card from '@/components/ui/Card.vue'
 import CopyButton from '@/components/ui/CopyButton.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
@@ -62,6 +63,7 @@ const loadError = ref('')
 
 const statsDays = ref(30)
 const loadingStats = ref(false)
+const statsError = ref('')
 
 /** 统计窗口。值是数字 —— 直接喂给接口的 days 参数，label 才带单位。 */
 const dayOptions = [
@@ -81,8 +83,8 @@ const CLICK_PAGE_SIZE = 20
 // 二维码配色：深墨前景 + 暖奶油底（≈19:1 对比度）。
 // 刻意不用珊瑚色（--color-primary）：它是强调色，与奶油底的对比度不足以让
 // 扫码器在弱光/贴纸场景下稳定识别 —— 二维码只有「能扫出来」这一个功能。
-const QR_DARK = '#141413' // --color-ink
-const QR_LIGHT = '#faf9f5' // --color-canvas
+const QR_DARK = '#171717' // --color-ink
+const QR_LIGHT = '#ffffff' // --color-canvas
 
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
 const downloadingQR = ref(false)
@@ -97,7 +99,7 @@ const editStatus = ref<'active' | 'disabled'>('active')
 /** 只暴露两种可编辑状态：status=3（已删除）是不可逆的，编辑面板里不给它入口。 */
 const statusOptions = [
   { value: 'active', label: '正常' },
-  { value: 'disabled', label: '停用（跳转返回 410）' },
+  { value: 'disabled', label: '停用' },
 ]
 /**
  * 新口令输入。刻意**不回填**现有口令：后端只存 bcrypt 摘要，回填等于把摘要
@@ -109,6 +111,9 @@ const editError = ref('')
 
 const deleting = ref(false)
 const claiming = ref(false)
+const clearing = ref(false)
+const mutating = computed(() => saving.value || deleting.value || claiming.value || clearing.value)
+const mutationGuard = createRequestGuard()
 
 /** 当前短码对应的匿名管理密钥（登录用户可能是空）。 */
 const manageKey = computed(() => manageKeyFor(code.value) ?? null)
@@ -121,10 +126,7 @@ const dailyAverage = computed(() => {
 })
 const peakDay = computed(() => {
   const points = stats.value?.daily ?? []
-  return points.reduce(
-    (best, point) => (point.clicks > best.clicks ? point : best),
-    { date: '', clicks: 0 },
-  )
+  return points.reduce((best, point) => (point.clicks > best.clicks ? point : best), { date: '', clicks: 0 })
 })
 
 const refererItems = computed<DistributionItem[]>(() =>
@@ -207,6 +209,8 @@ async function loadStats(): Promise<void> {
 
   const { signal, isStale } = statsGuard.begin()
   loadingStats.value = true
+  statsError.value = ''
+  stats.value = null
   try {
     const page = await linksApi.stats(code.value, statsDays.value, manageKey.value, signal)
     if (isStale()) return
@@ -214,7 +218,7 @@ async function loadStats(): Promise<void> {
   } catch (cause) {
     // 取消是我们自己发起的（切窗口 / 离开页面），不是故障，不提示
     if (isStale() || isAbortError(cause)) return
-    toast.error(cause instanceof ApiError ? cause.friendly : '统计加载失败')
+    statsError.value = cause instanceof ApiError ? cause.friendly : '统计加载失败'
   } finally {
     // 过期的一轮不能掐掉新请求的 loading
     if (!isStale()) loadingStats.value = false
@@ -261,7 +265,7 @@ async function renderQR(): Promise<void> {
     // 320px 画到 160px 的显示尺寸上：高 DPI 屏与截图放大都不糊
     await QRCode.toCanvas(canvas, link.value.short_url, {
       width: 320,
-      margin: 1,
+      margin: 4,
       errorCorrectionLevel: 'M',
       color: { dark: QR_DARK, light: QR_LIGHT },
     })
@@ -289,7 +293,7 @@ async function downloadQR(): Promise<void> {
     // 白底在那些场景下的对比度更稳（屏幕上的奶油底只是为了和 DESIGN.md 的面板一致）。
     const dataURL = await QRCode.toDataURL(link.value.short_url, {
       width: 1024,
-      margin: 2,
+      margin: 4,
       errorCorrectionLevel: 'M',
       color: { dark: QR_DARK, light: '#ffffff' },
     })
@@ -307,7 +311,8 @@ async function downloadQR(): Promise<void> {
 }
 
 async function saveEdit(): Promise<void> {
-  if (!link.value) return
+  if (!link.value || mutating.value) return
+  const { signal, isStale } = mutationGuard.begin()
 
   saving.value = true
   editError.value = ''
@@ -323,12 +328,15 @@ async function saveEdit(): Promise<void> {
         ...(editPassword.value ? { password: editPassword.value } : {}),
       },
       manageKey.value,
+      signal,
     )
+    if (isStale()) return
     link.value = updated
     editPassword.value = ''
     editOpen.value = false
     toast.success('已保存')
   } catch (cause) {
+    if (isStale() || isAbortError(cause)) return
     editError.value = cause instanceof ApiError ? cause.friendly : '保存失败，请稍后重试'
   } finally {
     saving.value = false
@@ -336,43 +344,61 @@ async function saveEdit(): Promise<void> {
 }
 
 async function clearExpiry(): Promise<void> {
-  if (!link.value) return
+  if (!link.value || mutating.value) return
+  const { signal, isStale } = mutationGuard.begin()
+  clearing.value = true
   try {
-    link.value = await linksApi.update(code.value, { clear_expires: true }, manageKey.value)
+    const updated = await linksApi.update(code.value, { clear_expires: true }, manageKey.value, signal)
+    if (isStale()) return
+    link.value = updated
     toast.success('已改为永久有效')
   } catch (cause) {
+    if (isStale() || isAbortError(cause)) return
     toast.error(cause instanceof ApiError ? cause.friendly : '操作失败')
+  } finally {
+    clearing.value = false
   }
 }
 
 /** 清除访问口令（与 clearExpiry 同一套路：单独一个动作，不等保存）。 */
 async function clearPassword(): Promise<void> {
-  if (!link.value) return
+  if (!link.value || mutating.value) return
+  const { signal, isStale } = mutationGuard.begin()
+  clearing.value = true
   try {
-    link.value = await linksApi.update(code.value, { clear_password: true }, manageKey.value)
+    const updated = await linksApi.update(code.value, { clear_password: true }, manageKey.value, signal)
+    if (isStale()) return
+    link.value = updated
     editPassword.value = ''
     toast.success('已清除访问口令')
   } catch (cause) {
+    if (isStale() || isAbortError(cause)) return
     toast.error(cause instanceof ApiError ? cause.friendly : '操作失败')
+  } finally {
+    clearing.value = false
   }
 }
 
 async function handleDelete(): Promise<void> {
-  if (!link.value) return
+  if (!link.value || mutating.value) return
+  const targetCode = code.value
   const ok = await confirm({
     title: '删除短链',
     message: `确定要删除 /${code.value} 吗？删除后短链立即失效，这个短码也不会再复用。`,
     confirmText: '删除',
     variant: 'danger',
   })
-  if (!ok) return
+  if (!ok || targetCode !== code.value || mutating.value) return
+  const { signal, isStale } = mutationGuard.begin()
 
   deleting.value = true
   try {
-    await linksApi.remove(code.value, manageKey.value)
+    await linksApi.remove(targetCode, manageKey.value, signal)
+    if (isStale()) return
     toast.success('已删除')
     await router.push({ name: 'dashboard' })
   } catch (cause) {
+    if (isStale() || isAbortError(cause)) return
     toast.error(cause instanceof ApiError ? cause.friendly : '删除失败，请稍后重试')
   } finally {
     deleting.value = false
@@ -381,15 +407,20 @@ async function handleDelete(): Promise<void> {
 
 async function handleClaim(): Promise<void> {
   const key = manageKey.value
-  if (!key) return
+  if (!key || mutating.value) return
+  const { signal, isStale } = mutationGuard.begin()
+  const targetCode = code.value
 
   claiming.value = true
   try {
-    link.value = await linksApi.claim(code.value, key)
+    const claimed = await linksApi.claim(targetCode, key, signal)
+    if (isStale()) return
+    link.value = claimed
     // 认领成功后后端会清空 key_hash，本地密钥就没用了
     forgetManageKey(code.value)
     toast.success('已认领到你的账号下')
   } catch (cause) {
+    if (isStale() || isAbortError(cause)) return
     toast.error(cause instanceof ApiError ? cause.friendly : '认领失败，请稍后重试')
   } finally {
     claiming.value = false
@@ -404,8 +435,9 @@ watch(statsDays, () => {
 
 /** 加载整页：先拿 link（它决定渲染哪一支分支），再并行拉统计、明细与二维码。 */
 async function loadAll(): Promise<void> {
+  const targetCode = code.value
   await loadLink()
-  if (link.value) {
+  if (link.value && targetCode === code.value) {
     await Promise.all([loadStats(), loadClicks(), renderQR()])
   }
 }
@@ -418,6 +450,11 @@ async function loadAll(): Promise<void> {
  * 两个加载函数开头的 `if (!link.value) return` 会直接返回，不会发出多余请求。
  */
 function resetForLinkChange(): void {
+  linkGuard.cancel()
+  statsGuard.cancel()
+  clicksGuard.cancel()
+  mutationGuard.cancel()
+  statsError.value = ''
   link.value = null
   stats.value = null
   clicks.value = []
@@ -447,6 +484,7 @@ watch(code, () => {
 
 // 离开页面时取消在飞的请求：响应回来时组件已经卸载，写状态既无意义也易出错
 onUnmounted(() => {
+  mutationGuard.cancel()
   linkGuard.cancel()
   statsGuard.cancel()
   clicksGuard.cancel()
@@ -465,7 +503,7 @@ onUnmounted(() => {
           title="找不到这条短链"
           description="它可能已被删除；也可能是你换了浏览器或清了缓存，导致匿名管理密钥丢失。"
         >
-          <Button :to="{ name: 'landing' }" variant="primary">回首页创建新短链</Button>
+          <BackButton :to="{ name: 'landing' }">回首页创建新短链</BackButton>
         </EmptyState>
       </Card>
 
@@ -499,22 +537,21 @@ onUnmounted(() => {
             <Button variant="secondary" @click="editOpen = !editOpen">
               {{ editOpen ? '取消编辑' : '编辑' }}
             </Button>
-            <Button variant="danger" :loading="deleting" @click="handleDelete">删除</Button>
+            <Button
+              variant="danger"
+              :loading="deleting"
+              :disabled="mutating && !deleting"
+              @click="handleDelete"
+              >删除</Button
+            >
           </template>
         </PageHeader>
 
         <!-- 二维码：扫码打开（深墨前景 + 暖奶油底，对比度 ≈19:1） -->
         <Card class="mt-8 p-6 md:p-8">
           <div class="flex flex-col gap-6 sm:flex-row sm:items-center">
-            <div
-              class="h-40 w-40 shrink-0 rounded-lg border border-hairline bg-canvas p-2"
-            >
-              <canvas
-                ref="qrCanvas"
-                class="h-full w-full"
-                aria-label="短链二维码"
-                role="img"
-              />
+            <div class="h-40 w-40 shrink-0 rounded-lg border border-hairline bg-canvas p-2">
+              <canvas ref="qrCanvas" class="h-full w-full" aria-label="短链二维码" role="img" />
             </div>
 
             <div class="min-w-0">
@@ -527,9 +564,7 @@ onUnmounted(() => {
               </p>
               <p v-if="qrError" class="mt-3 text-[13px] text-error">{{ qrError }}</p>
               <div class="mt-4">
-                <Button variant="secondary" :loading="downloadingQR" @click="downloadQR">
-                  下载二维码
-                </Button>
+                <Button variant="secondary" :loading="downloadingQR" @click="downloadQR"> 下载二维码 </Button>
               </div>
             </div>
           </div>
@@ -538,7 +573,7 @@ onUnmounted(() => {
         <!-- 认领提示（珊瑚 callout：全站少数几个允许珊瑚满铺的位置） -->
         <Card
           v-if="canClaim"
-          variant="coral"
+          variant="accent"
           class="mt-8 flex flex-col items-start justify-between gap-5 md:flex-row md:items-center"
         >
           <div>
@@ -547,7 +582,13 @@ onUnmounted(() => {
               你的浏览器里存着它的管理密钥。认领之后它就归属你的账号，换设备登录也能管理。
             </p>
           </div>
-          <Button variant="secondary" :loading="claiming" class="shrink-0" @click="handleClaim">
+          <Button
+            variant="secondary"
+            :loading="claiming"
+            :disabled="mutating && !claiming"
+            class="shrink-0"
+            @click="handleClaim"
+          >
             认领到我的账号
           </Button>
         </Card>
@@ -568,7 +609,7 @@ onUnmounted(() => {
               v-model="editStatus"
               label="状态"
               :options="statusOptions"
-              hint="停用后跳转返回 410，短链本身仍然保留"
+              hint="停用后无法访问，之后可以重新启用"
             />
             <Input
               v-model="editPassword"
@@ -579,10 +620,11 @@ onUnmounted(() => {
               hint="至少 8 位；设置后需凭口令跳转"
             />
             <div class="flex items-end gap-2">
-              <Button variant="secondary" @click="clearExpiry">改为永久有效</Button>
+              <Button variant="secondary" :disabled="mutating" @click="clearExpiry">改为永久有效</Button>
               <Button
                 v-if="link.password_protected"
                 variant="secondary"
+                :disabled="mutating"
                 @click="clearPassword"
               >
                 清除口令
@@ -591,19 +633,25 @@ onUnmounted(() => {
           </div>
           <p v-if="editError" class="mt-3 text-[13px] text-error">{{ editError }}</p>
           <div class="mt-5 flex items-center gap-3">
-            <Button :loading="saving" @click="saveEdit">保存</Button>
+            <Button :loading="saving" :disabled="mutating && !saving" @click="saveEdit">保存</Button>
             <Button variant="text" @click="editOpen = false">取消</Button>
           </div>
-          <p class="mt-3 text-[13px] text-muted">
-            保存后后端会主动失效该短码的缓存，改动立即可见。
-          </p>
+          <p class="mt-3 text-[13px] text-muted">保存后，分享出去的短链将使用新的设置。</p>
         </Card>
 
         <!-- 统计指标卡 -->
         <div class="mt-8 grid gap-4 sm:grid-cols-3">
           <StatCard label="总点击" :value="stats?.total_clicks ?? link.click_count" hint="全部时间" />
-          <StatCard label="窗口内点击" :value="windowClicks" :hint="`最近 ${stats?.days ?? statsDays} 天`" />
-          <StatCard label="日均" :value="dailyAverage" :hint="`最近 ${stats?.days ?? statsDays} 天平均`" />
+          <StatCard
+            label="窗口内点击"
+            :value="stats ? windowClicks : '—'"
+            :hint="`最近 ${stats?.days ?? statsDays} 天`"
+          />
+          <StatCard
+            label="日均"
+            :value="stats ? dailyAverage : '—'"
+            :hint="`最近 ${stats?.days ?? statsDays} 天平均`"
+          />
         </div>
 
         <!-- 趋势图 -->
@@ -613,6 +661,10 @@ onUnmounted(() => {
           </template>
 
           <Spinner v-if="loadingStats" :size="16">正在更新…</Spinner>
+          <div v-else-if="statsError" role="alert" class="space-y-3">
+            <p class="text-error">{{ statsError }}</p>
+            <Button variant="secondary" @click="loadStats">重试统计</Button>
+          </div>
           <template v-else-if="stats">
             <TrendChart :points="stats.daily" />
             <p v-if="peakDay.clicks > 0" class="mt-3 text-[13px] text-muted">
@@ -628,10 +680,7 @@ onUnmounted(() => {
             于是栅格列数要跟着变：xl 下 4 列还是 3 列。
             不改默认的 md:grid-cols-3，是为了让「没开 GeoIP」的部署版式与改动前逐字一致。
           -->
-          <div
-            class="grid gap-10 md:grid-cols-3"
-            :class="countryItems.length > 0 ? 'xl:grid-cols-4' : ''"
-          >
+          <div class="grid gap-10 md:grid-cols-3" :class="countryItems.length > 0 ? 'xl:grid-cols-4' : ''">
             <DistributionList
               title="来源"
               :items="refererItems"
@@ -639,11 +688,7 @@ onUnmounted(() => {
             />
             <DistributionList title="设备" :items="deviceItems" />
             <DistributionList title="浏览器" :items="browserItems" />
-            <DistributionList
-              v-if="countryItems.length > 0"
-              title="国家"
-              :items="countryItems"
-            />
+            <DistributionList v-if="countryItems.length > 0" title="国家" :items="countryItems" />
           </div>
         </Section>
 
@@ -658,16 +703,14 @@ onUnmounted(() => {
             </span>
           </template>
 
-          <Spinner v-if="loadingClicks && clicks.length === 0" :size="16" class="mt-6">
-            正在加载…
-          </Spinner>
+          <Spinner v-if="loadingClicks && clicks.length === 0" :size="16" class="mt-6"> 正在加载… </Spinner>
           <p v-else-if="clicksError" class="mt-6 text-[13px] text-error">{{ clicksError }}</p>
 
           <EmptyState
             v-else-if="clicks.length === 0"
             class="mt-6"
             title="这段时间还没有点击"
-            description="明细来自点击事件表，worker 每 2 秒回刷一次；刚发生的跳转可能还要几秒才出现。"
+            description="刚发生的访问可能需要几秒才会出现在这里。"
           />
 
           <template v-else>
@@ -738,13 +781,11 @@ onUnmounted(() => {
           </template>
         </Section>
 
-        <p class="mt-6 text-[13px] text-muted">
-          数字口径：总点击 = 数据库基线 + 待同步增量（worker 每 2 秒回刷）；分布与趋势基于点击明细表。
-        </p>
+        <p class="mt-6 text-[13px] text-muted">点击数据会稍有延迟；趋势和分布展示所选时间范围内的访问。</p>
 
-        <p class="mt-8">
-          <RouterLink :to="{ name: 'dashboard' }" class="text-link">← 返回我的链接</RouterLink>
-        </p>
+        <nav class="mt-8 flex border-t-2 border-ink/15 pt-6" aria-label="返回导航">
+          <BackButton :to="{ name: 'dashboard' }">返回我的链接</BackButton>
+        </nav>
       </template>
     </div>
   </div>

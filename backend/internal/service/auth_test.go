@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"uuid"
@@ -16,6 +17,7 @@ import (
 
 // stubUserRepo 是内存版账号仓储：够用，且不把 store 拉进 service 的单测。
 type stubUserRepo struct {
+	mu      sync.Mutex
 	byEmail map[string]*domain.User
 	// queryErr 非 nil 时所有查询都失败，用来验证「依赖故障不会被吞成凭据错误」。
 	queryErr error
@@ -32,6 +34,8 @@ func newStubUserRepo(users ...*domain.User) *stubUserRepo {
 }
 
 func (r *stubUserRepo) Create(_ context.Context, u *domain.User) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	key := domain.NormalizeEmail(u.Email)
 	if _, ok := r.byEmail[key]; ok {
 		return domain.Conflict("email", u.Email)
@@ -41,6 +45,8 @@ func (r *stubUserRepo) Create(_ context.Context, u *domain.User) error {
 }
 
 func (r *stubUserRepo) GetByEmail(_ context.Context, email string) (*domain.User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.queries = append(r.queries, email)
 	if r.queryErr != nil {
 		return nil, r.queryErr
@@ -52,6 +58,8 @@ func (r *stubUserRepo) GetByEmail(_ context.Context, email string) (*domain.User
 }
 
 func (r *stubUserRepo) GetByID(_ context.Context, id uuid.UUID) (*domain.User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.queryErr != nil {
 		return nil, r.queryErr
 	}

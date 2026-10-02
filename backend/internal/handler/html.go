@@ -11,53 +11,53 @@ import (
 
 // pageCSS 是短码失效页与口令页共用的样式。
 //
-// 风格遵循 DESIGN.md：暖奶油画布 #faf9f5、深墨色正文 #141413、
-// 珊瑚主色 #cc785c 只用在 CTA 上、衬线大标题、圆角 md(8px)。
+// 风格遵循 DESIGN.md：暖奶油画布 #fffdf5、深墨色正文 #171717、
+// 珊瑚主色 #39d5c5 只用在 CTA 上、衬线大标题、圆角 md(8px)。
 // 刻意不引外部 CSS/字体 —— 这两张页面都在跳转链路上，网络异常时也要能秒开。
 //
 // 抽成一份而不是各写一遍：口令页与失效页是同一个入口（GET / POST /{code}）的两个分支，
 // 样式一旦漂移，用户会以为跳到了别的站点。
 const pageCSS = `  :root {
-    --canvas: #faf9f5; --ink: #141413; --body: #3d3d3a;
-    --muted: #6c6a64; --hairline: #e6dfd8; --primary: #cc785c;
+    --canvas: #fffdf5; --ink: #171717; --body: #3d3d3a;
+    --muted: #6c6a64; --hairline: #171717; --primary: #39d5c5;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
     background: var(--canvas); color: var(--ink);
     font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    padding: 32px;
+    padding: 20px;
   }
-  main { max-width: 560px; width: 100%; }
+  main { max-width: 560px; width: 100%; padding: 28px; border: 3px solid var(--ink); box-shadow: 6px 6px 0 var(--ink); background: #fff; }
   .code {
     font-size: 13px; font-weight: 500; letter-spacing: 1.5px; text-transform: uppercase;
     color: var(--muted); margin: 0 0 16px;
   }
   h1 {
-    font-family: "Cormorant Garamond", Tiempos Headline, Garamond, "Times New Roman", serif;
-    font-weight: 400; font-size: 48px; line-height: 1.1; letter-spacing: -1px; margin: 0 0 16px;
+    font-family: inherit;
+    font-weight: 800; font-size: clamp(28px, 6vw, 44px); line-height: 1.1; letter-spacing: -1px; margin: 0 0 16px;
   }
   p { font-size: 16px; line-height: 1.55; color: var(--body); margin: 0 0 32px; }
   a.home {
     display: inline-block; height: 40px; line-height: 40px; padding: 0 20px;
-    background: var(--primary); color: #fff; border-radius: 8px;
+    background: var(--primary); color: var(--ink); border-radius: 4px;
     font-size: 14px; font-weight: 500; text-decoration: none;
   }
   .error {
-    margin: -16px 0 24px; padding: 10px 14px; border-radius: 8px;
+    margin: -16px 0 24px; padding: 10px 14px; border-radius: 4px;
     background: #fbeee9; color: #8a3b21; font-size: 14px;
   }
   form { margin: 0 0 8px; }
   label { display: block; font-size: 13px; font-weight: 500; color: var(--muted); margin: 0 0 8px; }
   input[type="password"] {
     width: 100%; height: 44px; padding: 0 12px; margin: 0 0 16px;
-    border: 1px solid var(--hairline); border-radius: 8px;
+    border: 2px solid var(--hairline); border-radius: 4px;
     background: #fff; color: var(--ink); font-size: 15px; font-family: inherit;
   }
   input[type="password"]:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
   button {
-    width: 100%; height: 44px; border: 0; border-radius: 8px;
-    background: var(--primary); color: #fff;
+    width: 100%; height: 48px; border: 2px solid var(--ink); border-radius: 4px;
+    background: var(--primary); color: var(--ink);
     font-size: 15px; font-weight: 500; font-family: inherit; cursor: pointer;
   }
   .rid {

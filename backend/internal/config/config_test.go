@@ -182,3 +182,11 @@ func TestBoolEnvFallbackAndReject(t *testing.T) {
 		}
 	})
 }
+
+func TestPublicBaseRejectsNonOrigin(t *testing.T) {
+	for _, value := range []string{"https://example.com/path", "https://u:p@example.com", "https://example.com?q=1", "https://example.com/#fragment"} {
+		if err := validateBaseURL(value); err == nil {
+			t.Errorf("accepted non-origin %q", value)
+		}
+	}
+}

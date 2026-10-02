@@ -7,8 +7,8 @@
 // 只引 latin 之后是 8 个文件、约 220KB。
 import '@fontsource/inter/latin-400.css'
 import '@fontsource/inter/latin-500.css'
-import '@fontsource/cormorant-garamond/latin-400.css'
-import '@fontsource/cormorant-garamond/latin-500.css'
+import '@fontsource/inter/latin-700.css'
+import '@fontsource/inter/latin-800.css'
 
 import '@/assets/main.css'
 

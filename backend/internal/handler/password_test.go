@@ -133,7 +133,7 @@ func TestRedirectServesPasswordPage(t *testing.T) {
 	})
 
 	t.Run("带着本链接的有效 cookie：302 放行", func(t *testing.T) {
-		cookie := &http.Cookie{Name: unlockCookie, Value: h.unlocker.Issue(lockedCode, time.Now())}
+		cookie := &http.Cookie{Name: unlockCookie, Value: h.unlocker.Issue(lockedCode, 0, time.Now())}
 
 		rr := httptest.NewRecorder()
 		h.serve(rr, getRedirect(t, lockedCode, cookie))
@@ -147,7 +147,7 @@ func TestRedirectServesPasswordPage(t *testing.T) {
 	})
 
 	t.Run("cookie 是给别的短码签的：仍要口令", func(t *testing.T) {
-		cookie := &http.Cookie{Name: unlockCookie, Value: h.unlocker.Issue("othercode", time.Now())}
+		cookie := &http.Cookie{Name: unlockCookie, Value: h.unlocker.Issue("othercode", 0, time.Now())}
 
 		rr := httptest.NewRecorder()
 		h.serve(rr, getRedirect(t, lockedCode, cookie))
@@ -158,7 +158,7 @@ func TestRedirectServesPasswordPage(t *testing.T) {
 	})
 
 	t.Run("cookie 被篡改：仍要口令", func(t *testing.T) {
-		valid := h.unlocker.Issue(lockedCode, time.Now())
+		valid := h.unlocker.Issue(lockedCode, 0, time.Now())
 		cookie := &http.Cookie{Name: unlockCookie, Value: valid[:len(valid)-2] + "zz"}
 
 		rr := httptest.NewRecorder()
@@ -216,7 +216,7 @@ func TestRedirectUnlockPost(t *testing.T) {
 		if c.Secure {
 			t.Error("http 部署下不能带 Secure：浏览器会直接拒收，表现为「口令输对了也跳不过去」")
 		}
-		if err := h.unlocker.Verify(lockedCode, c.Value, time.Now()); err != nil {
+		if err := h.unlocker.Verify(lockedCode, c.Value, 0, time.Now()); err != nil {
 			t.Errorf("种下的 cookie 必须是合法凭据：%v", err)
 		}
 		if c.MaxAge != int(lockedLifetime.Seconds()) {
@@ -230,7 +230,7 @@ func TestRedirectUnlockPost(t *testing.T) {
 		// 直接调 setUnlockCookie：这条用例只关心 cookie 属性，
 		// 没必要为了它再跑一次 bcrypt（口令校验的成败已由上面两条覆盖）
 		rr := httptest.NewRecorder()
-		h.setUnlockCookie(rr, lockedCode)
+		h.setUnlockCookie(rr, lockedCode, 0)
 
 		cookies := rr.Result().Cookies()
 		if len(cookies) != 1 {

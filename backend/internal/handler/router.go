@@ -26,6 +26,7 @@ type Options struct {
 	Limiter domain.RateLimiter
 	// DeltaBatch 读取列表页尚未回刷进 PG 的计数增量；nil 表示列表只报 PG 基线。
 	DeltaBatch domain.ClickDeltaBatchReader
+	Totals     domain.ClickTotals
 	// Unlock 签发/校验短链访问口令的解锁凭据；nil 时带口令的链接一律不放行（fail-closed）。
 	Unlock *service.LinkUnlocker
 	// SecureCookies 为 true 时解锁 cookie 带 Secure（仅 https 部署）。
@@ -90,6 +91,7 @@ func Router(opts Options) http.Handler {
 		pageSize:    opts.PageSize,
 		maxPageSize: opts.MaxPageSize,
 		deltas:      opts.DeltaBatch,
+		totals:      opts.Totals,
 	}
 	statsAPI := &statsHandler{shortener: opts.Shortener, stats: opts.Stats}
 	clickAPI := &clickHandler{

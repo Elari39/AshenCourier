@@ -5,41 +5,61 @@
  * 与 `composables/useAuth.ts`（需要写 token）都能引用而不产生循环依赖。
  */
 
+import type { User } from './types'
+
 const TOKEN_KEY = 'ashen:token'
 const USER_KEY = 'ashen:user'
 const MANAGE_KEYS_KEY = 'ashen:manageKeys'
 
 /** 401 时的回调，由 useAuth 注册（清空本地会话并跳登录页）。 */
 let unauthorizedHandler: (() => void) | null = null
+// Failed writes must not let a stale persisted token override the current session.
+const memory = new Map<string, string | null>()
+const volatile = new Set<string>()
 
-/** 读取 localStorage 里的令牌；不可用时返回 null。 */
-export function loadToken(): string | null {
+function read(key: string): string | null {
+  if (volatile.has(key)) return memory.get(key) ?? null
   try {
-    return window.localStorage.getItem(TOKEN_KEY)
+    const value = window.localStorage.getItem(key)
+    memory.set(key, value)
+    return value
   } catch {
-    // 隐私模式下 localStorage 可能抛错，按「未登录」处理
-    return null
+    return memory.get(key) ?? null
   }
+}
+
+function write(key: string, value: string | null): void {
+  memory.set(key, value)
+  try {
+    if (value === null) window.localStorage.removeItem(key)
+    else window.localStorage.setItem(key, value)
+    volatile.delete(key)
+  } catch {
+    volatile.add(key)
+  }
+}
+
+/** 读取当前令牌；存储不可用时使用内存会话。 */
+export function loadToken(): string | null {
+  return read(TOKEN_KEY) || null
 }
 
 /** 写入令牌；传 null 表示登出。 */
 export function saveToken(token: string | null): void {
-  try {
-    if (token === null) {
-      window.localStorage.removeItem(TOKEN_KEY)
-    } else {
-      window.localStorage.setItem(TOKEN_KEY, token)
-    }
-  } catch {
-    /* 存储不可用时静默降级为「仅本次会话有效」 */
-  }
+  write(TOKEN_KEY, token)
 }
 
 /** 读取缓存的用户对象。 */
-export function loadUser<T>(): T | null {
+export function loadUser(): User | null {
   try {
-    const raw = window.localStorage.getItem(USER_KEY)
-    return raw ? (JSON.parse(raw) as T) : null
+    const raw = read(USER_KEY)
+    const value: unknown = raw ? JSON.parse(raw) : null
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const user = value as Record<string, unknown>
+    if (typeof user.id !== 'string' || !user.id || typeof user.email !== 'string') return null
+    if (user.display_name !== undefined && typeof user.display_name !== 'string') return null
+    if (user.created_at !== undefined && typeof user.created_at !== 'string') return null
+    return user as unknown as User
   } catch {
     return null
   }
@@ -47,24 +67,20 @@ export function loadUser<T>(): T | null {
 
 /** 缓存用户对象。 */
 export function saveUser(user: unknown | null): void {
-  try {
-    if (user === null) {
-      window.localStorage.removeItem(USER_KEY)
-    } else {
-      window.localStorage.setItem(USER_KEY, JSON.stringify(user))
-    }
-  } catch {
-    /* 同上 */
-  }
+  write(USER_KEY, user === null ? null : JSON.stringify(user))
 }
 
 /** 读取「短码 → 匿名管理密钥」映射。 */
 export function loadManageKeys(): Record<string, string> {
   try {
-    const raw = window.localStorage.getItem(MANAGE_KEYS_KEY)
+    const raw = read(MANAGE_KEYS_KEY)
     const parsed: unknown = raw ? JSON.parse(raw) : null
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, string>
+      return Object.fromEntries(
+        Object.entries(parsed).filter(
+          ([code, key]) => /^[A-Za-z0-9_-]{3,32}$/.test(code) && typeof key === 'string' && key.length > 0,
+        ),
+      )
     }
     return {}
   } catch {
@@ -74,11 +90,7 @@ export function loadManageKeys(): Record<string, string> {
 
 /** 持久化「短码 → 匿名管理密钥」映射。 */
 export function saveManageKeys(keys: Record<string, string>): void {
-  try {
-    window.localStorage.setItem(MANAGE_KEYS_KEY, JSON.stringify(keys))
-  } catch {
-    /* 同上 */
-  }
+  write(MANAGE_KEYS_KEY, JSON.stringify(keys))
 }
 
 /** 注册 401 处理器；同一次会话只需注册一次。 */

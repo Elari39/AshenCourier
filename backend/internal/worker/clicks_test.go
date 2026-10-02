@@ -726,3 +726,15 @@ func TestHandleBatchWithoutGeoKeepsCountryEmpty(t *testing.T) {
 		t.Errorf("未配置 GeoIP 时 Country 应为空串，实际 %q", got)
 	}
 }
+
+func (c *fakeCounter) FreezeBatch(ctx context.Context, code string) (domain.CountBatch, error) {
+	delta, err := c.TakeDelta(ctx, code)
+	return domain.CountBatch{ID: code, Delta: delta}, err
+}
+func (c *fakeCounter) ConfirmBatch(ctx context.Context, code string, batch domain.CountBatch) error {
+	return c.SettleDelta(ctx, code, batch.Delta)
+}
+func (c *fakeCounts) ApplyCountBatch(ctx context.Context, code string, batch domain.CountBatch) error {
+	_, err := c.AddClickCount(ctx, code, batch.Delta)
+	return err
+}

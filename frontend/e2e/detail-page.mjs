@@ -30,9 +30,9 @@ const MEASURE_QR = `(() => {
     const r = pixels[i]
     const g = pixels[i + 1]
     const b = pixels[i + 2]
-    // 深墨 #141413 与暖奶油 #faf9f5
-    if (r === 20 && g === 20 && b === 19) dark++
-    else if (r === 250 && g === 249 && b === 245) light++
+    // 深墨 #171717 与纯白 #ffffff
+    if (r === 23 && g === 23 && b === 23) dark++
+    else if (r === 255 && g === 255 && b === 255) light++
   }
 
   return {
@@ -151,17 +151,17 @@ export async function register({ checks, session, base, fixture, expectedClicks,
     assertEqual(qr.bitmapHeight, 320, '位图高度不是 320')
   })
 
-  await checks.run('画布真实绘制过：像素里同时有深墨与暖奶油', async () => {
+  await checks.run('画布真实绘制过：像素里同时有深墨与纯白', async () => {
     const qr = await session.evaluate(MEASURE_QR)
     assert(qr.darkPixels > 2000, `深墨像素太少（${qr.darkPixels}）—— 画布可能没画上`)
-    assert(qr.lightPixels > 2000, `暖奶油像素太少（${qr.lightPixels}）—— 画布可能没画上`)
+    assert(qr.lightPixels > 2000, `纯白像素太少（${qr.lightPixels}）—— 画布可能没画上`)
     const painted = qr.darkPixels + qr.lightPixels
     assert(
       painted >= qr.totalPixels * 0.98,
       `两种配色只覆盖了 ${((painted / qr.totalPixels) * 100).toFixed(2)}% 的像素，` +
-        `说明前景不是深墨/暖奶油，或者画布被撑开后有留白`,
+        `说明前景不是深墨/纯白，或者画布被撑开后有留白`,
     )
-    return `深墨 ${qr.darkPixels} px / 暖奶油 ${qr.lightPixels} px`
+    return `深墨 ${qr.darkPixels} px / 纯白 ${qr.lightPixels} px`
   })
 
   await checks.run('画布矩形落在容器矩形内（没撑破容器）', async () => {
@@ -202,15 +202,15 @@ export async function register({ checks, session, base, fixture, expectedClicks,
 
   const chart = await session.evaluate(MEASURE_CHART)
 
-  await checks.run('折线与面积渐变解析成主题主色 #cc785c（token 类真的生效，而不是回落到默认黑）', async () => {
+  await checks.run('折线与面积渐变解析成主题主色 #39d5c5（token 类真的生效，而不是回落到默认黑）', async () => {
     assert(chart.found, '页面上找不到 svg[aria-label="按天点击趋势折线图"]')
-    // 主色 #cc785c = rgb(204, 120, 92)。回落成默认黑是 rgb(0, 0, 0)。
-    assertEqual(chart.lineStroke, 'rgb(204, 120, 92)', '折线描边不是主色（.chart-line 没生效？）')
-    assertEqual(chart.guideStroke, 'rgb(230, 223, 216)', '参考线不是 hairline 色（.chart-guide 没生效？）')
-    assertEqual(chart.tickFill, 'rgb(142, 139, 130)', '刻度文字不是 muted-soft 色（.chart-tick 没生效？）')
+    // 主色 #39d5c5 = rgb(57, 213, 197)。回落成默认黑是 rgb(0, 0, 0)。
+    assertEqual(chart.lineStroke, 'rgb(57, 213, 197)', '折线描边不是主色（.chart-line 没生效？）')
+    assertEqual(chart.guideStroke, 'rgb(23, 23, 23)', '参考线不是 hairline 色（.chart-guide 没生效？）')
+    assertEqual(chart.tickFill, 'rgb(104, 102, 94)', '刻度文字不是 muted-soft 色（.chart-tick 没生效？）')
     assertEqual(chart.stopColors.length, 2, '面积渐变应该有 2 个 stop')
     for (const color of chart.stopColors) {
-      assertEqual(color, 'rgb(204, 120, 92)', `渐变 stop 不是主色：${color}`)
+      assertEqual(color, 'rgb(57, 213, 197)', `渐变 stop 不是主色：${color}`)
     }
     return `折线 ${chart.lineStroke} / 参考线 ${chart.guideStroke} / 刻度 ${chart.tickFill} / 刻度字号 ${chart.tickFontSize}`
   })

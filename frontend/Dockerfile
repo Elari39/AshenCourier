@@ -49,6 +49,7 @@ COPY deploy/nginx/nginx.conf /etc/nginx/nginx.conf
 # （nginx 的 add_header 是替换而不是合并，理由见该文件顶部）。
 # 路径写死成 /etc/nginx/security-headers.conf —— 与 nginx.conf 里的 include 一致。
 COPY deploy/nginx/security-headers.conf /etc/nginx/security-headers.conf
+COPY deploy/nginx/trusted-proxies.conf /etc/nginx/trusted-proxies.conf
 
 COPY --from=build /app/dist /usr/share/nginx/html
 

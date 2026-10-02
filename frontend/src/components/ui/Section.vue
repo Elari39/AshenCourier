@@ -18,7 +18,7 @@ defineProps<{
 
 <template>
   <Card class="mt-6 p-6 md:p-8">
-    <div class="flex flex-wrap items-center justify-between gap-4">
+    <div class="section-heading flex flex-wrap items-center justify-between gap-4">
       <h2 class="eyebrow">{{ eyebrow }}</h2>
       <div v-if="$slots.actions" class="flex flex-wrap items-center gap-3">
         <slot name="actions" />

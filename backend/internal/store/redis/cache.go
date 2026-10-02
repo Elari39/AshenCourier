@@ -44,7 +44,8 @@ type cachedLinkWire struct {
 	ExpiresAt *time.Time `json:"expires_at,omitzero"`
 	// PasswordProtected 只记「有没有口令」；摘要留在 PG 里，缓存里不放（见 domain.CachedLink）。
 	// 加字段是兼容变更（老条目解出来是 false）；禁的是改名。
-	PasswordProtected bool `json:"password_protected,omitzero"`
+	PasswordVersion   int64 `json:"password_version"`
+	PasswordProtected bool  `json:"password_protected,omitzero"`
 	// DomainID 是所属自定义域名；空串表示默认域名（不用指针，省一层 nil 判断）。
 	// 同样是兼容变更：老条目没有这个字段，解出来是空串 = 默认域名，与事实一致。
 	DomainID string `json:"domain_id,omitzero"`
@@ -100,6 +101,7 @@ func (c *Cache) Put(ctx context.Context, link *domain.CachedLink, ttl time.Durat
 		ExpiresAt: link.ExpiresAt,
 
 		PasswordProtected: link.PasswordProtected,
+		PasswordVersion:   link.PasswordVersion,
 		DomainID:          formatUUID(link.DomainID),
 	})
 	if err != nil {
@@ -164,6 +166,7 @@ func (w cachedLinkWire) toDomain() (*domain.CachedLink, error) {
 		ExpiresAt: w.ExpiresAt,
 
 		PasswordProtected: w.PasswordProtected,
+		PasswordVersion:   w.PasswordVersion,
 		DomainID:          domainID,
 	}, nil
 }

@@ -138,10 +138,7 @@ watch(pending, async (now, before) => {
           <Button ref="cancelRef" variant="secondary" @click="settle(false)">
             {{ pending.cancelText }}
           </Button>
-          <Button
-            :variant="pending.variant === 'danger' ? 'danger' : 'primary'"
-            @click="settle(true)"
-          >
+          <Button :variant="pending.variant === 'danger' ? 'danger' : 'primary'" @click="settle(true)">
             {{ pending.confirmText }}
           </Button>
         </div>

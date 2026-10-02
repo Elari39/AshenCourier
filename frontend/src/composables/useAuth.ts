@@ -8,18 +8,11 @@
 import { computed, ref } from 'vue'
 
 import { authApi } from '@/api/client'
-import {
-  loadManageKeys,
-  loadToken,
-  loadUser,
-  saveManageKeys,
-  saveToken,
-  saveUser,
-} from '@/api/session'
+import { loadManageKeys, loadToken, loadUser, saveManageKeys, saveToken, saveUser } from '@/api/session'
 import type { LoginPayload, RegisterPayload, SessionResponse, User } from '@/api/types'
 
 const token = ref<string | null>(loadToken())
-const user = ref<User | null>(loadUser<User>())
+const user = ref<User | null>(loadUser())
 /** 短码 → 匿名管理密钥。匿名创建的链接靠它才能再管理。 */
 const manageKeys = ref<Record<string, string>>(loadManageKeys())
 
@@ -72,7 +65,7 @@ function forgetManageKey(code: string): void {
 
 /** 取某条短链的管理密钥。 */
 function manageKeyFor(code: string): string | undefined {
-  return manageKeys.value[code]
+  return Object.hasOwn(manageKeys.value, code) ? manageKeys.value[code] : undefined
 }
 
 /** 登录态与匿名密钥的操作集合。 */
@@ -99,7 +92,9 @@ export function useAuth() {
   /** 用 /api/auth/me 校验令牌是否仍然有效，并刷新用户资料。 */
   async function refreshMe(): Promise<User | null> {
     if (!token.value) return null
+    const requestToken = token.value
     const me = await authApi.me()
+    if (token.value !== requestToken) return null
     applyUser(me)
     return me
   }

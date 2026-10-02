@@ -61,6 +61,7 @@ type CachedLink struct {
 	//
 	// 缓存里**只放这一个布尔**，不放 bcrypt 摘要：Redis 转储泄露不该 enable 离线爆破，
 	// 而跳转路径只需要知道「有没有口令」。真正的比对发生在 POST /{code}（库读 + IP 限流）。
+	PasswordVersion   int64
 	PasswordProtected bool
 }
 

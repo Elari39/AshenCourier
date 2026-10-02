@@ -58,36 +58,38 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 }
 
-// Run 启动服务并阻塞，直到 ctx 取消后完成优雅关闭。
+// Run waits for in-flight requests before returning, so click draining cannot run early.
 //
-// ctx 取消时通过 context.AfterFunc 触发关闭：
+// ctx 取消时同步等待 Shutdown：
 // 关闭用的 context 从 ctx 派生但去掉取消（context.WithoutCancel），
 // 否则「ctx 已取消」会让 Shutdown 立刻失败。
 func (s *Server) Run(ctx context.Context) error {
+	return s.run(ctx, s.http.ListenAndServe)
+}
+
+func (s *Server) run(ctx context.Context, serve func() error) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		s.logger.Info("HTTP 服务已启动", "addr", s.http.Addr)
-		if err := s.http.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := serve(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- fmt.Errorf("httpx: listen and serve: %w", err)
 			return
 		}
 		serveErr <- nil
 	}()
 
-	stop := context.AfterFunc(ctx, func() {
+	select {
+	case err := <-serveErr:
+		return err
+	case <-ctx.Done():
 		s.logger.Info("收到退出信号，开始优雅关闭", "timeout", s.shutdownTimeout)
-
-		shutdownCtx, cancel := context.WithTimeoutCause(
-			context.WithoutCancel(ctx), s.shutdownTimeout, errShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeoutCause(context.WithoutCancel(ctx), s.shutdownTimeout, errShutdownTimeout)
 		defer cancel()
-
 		if err := s.http.Shutdown(shutdownCtx); err != nil {
-			// 超时：强制断开剩余连接，避免进程卡死
-			s.logger.Error("优雅关闭超时，强制关闭连接", "err", err, "cause", context.Cause(shutdownCtx))
+			s.logger.Error("优雅关闭超时，强制断开连接", "err", err)
 			_ = s.http.Close()
 		}
-	})
-	defer stop()
-
-	return <-serveErr
+		// Shutdown returns only after handlers have finished. The caller can now drain clicks.
+		return <-serveErr
+	}
 }

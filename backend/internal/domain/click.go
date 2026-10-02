@@ -202,3 +202,29 @@ type ClickRepository interface {
 	// 并返回下一页游标（末页 Valid=false）。
 	ListByLink(ctx context.Context, q ClickListQuery) ([]ClickEvent, ClickCursor, error)
 }
+
+// CountBatch identifies one immutable retryable transfer from Redis to PostgreSQL.
+type CountBatch struct {
+	ID    string
+	Delta int64
+}
+type CountSnapshot struct {
+	Active int64
+	Batch  CountBatch
+	Epoch  string
+}
+type BatchCounter interface {
+	DirtyCodes(context.Context, int) ([]string, error)
+	FreezeBatch(context.Context, string) (CountBatch, error)
+	ConfirmBatch(context.Context, string, CountBatch) error
+	MarkDirty(context.Context, ...string) error
+}
+type CountSnapshotReader interface {
+	CountSnapshots(context.Context, []string) (map[string]CountSnapshot, error)
+}
+type CountBaselineReader interface {
+	CountBaselines(context.Context, map[string]CountSnapshot) (map[string]int64, error)
+}
+type ClickTotals interface {
+	TotalCounts(context.Context, []string) (map[string]int64, error)
+}

@@ -249,6 +249,9 @@ func validateBaseURL(raw string) error {
 	if u.Host == "" {
 		return fmt.Errorf("config: PUBLIC_BASE_URL 缺少主机名：%q", raw)
 	}
+	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("config: PUBLIC_BASE_URL 必须是纯源，不能带凭据、路径、查询参数或片段")
+	}
 	return nil
 }
 

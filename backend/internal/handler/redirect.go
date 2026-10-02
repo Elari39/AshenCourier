@@ -74,7 +74,7 @@ func (h *redirectHandler) serve(w http.ResponseWriter, r *http.Request) {
 
 	// 口令闸门放在 Redirectable 之后：死链（已删除 / 已停用 / 已过期）永远不该显示口令页，
 	// 否则等于告诉探测者「这个短码存在，而且被保护」。
-	if link.HasPassword() && !h.unlocked(r, code) {
+	if link.HasPassword() && !h.unlocked(r, code, link.PasswordVersion) {
 		// 口令页不是跳转，因此**不计点击** —— 统计只认真正的跳转。
 		// 状态码用 200：这是一张正常内容页，不是「请求失败」。
 		writePasswordPage(w, r, code, "", http.StatusOK)
@@ -174,10 +174,10 @@ func (h *redirectHandler) unlock(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 与 Resolve 用同一个 Host：否则可以从 A 域提交口令去解锁一条属于 B 域的短链
-	err := h.shortener.VerifyPassword(r.Context(), r.Host, code, r.PostFormValue("password"))
+	verified, err := h.shortener.VerifiedPassword(r.Context(), r.Host, code, r.PostFormValue("password"))
 	switch {
 	case err == nil:
-		h.setUnlockCookie(w, code)
+		h.setUnlockCookie(w, code, verified.PasswordVersion)
 		// 303 + 相对 Location：让浏览器改用 GET 回到同一个地址
 		// （那一次才是真正的跳转，也只记一次点击）
 		w.Header().Set("Location", "/"+code)
@@ -196,7 +196,7 @@ func (h *redirectHandler) unlock(w http.ResponseWriter, r *http.Request) {
 }
 
 // unlocked 判断本次请求是否带着有效的解锁凭据。
-func (h *redirectHandler) unlocked(r *http.Request, code string) bool {
+func (h *redirectHandler) unlocked(r *http.Request, code string, version int64) bool {
 	if h.unlocker == nil {
 		return false
 	}
@@ -204,17 +204,17 @@ func (h *redirectHandler) unlocked(r *http.Request, code string) bool {
 	if err != nil {
 		return false
 	}
-	return h.unlocker.Verify(code, cookie.Value, time.Now()) == nil
+	return h.unlocker.Verify(code, cookie.Value, version, time.Now()) == nil
 }
 
 // setUnlockCookie 下发「已解锁」cookie。
 //
 // 一个浏览器只记一条链接的解锁状态（code 在签名体里）：不为每条链接种一个 cookie，
 // 否则 cookie 数量会随浏览过的受保护链接无界增长。
-func (h *redirectHandler) setUnlockCookie(w http.ResponseWriter, code string) {
+func (h *redirectHandler) setUnlockCookie(w http.ResponseWriter, code string, version int64) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     unlockCookie,
-		Value:    h.unlocker.Issue(code, time.Now()),
+		Value:    h.unlocker.Issue(code, version, time.Now()),
 		Path:     "/",
 		MaxAge:   int(h.unlocker.TTL().Seconds()),
 		HttpOnly: true,

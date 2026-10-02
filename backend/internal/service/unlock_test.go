@@ -18,12 +18,12 @@ func TestLinkUnlockerRoundTrip(t *testing.T) {
 
 	unlocker := NewLinkUnlocker(unlockTestSecret, 30*time.Minute)
 	now := time.Now()
-	token := unlocker.Issue("abc123", now)
+	token := unlocker.Issue("abc123", 0, now)
 
-	if err := unlocker.Verify("abc123", token, now); err != nil {
+	if err := unlocker.Verify("abc123", token, 0, now); err != nil {
 		t.Fatalf("刚签发的凭据应当有效：%v", err)
 	}
-	if err := unlocker.Verify("abc123", token, now.Add(29*time.Minute)); err != nil {
+	if err := unlocker.Verify("abc123", token, 0, now.Add(29*time.Minute)); err != nil {
 		t.Fatalf("TTL 内应当仍然有效：%v", err)
 	}
 
@@ -40,14 +40,14 @@ func TestLinkUnlockerRoundTrip(t *testing.T) {
 		{"解码后没有分隔符", "abc123", "YWJj", now},
 		{"过期时间不是数字", "abc123", "eHh4fHh4", now},
 		{"签名被截断", "abc123", token[:len(token)-4], now},
-		{"另一个 secret 签的", "abc123", NewLinkUnlocker("another-secret-9876543210", 30*time.Minute).Issue("abc123", now), now},
+		{"另一个 secret 签的", "abc123", NewLinkUnlocker("another-secret-9876543210", 30*time.Minute).Issue("abc123", 0, now), now},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := unlocker.Verify(tt.code, tt.token, tt.at)
+			err := unlocker.Verify(tt.code, tt.token, 0, tt.at)
 			if err == nil {
 				t.Fatal("无效凭据必须被拒绝")
 			}
@@ -68,12 +68,24 @@ func TestLinkUnlockerSeparatesCodes(t *testing.T) {
 	unlocker := NewLinkUnlocker(unlockTestSecret, time.Minute)
 	now := time.Now()
 
-	a := unlocker.Issue("codeaaa", now)
-	b := unlocker.Issue("codebbb", now)
+	a := unlocker.Issue("codeaaa", 0, now)
+	b := unlocker.Issue("codebbb", 0, now)
 	if a == b {
 		t.Fatal("不同短码的凭据不该相同")
 	}
-	if err := unlocker.Verify("codebbb", a, now); !errors.Is(err, domain.ErrUnauthorized) {
+	if err := unlocker.Verify("codebbb", a, 0, now); !errors.Is(err, domain.ErrUnauthorized) {
 		t.Fatalf("A 的凭据用在 B 上必须被拒，实际 %v", err)
+	}
+}
+
+func TestUnlockPasswordVersionRevokesCredentials(t *testing.T) {
+	u := NewLinkUnlocker("test-version-secret", time.Hour)
+	now := time.Now()
+	token := u.Issue("version-code", 4, now)
+	if err := u.Verify("version-code", token, 4, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.Verify("version-code", token, 5, now); err == nil {
+		t.Fatal("old password credential survived version change")
 	}
 }

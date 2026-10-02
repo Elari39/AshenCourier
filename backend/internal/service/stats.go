@@ -27,11 +27,16 @@ const (
 type Stats struct {
 	clicks domain.ClickRepository
 	delta  domain.ClickDeltaReader
+	totals domain.ClickTotals
 }
 
 // NewStats 构造统计服务。
-func NewStats(clicks domain.ClickRepository, delta domain.ClickDeltaReader) *Stats {
-	return &Stats{clicks: clicks, delta: delta}
+func NewStats(clicks domain.ClickRepository, delta domain.ClickDeltaReader, totals ...domain.ClickTotals) *Stats {
+	s := &Stats{clicks: clicks, delta: delta}
+	if len(totals) > 0 {
+		s.totals = totals[0]
+	}
+	return s
 }
 
 // StatsResult 是一次统计查询的结果，可直接映射成 API 响应。
@@ -86,6 +91,14 @@ func (s *Stats) ForLink(ctx context.Context, link *domain.Link, days int) (*Stat
 
 	// 基线之外再叠加尚未落库的增量；读不到就退化成「只报基线」，
 	// 数字略滞后好过整个接口 5xx。
+	if s.totals != nil {
+		counts, err := s.totals.TotalCounts(ctx, []string{link.ShortCode})
+		if err != nil {
+			return nil, err
+		}
+		result.TotalClicks = counts[link.ShortCode]
+		return result, nil
+	}
 	delta, err := s.delta.PendingDelta(ctx, link.ShortCode)
 	if err != nil {
 		slog.Warn("读取待同步点击增量失败，总点击将只反映 PG 基线",

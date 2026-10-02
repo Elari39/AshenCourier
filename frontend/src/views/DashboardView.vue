@@ -111,7 +111,7 @@ async function reload(): Promise<void> {
 
 /** 追加下一页。 */
 async function loadMore(): Promise<void> {
-  if (!hasMore.value || loadingMore.value) return
+  if (!hasMore.value || loadingMore.value || loading.value) return
 
   const { signal, isStale } = listGuard.begin()
   loadingMore.value = true
@@ -139,6 +139,7 @@ async function loadMore(): Promise<void> {
 
 /** 删除一条（软删除）。 */
 async function handleDelete(code: string): Promise<void> {
+  if (deletingCode.value) return
   // 说清楚「短码不会再被复用」是必要的：用户以为删了就能把码腾出来，
   // 是最容易产生误解的一点（见 README「已知限制」）。
   const ok = await confirm({
@@ -147,7 +148,7 @@ async function handleDelete(code: string): Promise<void> {
     confirmText: '删除',
     variant: 'danger',
   })
-  if (!ok) return
+  if (!ok || deletingCode.value) return
 
   deletingCode.value = code
   try {
@@ -165,12 +166,15 @@ function onCreated(payload: { link: Link; manageKey?: string }): void {
   latest.value = payload
   toast.success('短链已创建')
   // 新建的链接排在最前（后端按 created_at DESC），直接插到列表头部
-  links.value = [payload.link, ...links.value]
+  void reload()
 }
 
 // 搜索 / 标签筛选：300ms 防抖，避免每敲一个字就打一次接口
 let searchTimer: number | undefined
 watch([query, tagFilter], () => {
+  listGuard.cancel()
+  loading.value = true
+  loadingMore.value = false
   window.clearTimeout(searchTimer)
   searchTimer = window.setTimeout(() => void reload(), 300)
 })
@@ -201,11 +205,7 @@ onUnmounted(() => {
 
       <!-- 创建区（奶油卡片） -->
       <Card class="mt-8 p-6 md:p-8">
-        <p class="title-md">新建短链</p>
-        <p class="mt-1.5 text-[14px] text-muted">登录状态下创建的链接会直接归属到你的账号。</p>
-        <div class="mt-5">
-          <ShortenForm @created="onCreated" />
-        </div>
+        <ShortenForm @created="onCreated" />
       </Card>
 
       <!-- 刚创建的结果卡（深色） -->
@@ -216,8 +216,8 @@ onUnmounted(() => {
       <!-- 指标卡 3-up -->
       <div class="mt-6 grid gap-4 sm:grid-cols-3">
         <StatCard label="已加载链接" :value="totalLinks" hint="当前列表中的条数" />
-        <StatCard label="累计点击" :value="totalClicks" hint="已加载链接的点击之和" />
-        <StatCard label="正常状态" :value="activeLinks" hint="status = active" />
+        <StatCard label="已加载链接点击" :value="totalClicks" hint="已加载链接的点击之和" />
+        <StatCard label="正常状态" :value="activeLinks" hint="当前列表中处于正常状态的链接" />
       </div>
 
       <!-- 列表 + 搜索 -->
@@ -226,11 +226,7 @@ onUnmounted(() => {
           <p class="title-md">链接列表</p>
           <div class="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
             <div class="w-full sm:w-40">
-              <Input
-                v-model="tagFilter"
-                placeholder="按标签筛选"
-                aria-label="按标签筛选"
-              />
+              <Input v-model="tagFilter" placeholder="按标签筛选" aria-label="按标签筛选" />
             </div>
             <div class="w-full sm:w-64">
               <Input v-model="query" placeholder="搜索短码 / 标题 / 目标地址" aria-label="搜索链接" />
@@ -241,13 +237,12 @@ onUnmounted(() => {
         <div class="mt-6">
           <Skeleton v-if="loading" :lines="4" height="h-14" />
 
-          <p v-else-if="loadError" class="text-[14px] text-error">{{ loadError }}</p>
+          <div v-else-if="loadError" role="alert">
+            <p class="text-[14px] text-error">{{ loadError }}</p>
+            <Button class="mt-3" variant="secondary" @click="reload">重新加载</Button>
+          </div>
 
-          <EmptyState
-            v-else-if="links.length === 0"
-            :title="emptyTitle"
-            :description="emptyDescription"
-          />
+          <EmptyState v-else-if="links.length === 0" :title="emptyTitle" :description="emptyDescription" />
 
           <template v-else>
             <LinkTable

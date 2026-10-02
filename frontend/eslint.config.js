@@ -43,6 +43,9 @@ export default tseslint.config(
       'vue/require-default-prop': 'off',
       // 属性换行交给 Prettier 决定
       'vue/max-attributes-per-line': 'off',
+      'vue/html-closing-bracket-newline': 'off',
+      'vue/html-indent': 'off',
+      'vue/multiline-html-element-content-newline': 'off',
       'vue/singleline-html-element-content-newline': 'off',
       'vue/html-self-closing': [
         'error',

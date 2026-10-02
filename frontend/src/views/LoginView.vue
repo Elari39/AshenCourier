@@ -63,7 +63,7 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <div class="bg-canvas py-16 md:py-24">
+  <div class="auth-canvas bg-canvas py-16 md:py-24">
     <div class="container-page">
       <div class="mx-auto w-full max-w-md">
         <PageHeader eyebrow="Welcome back" title="登录" align="center">
@@ -101,7 +101,8 @@ async function submit(): Promise<void> {
         </Card>
 
         <p class="mt-6 text-center text-[13px] text-muted-soft">
-          不想注册也可以直接用 —— <RouterLink :to="{ name: 'landing' }" class="text-link">匿名创建短链</RouterLink>
+          不想注册也可以直接用 ——
+          <RouterLink :to="{ name: 'landing' }" class="text-link">匿名创建短链</RouterLink>
         </p>
       </div>
     </div>

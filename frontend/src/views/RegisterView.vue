@@ -75,7 +75,7 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <div class="bg-canvas py-16 md:py-24">
+  <div class="auth-canvas bg-canvas py-16 md:py-24">
     <div class="container-page">
       <div class="mx-auto w-full max-w-md">
         <PageHeader eyebrow="Get started" title="创建账号" align="center">

@@ -21,6 +21,7 @@ type linkHandler struct {
 	maxPageSize int
 	// deltas 读取列表页尚未回刷进 PG 的计数增量；nil 表示不叠加（只报 PG 基线）。
 	deltas domain.ClickDeltaBatchReader
+	totals domain.ClickTotals
 }
 
 // create 处理 POST /api/links。登录与匿名均可调用。
@@ -106,6 +107,24 @@ func (h *linkHandler) list(w http.ResponseWriter, r *http.Request) {
 // 失败只记 warn 并返回 nil（调用方退回纯基线）：统计侧读不到不能让列表变成 5xx ——
 // 数字稍滞后是可接受的降级，接口整体不可用不是。
 func (h *linkHandler) pendingDeltas(ctx context.Context, links []domain.Link) map[string]int64 {
+	if h.totals != nil && len(links) > 0 {
+		codes := make([]string, len(links))
+		for i := range links {
+			codes[i] = links[i].ShortCode
+		}
+		counts, err := h.totals.TotalCounts(ctx, codes)
+		if err != nil {
+			slog.Warn("读取总点击失败，保留数据库基线", "err", err)
+			return nil
+		}
+		for i := range links {
+			if total, ok := counts[links[i].ShortCode]; ok {
+				links[i].ClickCount = total
+			}
+		}
+		return nil
+	}
+
 	if h.deltas == nil || len(links) == 0 {
 		return nil
 	}
@@ -130,6 +149,12 @@ func (h *linkHandler) get(w http.ResponseWriter, r *http.Request) {
 	link, ok := loadAuthorized(w, r, h.shortener, true)
 	if !ok {
 		return
+	}
+	if h.totals != nil {
+		counts, err := h.totals.TotalCounts(r.Context(), []string{link.ShortCode})
+		if err == nil {
+			link.ClickCount = counts[link.ShortCode]
+		}
 	}
 	httpx.WriteJSON(w, r, http.StatusOK, toLinkDTO(link, h.shortener.ShortURL(r.Context(), link)))
 }

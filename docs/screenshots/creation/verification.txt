@@ -1,0 +1,4 @@
+Default creation expires 24 hours from submit; result displays expiry.
+Permanent works; next creation returns to 24-hour default.
+Custom expiry and password validation focus their fields; 7-day protected creation and tags work.
+Advanced layout verified at 390/768/1440px; no console errors.

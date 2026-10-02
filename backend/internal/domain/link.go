@@ -80,6 +80,7 @@ type Link struct {
 	// 之所以要这个冗余布尔：跳转路径只读 Redis 缓存，而缓存里不放 bcrypt 摘要
 	// （转储泄露不该 enable 离线爆破），因此缓存回填的实体只有这个标志位；
 	// 库读路径一定同时填好两者。判空一律走 HasPassword()。
+	PasswordVersion   int64
 	PasswordProtected bool
 	// Status 是状态机取值。
 	Status LinkStatus
@@ -182,8 +183,7 @@ type LinkCursor struct {
 // 它是 LinkRepository 的一个窄切片：worker 只需要这一个方法，窄接口让 fake 不必
 // 实现整个仓储。
 type ClickCountWriter interface {
-	// AddClickCount 把增量累加进 PG 基线，返回累加后的值；短码不存在返回 *NotFoundError。
-	AddClickCount(ctx context.Context, code string, delta int64) (int64, error)
+	ApplyCountBatch(ctx context.Context, code string, batch CountBatch) error
 }
 
 // ExpiredLinkSweeper 扫描并失效已到期的短链，实现在 internal/store/postgres。
